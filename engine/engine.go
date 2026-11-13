@@ -1151,9 +1151,9 @@ func (e *Engine) drainRuntime() {
 		e.backlogCancel()
 	}
 	e.backlogWorker.Wait()
-	// The janitors stop before the workers drain, and are joined. A job's batch holds connections for as long as it
-	// runs, with no deadline, so a worker that needs a connection to finish its step could otherwise wait on it for as
-	// long as the batch took, with the drain waiting on the worker.
+	// The janitors stop before the workers drain, and are joined. A job's statement holds its connection - a
+	// transaction, until it ends - with no deadline, so a worker that needs a connection to finish its step could
+	// otherwise wait on it for as long as the statement took, with the drain waiting on the worker.
 	if e.janitorCancel != nil {
 		e.janitorCancel()
 	}

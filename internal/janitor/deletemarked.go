@@ -148,11 +148,7 @@ func (d *DeleteMarked) round(ctx context.Context, batch batchFunc) bool {
 	if d.archive == nil {
 		return false
 	}
-	progress, err := sweepRound(ctx, batch, d.batch)
-	if err != nil {
-		d.logError(ctx, "Janitor: taking a connection", "error", err) // the batch did not run
-	}
-	return progress
+	return sweepRound(ctx, batch, d.batch)
 }
 
 // batch takes one batch of the sweep on h, beginning a sweep when none is under way: a chunk of the large tree in
@@ -164,7 +160,7 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 		return d.chunk(ctx, h, budget)
 	}
 	if !d.w.sweeping {
-		today, _, err := d.archive.TodayLeftOn(ctx, h)
+		today, err := d.archive.Today(ctx)
 		if err != nil {
 			d.logError(ctx, "Janitor: reading today for the marked archive trees", "error", err)
 			return idle

@@ -36,8 +36,6 @@ type Expiration struct {
 	expiration time.Duration
 	pass       ExpirePass
 
-	// j is the janitor the job is added to.
-	j *Janitor
 	// after is the position: the flow_id the next pass reads after, 0 for the oldest. swept is when a pass last came
 	// back to the oldest, and a sweep from the oldest waits an idle wait past it. Only the round and reset touch them.
 	after int
@@ -49,10 +47,8 @@ func NewExpiration(expiration time.Duration, pass ExpirePass) *Expiration {
 	return &Expiration{expiration: expiration, pass: pass}
 }
 
-// attach records the janitor.
-func (x *Expiration) attach(j *Janitor, _ string) {
-	x.j = j
-}
+// attach has nothing to create.
+func (x *Expiration) attach(*Janitor, string) {}
 
 // detach has nothing to release.
 func (x *Expiration) detach() {}
@@ -69,24 +65,25 @@ func (x *Expiration) reset() {
 	x.swept = time.Time{}
 }
 
-// round runs one pass under a turn on the shard, and no connection of its own: the pass ends each tree in a
-// transaction of its own on the shard's DB, which a batch holding a connection could not do without taking a second.
-// It reports the pass's progress, but a sweep from the oldest starts only an idle wait past the last one's end: a sweep
-// that ended a root would otherwise start the next at once, and a steady trickle of expiring flows keep the job
-// sweeping back to back.
-func (x *Expiration) round(ctx context.Context, _ batchFunc) bool {
+// round runs one pass as one batch, the pass ending each tree in a transaction of its own on the shard's DB. It reports
+// the pass's progress, but a sweep from the oldest starts only an idle wait past the last one's end: a sweep that ended
+// a root would otherwise start the next at once, and a steady trickle of expiring flows keep the job sweeping back to
+// back.
+func (x *Expiration) round(ctx context.Context, batch batchFunc) (progress bool) {
 	if x.pass == nil {
 		return false
 	}
 	if x.after == 0 && !x.swept.IsZero() && time.Since(x.swept) < x.idleWait() {
 		return false
 	}
-	ctx, pass := x.j.shard.WaitTurn(ctx)
-	defer pass.Return()
-	next, progress := x.pass(ctx, x.after)
-	x.after = next
-	if next == 0 {
-		x.swept = time.Now()
-	}
+	_ = batch(ctx, func(ctx context.Context, _ handle) error { // one that did not run made no progress
+		var next int
+		next, progress = x.pass(ctx, x.after)
+		x.after = next
+		if next == 0 {
+			x.swept = time.Now()
+		}
+		return nil
+	})
 	return progress
 }

@@ -182,21 +182,10 @@ func (s *SweepArchiving) failingFor(now time.Time) time.Duration {
 
 // round runs the sweep's batches (sweepRound).
 func (s *SweepArchiving) round(ctx context.Context, batch batchFunc) bool {
-	archiving := s.retentionDays > 0
-	if archiving && s.archive == nil {
+	if s.retentionDays > 0 && s.archive == nil {
 		return false // closed roots stay live: there is nowhere to archive them
 	}
-	progress, err := sweepRound(ctx, batch, s.batch)
-	if err != nil {
-		// The batch did not run: its connection could not be taken. An archive failure only where there is an
-		// archive: at a retention of 0 the job deletes.
-		if archiving {
-			s.failure(ctx, "taking a connection", err)
-		} else {
-			s.logError(ctx, "Janitor: taking a connection", "error", err)
-		}
-	}
-	return progress
+	return sweepRound(ctx, batch, s.batch)
 }
 
 // batch takes one batch of the sweep on h, beginning a sweep when none is under way.
@@ -218,7 +207,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	refreshed := true
 	if archiving {
 		d = &filingDay{}
-		if err := refreshDay(ctx, h, s.archive, s.noQuietMargin, d); err != nil {
+		if err := refreshDay(ctx, s.archive, s.noQuietMargin, d); err != nil {
 			s.failure(ctx, "reading today's archive day", err)
 			refreshed = false
 			if d.archive == nil {

@@ -66,9 +66,9 @@ func quietMargin(dayLength time.Duration) time.Duration {
 // refreshDay reads today from the database clock into d, and when to stop archiving into it. The janitor makes no
 // table: today and the days ahead are the archive's maintenance's to make. Tomorrow not whole is an error, an archive
 // failure like a failed move: a row goes into a day only once the day after it is whole, which a locate relies on. d
-// is filled even then, with notWhole set. Today missing fails the move itself. The clock is read on q.
-func refreshDay(ctx context.Context, q sequel.Executor, a *archiver.Archive, noQuietMargin bool, d *filingDay) error {
-	today, left, err := a.TodayLeftOn(ctx, q)
+// is filled even then, with notWhole set. Today missing fails the move itself.
+func refreshDay(ctx context.Context, a *archiver.Archive, noQuietMargin bool, d *filingDay) error {
+	today, left, err := a.TodayLeft(ctx)
 	if err != nil {
 		return errors.Trace(err)
 	}

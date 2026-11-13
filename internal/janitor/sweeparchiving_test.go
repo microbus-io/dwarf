@@ -344,26 +344,6 @@ func TestSweep_AtRetentionZeroItDeletes(t *testing.T) {
 	assert.Equal(1, stamp, "stamped for deletion in chunks")
 }
 
-// TestSweep_AtRetentionZeroAConnectionErrorIsNoArchiveFailure pins that a batch that cannot take its connection is an
-// archive failure only where there is an archive: at a retention of 0 the job deletes, and the error is logged.
-func TestSweep_AtRetentionZeroAConnectionErrorIsNoArchiveFailure(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	for _, retention := range []int{0, 30} {
-		r := newRig(t, retention)
-		r.seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
-		assert.False(r.roundOf(ctx, JobSweepArchiving))
-		failing := r.sweep().failingFor(time.Now())
-		if retention == 0 {
-			assert.Zero(failing, "nothing is archived at a retention of 0")
-			assert.Equal(1, r.logs.count("Janitor: taking a connection"), "logged instead")
-		} else {
-			assert.True(failing > 0, "an archive failure at a retention of %d", retention)
-		}
-	}
-}
-
 // TestSweep_FollowsFastArchivingsResidueClass pins that a sweep takes the residue class of the boundary it began at,
 // and starts over when fast archiving's changes: the sweep under way is dropped, and the next one sweeps the new class.
 func TestSweep_FollowsFastArchivingsResidueClass(t *testing.T) {

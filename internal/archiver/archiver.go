@@ -126,12 +126,7 @@ func (a *Archive) Today(ctx context.Context) (day int, err error) {
 
 // TodayLeft returns the current day on the database clock and how long it has left.
 func (a *Archive) TodayLeft(ctx context.Context) (day int, left time.Duration, err error) {
-	return a.TodayLeftOn(ctx, a.db)
-}
-
-// TodayLeftOn is TodayLeft reading the database clock on q, for a caller holding a connection of its own.
-func (a *Archive) TodayLeftOn(ctx context.Context, q sequel.Executor) (day int, left time.Duration, err error) {
-	secs, err := a.nowOn(ctx, q)
+	secs, err := a.now(ctx)
 	if err != nil {
 		return 0, 0, errors.Trace(err)
 	}
@@ -145,16 +140,11 @@ func (a *Archive) TodayLeftOn(ctx context.Context, q sequel.Executor) (day int, 
 
 // now returns the database clock in whole seconds since the Unix epoch.
 func (a *Archive) now(ctx context.Context) (int64, error) {
-	return a.nowOn(ctx, a.db)
-}
-
-// nowOn is now, read on q.
-func (a *Archive) nowOn(ctx context.Context, q sequel.Executor) (int64, error) {
 	if a.clock != nil {
 		return a.clock(ctx)
 	}
 	var stmt string
-	switch q.DriverName() {
+	switch a.db.DriverName() {
 	case "pgx":
 		stmt = "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM NOW())) AS BIGINT)"
 	case "mysql", "mariadb":
@@ -165,7 +155,7 @@ func (a *Archive) nowOn(ctx context.Context, q sequel.Executor) (int64, error) {
 		stmt = "SELECT CAST(STRFTIME('%s', 'now') AS INTEGER)"
 	}
 	var secs int64
-	err := q.QueryRowContext(ctx, stmt).Scan(&secs)
+	err := a.db.QueryRowContext(ctx, stmt).Scan(&secs)
 	return secs, errors.Trace(err)
 }
 

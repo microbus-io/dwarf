@@ -129,11 +129,7 @@ func (s *SweepDeletion) reset() {
 
 // round runs the sweep's batches (sweepRound).
 func (s *SweepDeletion) round(ctx context.Context, batch batchFunc) bool {
-	progress, err := sweepRound(ctx, batch, s.batch)
-	if err != nil {
-		s.logError(ctx, "Janitor: taking a connection", "error", err) // the batch did not run
-	}
-	return progress
+	return sweepRound(ctx, batch, s.batch)
 }
 
 // batch takes one batch of the sweep on h, beginning a sweep when none is under way: a chunk of the large tree in

@@ -135,11 +135,7 @@ func (l *LiveRetention) round(ctx context.Context, batch batchFunc) bool {
 	if l.retentionDays <= 0 || l.archive == nil {
 		return false
 	}
-	progress, err := sweepRound(ctx, batch, l.batch)
-	if err != nil {
-		l.logError(ctx, "Janitor: taking a connection", "error", err) // the batch did not run
-	}
-	return progress
+	return sweepRound(ctx, batch, l.batch)
 }
 
 // batch stamps one batch of the roots past their retention on h, beginning a sweep when none is under way.
@@ -148,7 +144,7 @@ func (l *LiveRetention) batch(ctx context.Context, h handle) outcome {
 		l.w.begin()
 		l.after = dueRoot{}
 	}
-	today, _, err := l.archive.TodayLeftOn(ctx, h)
+	today, err := l.archive.Today(ctx)
 	if err != nil {
 		l.logError(ctx, "Janitor: reading the retention's day", "error", err)
 		return idle

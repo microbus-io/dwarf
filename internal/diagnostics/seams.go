@@ -120,7 +120,6 @@ const (
 	FaultArchiveMaintainErr  = "archiveMaintainErr"  // an archive maintenance pass fails after its work
 
 	// The janitors, beside the names above, which their jobs consult too:
-	FaultJanitorConnErr        = "janitorConnErr"        // a janitor's batch cannot take its connection
 	FaultJanitorRetentionStamp = "janitorRetentionStamp" // by root flow_id: live retention's stamp fails under its roots' locks
 	FaultJanitorMarkedProbe    = "janitorMarkedProbe"    // the archive deletion sweep's probe of a day's marked roots fails
 )
@@ -263,7 +262,7 @@ const (
 	CheckpointReapArchiveDeleted   = "reapArchiveDeleted"   // a transaction deleting archived trees (Delete, Purge, the archive deletion sweep) has committed
 	CheckpointArchivePassDone      = "archivePassDone"      // the archive loop, after each pass over the shards
 	CheckpointArchiveMaintained    = "archiveMaintained"    // archive retention, after each pass keeping a shard's archive days
-	CheckpointJanitorBatchConn     = "janitorBatchConn"     // a janitor's batch has taken its connection, before its first statement
+	CheckpointJanitorBatchTurn     = "janitorBatchTurn"     // a janitor's batch has taken its turn, before its first statement
 )
 
 // --- Recorded variables ---

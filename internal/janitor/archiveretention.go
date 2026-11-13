@@ -85,26 +85,27 @@ func PassInterval(dayLength time.Duration) time.Duration {
 // reset has nothing to forget: each round reads the archive's days afresh.
 func (a *ArchiveRetention) reset() {}
 
-// round runs one maintenance pass, and reports progress when it saw a new day's tables whole or dropped a day; the
-// round after, at once, finds neither, and the idle wait paces the next. It takes a turn on the shard but no connection
-// of its own: the archiver's migrations and drops run on the shard's DB, a statement at a time, which a batch holding a
-// connection could not do without taking a second.
-func (a *ArchiveRetention) round(ctx context.Context, _ batchFunc) bool {
+// round runs one maintenance pass as one batch, the archiver's migrations and drops on the shard's DB, and reports
+// progress when it saw a new day's tables whole or dropped a day; the round after, at once, finds neither, and the
+// idle wait paces the next.
+func (a *ArchiveRetention) round(ctx context.Context, batch batchFunc) (progress bool) {
 	if a.archive == nil {
 		return false
 	}
-	ctx, pass := a.j.shard.WaitTurn(ctx)
-	defer pass.Return()
-	newDay, dropped, err := a.archive.Maintain(ctx, a.retentionDays)
-	// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
-	if err == nil && a.j.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
-		err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)
-	}
-	if err != nil && ctx.Err() == nil { // a pass cut short by a stop is no failure
-		a.failed.Add(ctx, 1, metric.WithAttributes(a.shardAttr))
-		a.j.diags.Logger().ErrorContext(ctx, "Janitor: maintaining the archive tables; the next pass retries",
-			"shard", a.j.shard.Index(), "error", err)
-	}
-	a.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointArchiveMaintained)
-	return newDay || dropped > 0
+	_ = batch(ctx, func(ctx context.Context, _ handle) error { // one that did not run made no progress
+		newDay, dropped, err := a.archive.Maintain(ctx, a.retentionDays)
+		// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
+		if err == nil && a.j.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
+			err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)
+		}
+		if err != nil && ctx.Err() == nil { // a pass cut short by a stop is no failure
+			a.failed.Add(ctx, 1, metric.WithAttributes(a.shardAttr))
+			a.j.diags.Logger().ErrorContext(ctx, "Janitor: maintaining the archive tables; the next pass retries",
+				"shard", a.j.shard.Index(), "error", err)
+		}
+		a.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointArchiveMaintained)
+		progress = newDay || dropped > 0
+		return nil
+	})
+	return progress
 }

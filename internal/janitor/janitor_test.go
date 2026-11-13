@@ -25,7 +25,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/turnstile"
-	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -393,43 +392,6 @@ func TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound(t *testing.T) {
 	assert.Equal(int64(0), overlaps.Load())
 }
 
-// TestJanitor_ABatchRunsOnOneConnection pins the batch's connection: every statement of a batch runs on the one
-// connection the batch took, so it waits for the pool once rather than once a statement.
-func TestJanitor_ABatchRunsOnOneConnection(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	db := newRig(t, 30).db
-	var idSQL string
-	switch db.DriverName() {
-	case "pgx":
-		idSQL = "SELECT pg_backend_pid()"
-	case "mysql", "mariadb":
-		idSQL = "SELECT CONNECTION_ID()"
-	case "mssql":
-		idSQL = "SELECT @@SPID"
-	default:
-		t.Skip("SQLite names no connection")
-	}
-	j := testJanitor(t, db, nil, func(j *Janitor) { j.SetManual(true) },
-		testJob("job", func(ctx context.Context, batch batchFunc) bool {
-			assert.NoError(batch(ctx, func(ctx context.Context, h handle) error {
-				ids := map[int64]bool{}
-				for range 8 {
-					var id int64
-					if err := h.QueryRowContext(ctx, idSQL).Scan(&id); err != nil {
-						return err
-					}
-					ids[id] = true
-				}
-				assert.Len(ids, 1, "every statement on one connection")
-				return nil
-			}))
-			return false
-		}),
-	)
-	j.Drain(t.Context())
-}
-
 // batchParts collects dwarf_janitor_batch_seconds: its samples by part, every one of shard 1 and job "job", and the
 // work part's total seconds.
 func batchParts(t *testing.T, assert *testarossa.Asserter, reader *sdkmetric.ManualReader) (counts map[string]uint64, work float64) {
@@ -474,32 +436,8 @@ func TestJanitor_BatchTimings(t *testing.T) {
 	}))
 	j.Drain(t.Context())
 	counts, work := batchParts(t, assert, reader)
-	assert.Equal(map[string]uint64{partTurn: 2, partAcquire: 2, partWork: 2}, counts)
+	assert.Equal(map[string]uint64{partTurn: 2, partWork: 2}, counts)
 	assert.True(work >= 0.02, "work %v", work)
-}
-
-// TestJanitor_ABatchThatCannotTakeItsConnectionFails pins the batch's failure to take its connection: the batch
-// returns the error without running its work, and records its turn and acquisition but no work.
-func TestJanitor_ABatchThatCannotTakeItsConnectionFails(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	reader := sdkmetric.NewManualReader()
-	seams := seamster.New(true)
-	seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
-	ran := false
-	var batchErr error
-	d := diagnostics.New()
-	d.SetSeams(seams)
-	d.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
-	j := testJanitor(t, newRig(t, 30).db, d, func(j *Janitor) { j.SetManual(true) }, testJob("job", func(ctx context.Context, batch batchFunc) bool {
-		batchErr = batch(ctx, func(context.Context, handle) error { ran = true; return nil })
-		return false
-	}))
-	j.Drain(t.Context())
-	assert.Error(batchErr)
-	assert.False(ran, "the work did not run")
-	counts, _ := batchParts(t, assert, reader)
-	assert.Equal(map[string]uint64{partTurn: 1, partAcquire: 1}, counts)
 }
 
 // TestJanitor_TheIdleWaits pins each job's wait after a round without progress: a second for the fast jobs, which poll

@@ -39,8 +39,8 @@ A job's settings are its own, set before it is added. To change them, add a new 
 replaces the old one, which starts over.
 
 Each job is a loop of rounds: one that makes progress is followed at once by the next, one that does not by the job's
-idle wait. A round works in batches, each under a turn on the shard taken fresh for it, and on one connection, taken
-from the pool once, for all of its statements.
+idle wait. A round works in batches, each under a turn on the shard taken fresh for it, its statements on the shard's
+DB.
 
 For a test that drives the jobs itself, SetManual starts no goroutine, and Drain runs the jobs' rounds until they
 stop making progress.
@@ -104,7 +104,7 @@ func New(shard *database.Shard, d *diagnostics.Diags) *Janitor {
 	var err error
 	j.batchSeconds, err = d.Meter().Float64Histogram("dwarf_janitor_batch_seconds",
 		metric.WithUnit("s"),
-		metric.WithDescription("Time one batch of a janitor's job took, by shard, job and part: turn is the wait for a turn on the shard's connections, which the batch shares with dispatch; acquire is the wait for its one connection from the pool; work is its statements, every one on that connection. A job falling behind with most of its time in turn or acquire is held back by the shard's load; with most in work, by its statements."),
+		metric.WithDescription("Time one batch of a janitor's job took, by shard, job and part: turn is the wait for a turn on the shard's connections, which the batch shares with dispatch; work is its statements, each taking a connection from the pool as dispatch's do. A job falling behind with most of its time in turn is held back by the shard's load; with most in work, by its statements and the pool."),
 		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60))
 	if err != nil {
 		d.Logger().Error("Creating the janitor's instruments", "shard", shard.Index(), "error", err)
@@ -330,45 +330,31 @@ func (j *Janitor) round(ctx context.Context, rn *runningJob) bool {
 func (j *Janitor) batch(name string) batchFunc {
 	return func(ctx context.Context, fn func(ctx context.Context, h handle) error) error {
 		if database.HasClaim(ctx) {
-			return errors.New("a batch's context carries a turn claim already")
+			err := errors.New("a batch's context carries a turn claim already")
+			j.diags.Logger().ErrorContext(ctx, "Janitor: a batch did not run", "shard", j.shard.Index(), "job", name, "error", err)
+			return err
 		}
 		start := time.Now()
 		ctx, pass := j.shard.WaitTurn(ctx)
 		defer pass.Return()
 		turned := time.Now()
-		conn, err := j.shard.DB().Conn(ctx)
-		if err == nil && j.diags.Seams().IsFault(diagnostics.FaultJanitorConnErr) {
-			conn.Close()
-			conn, err = nil, errors.New("injected fault: "+diagnostics.FaultJanitorConnErr)
-		}
-		acquired := time.Now()
-		if err != nil {
-			j.recordBatch(ctx, name, turned.Sub(start), acquired.Sub(turned), -1)
-			return errors.Trace(err)
-		}
-		defer conn.Close()
-		j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorBatchConn)
-		err = fn(ctx, conn)
-		j.recordBatch(ctx, name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
+		j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorBatchTurn)
+		err := fn(ctx, j.shard.DB())
+		j.recordBatch(ctx, name, turned.Sub(start), time.Since(turned))
 		return err
 	}
 }
 
 // The parts of a batch's time, the part attribute of dwarf_janitor_batch_seconds.
 const (
-	partTurn    = "turn"    // waiting for a turn on the shard's connections
-	partAcquire = "acquire" // waiting for the batch's connection from the pool
-	partWork    = "work"    // the batch's statements
+	partTurn = "turn" // waiting for a turn on the shard's connections
+	partWork = "work" // the batch's statements
 )
 
-// recordBatch records one batch's time in its parts; a negative work, for a batch that could not take its connection,
-// records none.
-func (j *Janitor) recordBatch(ctx context.Context, job string, turn, acquire, work time.Duration) {
+// recordBatch records one batch's time in its parts.
+func (j *Janitor) recordBatch(ctx context.Context, job string, turn, work time.Duration) {
 	shard := attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	name := attribute.String("job", job)
 	j.batchSeconds.Record(ctx, turn.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partTurn)))
-	j.batchSeconds.Record(ctx, acquire.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partAcquire)))
-	if work >= 0 {
-		j.batchSeconds.Record(ctx, work.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partWork)))
-	}
+	j.batchSeconds.Record(ctx, work.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partWork)))
 }

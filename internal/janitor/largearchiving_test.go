@@ -184,7 +184,7 @@ func holdRows(t *testing.T, r *rig, table string, flow int) (release func()) {
 func filing(t *testing.T, r *rig) *filingDay {
 	t.Helper()
 	d := &filingDay{}
-	if err := refreshDay(t.Context(), r.db, r.archive, true, d); err != nil {
+	if err := refreshDay(t.Context(), r.archive, true, d); err != nil {
 		t.Fatal(err)
 	}
 	return d

@@ -225,13 +225,11 @@ func (l *LargeArchiving) round(ctx context.Context, batch batchFunc) bool {
 	for ctx.Err() == nil {
 		var progress bool
 		var root int
-		err := batch(ctx, func(ctx context.Context, h handle) error {
+		if err := batch(ctx, func(ctx context.Context, h handle) error {
 			progress, root = l.batch(ctx, h, seen)
 			return nil
-		})
-		if err != nil {
-			l.logError(ctx, "Janitor: taking a connection", "error", err) // the batch did not run
-			return false
+		}); err != nil {
+			return false // the batch did not run
 		}
 		if progress {
 			return true
@@ -254,7 +252,7 @@ func (l *LargeArchiving) batch(ctx context.Context, h handle, lap map[int]bool) 
 	// A copy goes on into its own day whatever today's state: tomorrow not whole stops only new attempts, which a
 	// replacement below checks for itself.
 	d := &filingDay{}
-	if err := refreshDay(ctx, h, l.archive, l.noQuietMargin, d); err != nil && d.archive == nil {
+	if err := refreshDay(ctx, l.archive, l.noQuietMargin, d); err != nil && d.archive == nil {
 		l.logError(ctx, "Janitor: reading today's archive day", "error", err)
 		return false, 0
 	}

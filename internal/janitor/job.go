@@ -38,15 +38,16 @@ type Job interface {
 	idleWait() time.Duration
 }
 
-// batchFunc runs fn as one batch: under a turn on the shard taken for it, on one connection taken from the pool for
-// it, with the batch's timings recorded. fn runs every statement of the batch on h and the context it is given -
-// reading each query's rows to the end before the next statement - and the connection and the turn are returned when
-// fn does. A batch that cannot take its connection fails without calling fn. ctx must carry no turn claim - the
-// round's own context, never a batch's - or the batch fails: the claim would keep its age, and a turn taken while
-// another is held deadlocks against the shard's other holders.
+// batchFunc runs fn as one batch: under a turn on the shard taken for it, with the batch's timings recorded, and
+// returns fn's error. fn runs every statement of the batch on h, the shard's DB, and the context it is given; each
+// statement takes a connection from the pool and returns it, a transaction holds one until it ends, and the turn is
+// returned when fn does. Inside a transaction every statement runs on its Tx, and a query's rows are read to the end
+// before the next statement: either way a statement on h would take a second connection while one is held. ctx must
+// carry no turn claim - the round's own context, never a batch's - or the batch fails without calling fn: the claim
+// would keep its age, and a turn taken while another is held deadlocks against the shard's other holders.
 type batchFunc func(ctx context.Context, fn func(ctx context.Context, h handle) error) error
 
-// handle is what a batch runs its statements on.
+// handle is what a batch runs its statements on: the shard's DB, or a test's.
 type handle interface {
 	sequel.Executor
 	Transact(ctx context.Context, fn func(tx *sequel.Tx) error) error
@@ -58,8 +59,8 @@ const stealGrace = 30 * time.Second
 
 // The descriptions of the counters more than one job creates, each word for word the same in every one of them: two instruments of one name and different descriptions are exported as two streams of that name.
 // The idle waits: how long a job waits after a round without progress. A fast job polls for work that keeps arriving.
-// A repair job - a sweep, large-tree archiving - normally has none: polled every second it would cost a turn, a
-// connection and its reads every second on every shard, and retry a root or tree that keeps failing every second - a
+// A repair job - a sweep, large-tree archiving - normally has none: polled every second it would cost a turn and its
+// reads every second on every shard, and retry a root or tree that keeps failing every second - a
 // large tree's failing chunk copied again each time. A round with progress is followed at once by the next whatever
 // the wait, so a repair job with work is not slowed.
 const (

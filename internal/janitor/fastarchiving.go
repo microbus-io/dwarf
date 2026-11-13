@@ -184,23 +184,14 @@ func (f *FastArchiving) idleWait() time.Duration {
 
 // round runs one batch.
 func (f *FastArchiving) round(ctx context.Context, batch batchFunc) (progress bool) {
-	archiving := f.retentionDays > 0
-	if archiving && f.archive == nil {
+	if f.retentionDays > 0 && f.archive == nil {
 		return false // closed roots stay live: there is nowhere to archive them
 	}
-	err := batch(ctx, func(ctx context.Context, h handle) error {
+	_ = batch(ctx, func(ctx context.Context, h handle) error { // one that did not run made no progress
 		progress = f.batch(ctx, h)
 		f.boundary.Store(&boundary{f.after, f.count, f.ordinal, f.partitioned})
 		return nil
 	})
-	if err != nil {
-		// The batch did not run: its connection could not be taken.
-		if archiving {
-			f.failed(ctx, "taking a connection", err)
-		} else {
-			f.logError(ctx, "Janitor: taking a connection", "error", err)
-		}
-	}
 	return progress
 }
 
@@ -213,7 +204,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	refreshed := true
 	if archiving {
 		d = &filingDay{}
-		if err := refreshDay(ctx, h, f.archive, f.noQuietMargin, d); err != nil {
+		if err := refreshDay(ctx, f.archive, f.noQuietMargin, d); err != nil {
 			f.failed(ctx, "reading today's archive day", err)
 			refreshed = false
 			if d.archive == nil {

@@ -154,26 +154,22 @@ const (
 // sweepRound runs a round of a sweep job: batch after batch of run, until one makes progress, one finds nothing to do,
 // or sweepFailureLimit have failed. Passing roots is not progress, though the round goes on past them: a root that stays
 // behind a fast job's position is passed by every sweep, and counted as progress it would keep the job from ever idling.
-// It returns the error of a batch that could not take its connection.
-func sweepRound(ctx context.Context, batch batchFunc, run func(ctx context.Context, h handle) outcome) (progress bool, err error) {
+func sweepRound(ctx context.Context, batch batchFunc, run func(ctx context.Context, h handle) outcome) (progress bool) {
 	for failures := 0; failures < sweepFailureLimit; {
 		var o outcome
 		if err := batch(ctx, func(ctx context.Context, h handle) error {
 			o = run(ctx, h)
 			return nil
-		}); err != nil {
-			return false, err
-		}
-		if ctx.Err() != nil {
-			return false, nil
+		}); err != nil || ctx.Err() != nil {
+			return false // the batch did not run, or the job was stopped
 		}
 		switch o {
 		case faltered:
 			failures++
 		case passed:
 		default:
-			return o == moved, nil
+			return o == moved
 		}
 	}
-	return false, nil
+	return false
 }

@@ -123,7 +123,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 			var day *filingDay
 			if retention > 0 {
 				day = &filingDay{}
-				assert.Must(assert.NoError(refreshDay(t.Context(), db, r.archive, true, day)))
+				assert.Must(assert.NoError(refreshDay(t.Context(), r.archive, true, day)))
 			}
 			start := time.Now()
 			cut, _, err := cutClosed(t.Context(), db, r.seams, []int{root}, retention > 0, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
@@ -198,7 +198,7 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	assert.Equal(roots, cut)
 
 	day := &filingDay{}
-	assert.Must(assert.NoError(refreshDay(ctx, db, r.archive, true, day)))
+	assert.Must(assert.NoError(refreshDay(ctx, r.archive, true, day)))
 	due, dueArgs := closedDueSQL(0)
 	moved, err := move(ctx, db, r.seams, cut, due, dueArgs, day)
 	assert.NoError(err)
@@ -471,31 +471,6 @@ func counterSum(rm metricdata.ResourceMetrics, name string) int64 {
 	return total
 }
 
-// TestJanitor_NoBatchTakesASecondConnection pins the one-connection rule end to end: with a pool of one connection,
-// every job archives and deletes what is due. A statement that took a second connection while its batch holds the
-// only one - on the shard's DB, or through the archive - would wait for it until the deadline, and nothing would move.
-func TestJanitor_NoBatchTakesASecondConnection(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	r := newRig(t, 30)
-	r.settings.stageRows = 8 // so large-tree archiving claims, copies and publishes one, and fast deletion removes it
-	closed := seedTrees(t, r.db, 3, callShape)
-	closed = append(closed, seedWideTree(t, r.db, 3, 10, 3))
-	stamped := seedTrees(t, r.db, 2, callShape)
-	for _, root := range stamped {
-		stampTree(t, r.db, root)
-	}
-	r.db.DB.SetMaxOpenConns(1)
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second*timeoutScale)
-	defer cancel()
-	r.pass(ctx)
-	assert.NoError(ctx.Err(), "no batch waited for a second connection")
-	for _, id := range append(closed, stamped...) {
-		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
-		assert.Zero(flows, "root %d removed", id)
-	}
-}
-
 // TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft pins the end of a failure episode: a probe ends it once
 // nothing that was due at the last failure is still live, but not while a root the failure left behind the position
 // is; and a later move that archives something ends it.
@@ -520,19 +495,6 @@ func TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft(t *testing.T) {
 	seedTrees(t, r.db, 1, callShape)
 	r.pass(ctx)
 	assert.Zero(r.failing(time.Now().Add(time.Second)), "a move ends it")
-}
-
-// TestFast_ABatchThatCannotTakeItsConnectionIsAFailure pins a batch whose connection cannot be taken: it is an archive
-// failure, logged, and not a silent idle round.
-func TestFast_ABatchThatCannotTakeItsConnectionIsAFailure(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	r := newRig(t, 30)
-	seedTrees(t, r.db, 1, callShape)
-	r.seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
-	r.pass(t.Context())
-	assert.True(r.failing(time.Now().Add(time.Second)) > 0)
-	assert.Equal(1, r.logs.count("Janitor: taking a connection failed"))
 }
 
 // TestFast_AHeldRootIsNotWaitedForWhenStamped pins the stamp at a retention of 0: a tree too large for a batch whose

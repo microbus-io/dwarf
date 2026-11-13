@@ -768,7 +768,7 @@ func TestMove_TheLockRechecksEveryRoot(t *testing.T) {
 	backdate(t, r, early, -time.Hour) // closed in the future: not due by any grace
 
 	day := &filingDay{}
-	assert.Must(assert.NoError(refreshDay(ctx, db, r.archive, true, day)))
+	assert.Must(assert.NoError(refreshDay(ctx, r.archive, true, day)))
 	due, dueArgs := closedDueSQL(0)
 	moved, err := move(ctx, db, r.seams, cut, due, dueArgs, day)
 	assert.NoError(err)

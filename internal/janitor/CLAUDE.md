@@ -1,7 +1,7 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
-> Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
-> and its connection, any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
+> Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn,
+> any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
 > the archive deletion sweep, archive retention, expiration - chunked deletion, the shared sweep machinery, or the
 > janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
@@ -13,7 +13,7 @@
 
 One `Janitor` per shard on every replica, for the replica's run. It is **active only while the replica dispatches
 the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection. It is a runner of jobs: their
-goroutines, their idle waits, their time since progress, and the turn and connection each batch takes. It works on
+goroutines, their idle waits, their time since progress, and the turn each batch takes. It works on
 the `database.Shard` it is made with, and the engine sets its activity from the dispatch role.
 
 **A job owns everything particular to it**: its settings, its dependencies (fast archiving's archive and retention),
@@ -42,7 +42,7 @@ job whose candidates all fail would otherwise spin on them. No failure counters,
 
 **The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`), archive
 retention its pass interval and expiration its own pace (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
-retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn, a connection and its reads every second
+retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn and its reads every second
 on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
 each time. So in a healthy fleet the janitor's steady cost is the two fast jobs. The wait slows nothing that works: a
 round with progress is followed at once by the next. What it delays: a large tree's first chunk after fast archiving
@@ -56,32 +56,28 @@ nothing else bounds a job's statement.
 
 ## The batch: a fresh turn, its timings
 
-A round does its work in batches through the `batchFunc` it is handed.
+A round does its work in batches through the `batchFunc` it is handed - every job's, archive retention's and
+expiration's included.
 
 - **Each batch takes a turn of its own, from a context with no claim.** The turnstile keeps the age of a context
   stamped before, so a job that reused a batch's context would rank as old as its first batch and outrank every
-  dispatch that arrived since. A batch whose context carries a claim fails rather than run - the same check catches
-  a batch inside a batch, a turn taken while one is held. Pinned by `TestJanitor_EachBatchTakesAFreshClaim`.
+  dispatch that arrived since. A batch whose context carries a claim fails rather than run, logged by the janitor -
+  the same check catches a batch inside a batch, a turn taken while one is held. Pinned by
+  `TestJanitor_EachBatchTakesAFreshClaim`.
 - **The turn is a common turn on the janitor's shard** (`Shard.WaitTurn`), dispatch's band. A lower band could starve
   the jobs at peak load and let the live tables grow; equal standing does not guarantee them any share, which the
   batch timings are there to show.
-- **Each batch takes one connection from the pool, once, and runs every statement on it** (a `sequel.Conn`, closed
-  when the batch ends). Under a full pool every acquisition queues behind dispatch, and a batch that took one per
-  statement - its scan, its attempt read, its sizing, its transaction - spent most of its time in those queues rather
-  than in SQL. Pinned by
-  `TestJanitor_ABatchRunsOnOneConnection`. Its reads run on the connection before its transaction begins: SQLite
-  needs a transaction to open with a write, and on MySQL a read inside it would pin its snapshot for the batch.
-- **A batch never takes a second connection while it holds its own** - no statement on the shard's `DB`, nor on
-  anything holding it, the archive included (`archiver.TodayLeftOn` reads the day on the batch's connection). A
-  batch holding one connection and waiting for another is hold-and-wait: enough of them at once take every
-  connection of the pool and wait forever. Read each query's rows to the end before the next statement, too: the
-  connection runs one statement at a time. Pinned by `TestJanitor_NoBatchTakesASecondConnection`, which runs every job
-  on a pool of one connection.
-- **A batch that cannot take its connection fails** without running its work, and its job reports it: an archive
-  failure for fast archiving, a logged error otherwise (`TestJanitor_ABatchThatCannotTakeItsConnectionFails`,
-  `TestFast_ABatchThatCannotTakeItsConnectionIsAFailure`).
-- **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `acquire`
-  for the connection, `work` the batch's statements - none for a batch that could not take its connection. They attribute a job's shortfall to its own waits, which the
+- **Its statements run on the shard's DB**, each taking a connection from the pool and returning it, as dispatch's
+  do; a transaction holds one until it ends. **Do not take a connection for the batch** (a `sequel.Conn` for all its
+  statements): it exempts the job's later statements from the pool's queue, a priority no other caller has (user).
+  Its reads run before its transaction begins: SQLite needs a transaction to open with a write, and on MySQL a read
+  inside it would pin its snapshot for the batch.
+- **Inside a transaction every statement runs on its `Tx`, and a query's rows are read to the end before the next
+  statement.** A statement on the DB meanwhile takes a second connection while one is held - hold-and-wait: enough of
+  them at once take every connection of the pool and wait forever. The archive's statements run on the shard's DB,
+  so a call of it that reads or writes - its clock, `Maintain` - is made outside any transaction.
+- **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `work` the
+  batch's statements, their waits for the pool included. They attribute a job's shortfall to its own waits, which the
   pool-wide counters cannot.
 
 ## Pausing and stopping
@@ -150,7 +146,7 @@ rechecks under them, the directory rows and the archive time - is under "The mov
   whole stall when the job is blocked. Pinned by
   `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
-  whole, a batch that cannot take its connection, a failed scan, attempt read, sizing or move - and ends at a later
+  whole, a failed scan, attempt read, sizing or move - and ends at a later
   move that archives something, or at a probe that finds no due root without an archive attempt, or finds the oldest
   came due more than `endMargin` (1 s) after the last failure: everything due then has left the live tables. A staged
   tree in progress is not a failure, so it holds no episode open. The probe's ages are the database's and the failure's
@@ -285,11 +281,10 @@ every sweep would pass it again, a batch at a time.
   `TestSweep_PassesFailedTrees`).
 - **Its gauges are its own**, observed only while its janitor is active: the held count under `kind="closed"`, and
   its series of `dwarf_archive_failing_seconds`.
-- **Its failure episode** begins at a failure - the day, a scan, a sizing, a move, a connection - and ends at a sweep
-  that completes having failed nothing, in a batch whose day was read and open: a sweep starting after the failure and
-  finding every root behind fast archiving's position taken (`TestSweep_HeldRootsAndTheFailureEpisode`). At a retention
-  of 0 nothing is archived and nothing starts one: a connection it could not take is logged
-  (`TestSweep_AtRetentionZeroAConnectionErrorIsNoArchiveFailure`).
+- **Its failure episode** begins at a failure - the day, a scan, a sizing, a move - and ends at a sweep that completes
+  having failed nothing, in a batch whose day was read and open: a sweep starting after the failure and finding every
+  root behind fast archiving's position taken (`TestSweep_HeldRootsAndTheFailureEpisode`). At a retention of 0 nothing
+  is archived and nothing starts one.
 - **It moves nothing while the day is closed** - tomorrow not whole, or the quiet margin - as fast archiving: the roots
   stay live and the sweep is failing (`TestSweep_NothingMovesWhileTomorrowIsNotWhole`). Ending its episode there is
   barred by the open-day condition above, or every round would end it and the next begin it again.
@@ -393,11 +388,8 @@ pass interval (`PassInterval`): hourly for a day of a day or longer, a twenty-fo
   passes a second, each a clock read, a catalog read and a directory select under a turn - test-only, and accepted.
 - **It keeps making the days ahead, not only dropping old ones**: archiving into today waits for tomorrow's tables to
   be whole, so a job that only dropped would stop archiving within two days.
-- **It takes a turn on the shard and no batch connection** - the one job that does not go through a batch: the
-  archiver's migrations and drops run on the shard's DB, a statement at a time, and a batch holding a connection could
-  run them only by taking a second, the hold-and-wait the batch rule forbids (`TestArchiveRetention_TakesNoSecondConnection`,
-  making days on a pool of one; `TestArchiveRetention_WaitsForATurn`). The engine's shutdown-ordering test, which holds
-  every batch at its connection, counts every job but this one.
+- **A pass is one batch**: the archiver's migrations and drops run on the shard's DB under the batch's turn
+  (`TestArchiveRetention_WaitsForATurn`).
 - **Its counter:** `dwarf_archive_maintain_failed`, a failed pass, not a stopped one
   (`TestArchiveRetention_KeepsTheDays` on days of 48 hours, which the rig never made, so a job that only dropped
   fails it; `TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`). The engine's
@@ -422,8 +414,8 @@ pass goes on after, forgotten at a resume - and the pace; the counters (`dwarf_f
   trickle of expiring flows - one per sweep, a sweep lengthened by an archive outage's closed backlog - would keep
   every dispatcher of the shard sweeping back to back, and a drain would never return
   (`TestExpiration_TheRoundReportsThePassProgress`).
-- **A turn on the shard and no batch connection**, as archive retention: each tree ends in a transaction of its own on
-  the shard's DB (`TestExpiration_ThePassRunsUnderATurn`).
+- **A pass is one batch**, as archive retention's: under its turn, each tree ends in a transaction of its own on the
+  shard's DB (`TestExpiration_ThePassRunsUnderATurn`).
 - **No residue class**: every dispatcher of a shard walks the same rows, and the later of two on one root finds it
   ended and does nothing.
 - **What it ends is marked for deletion**, and the deletion jobs delete it: mostly sweep deletion, within its window,

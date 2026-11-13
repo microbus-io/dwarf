@@ -138,20 +138,6 @@ func TestArchiveRetention_WaitsForATurn(t *testing.T) {
 	assert.True(<-done, "the pass ran once the turn was returned")
 }
 
-// TestArchiveRetention_TakesNoSecondConnection pins that a pass holds no connection of its own while the archiver
-// migrates and drops on the shard's DB: on a pool of one connection, a pass that makes its days completes.
-func TestArchiveRetention_TakesNoSecondConnection(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	r := newRig(t, 30)
-	round, _ := retentionJanitor(t, r, unmadeArchive(r), 30)
-	r.db.DB.SetMaxOpenConns(1)
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second*timeoutScale)
-	defer cancel()
-	assert.True(round(ctx), "the days made")
-	assert.NoError(ctx.Err(), "the pass did not wait for a second connection")
-}
-
 // TestArchiveRetention_ThePassInterval pins the job's pace: hourly for a day of a day or longer, a twenty-fourth of a
 // shorter day, and at least a second.
 func TestArchiveRetention_ThePassInterval(t *testing.T) {

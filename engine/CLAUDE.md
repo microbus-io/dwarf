@@ -3649,11 +3649,8 @@ wiring (`janitor.go`):
   live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
   written against background removal whose first pass came 15 s in. A test of the background running sets it false
   (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
-  idle wait. A test blocks a real batch, holding its connection, at `diagnostics.CheckpointJanitorBatchConn`. **A test
-  that holds every job there needs a pool larger than the job count** (`testConnCap`, 4 by default in test mode):
-  the held jobs otherwise take every connection, the worker's claim waits for one, and the test waits on a task that
-  never starts (`TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain` hung for its whole timeout when the fourth job
-  arrived).
+  idle wait. A test blocks a real batch, holding its turn, at `diagnostics.CheckpointJanitorBatchTurn`, and one inside
+  its transaction, holding a connection, at `diagnostics.CheckpointReapBatchLocked`.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
@@ -3933,7 +3930,7 @@ SetIdle(true) on every piston                // stops the dispatch evidence, so 
 arm withdrawal timer                         // gives up dispatcher slots if the drain outlasts a read cadence
 closeMetrics()                               // no collection may run against a closing engine
 backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against a closing database
-janitorCancel(); stopJanitors()             // a job's batch would hold the connections a worker needs to finish
+janitorCancel(); stopJanitors()             // a job's statement would hold a connection a worker needs to finish
 cache.Close(); db.CloseTurns()              // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
@@ -3945,11 +3942,12 @@ leaveFleet()                             // only now is the last possible beat b
 every latch board Close(); lifetimeCancel()
 ```
 
-**The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's batch has no
-deadline and holds connections while it runs, so a worker in flight that needs one to record its step could wait on
-it, and the drain on the worker, for as long as the batch takes - forever, for a job blocked on a held lock. The
-recovery loop and the archive loop can stop after the crew only because every attempt of theirs is bounded. Pinned by
-`TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which hangs with the cancellation after `crew.Drain`.
+**The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's statement has no
+deadline and holds its connection while it runs - a transaction, until it ends - so a worker in flight that needs one
+to record its step could wait on it, and the drain on the worker, for as long as the statement takes - forever, for a
+job blocked on a held lock. The recovery loop and the archive loop can stop after the crew only because every attempt
+of theirs is bounded. Pinned by `TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which holds a batch inside
+its transaction and hangs with the cancellation after `crew.Drain`.
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
 registered while its workers are still executing steps, because every one of them drains against pools each

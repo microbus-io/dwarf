@@ -120,32 +120,32 @@ func TestJanitor_APauseOrShutdownCancelsABatchInFlight(t *testing.T) {
 	assert.NoError(e.SetHost(noopHost{}))
 	e.janitorManual = false
 	e.janitorIdle = 10 * time.Millisecond
-	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchConn)
-	defer e.diags.Seams().Resume(diagnostics.CheckpointJanitorBatchConn)
+	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchTurn)
+	defer e.diags.Seams().Resume(diagnostics.CheckpointJanitorBatchTurn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	assert.True(e.diags.Seams().WaitTimeout(t.Context(), diagnostics.CheckpointJanitorBatchConn, 10*time.Second*enginetest.TimeoutScale()))
+	assert.True(e.diags.Seams().WaitTimeout(t.Context(), diagnostics.CheckpointJanitorBatchTurn, 10*time.Second*enginetest.TimeoutScale()))
 
 	setRole(e, 1, false)
-	held := e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn)
+	held := e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchTurn)
 	start := time.Now()
 	setRole(e, 1, true) // waits for the paused jobs to be gone
 	assert.True(time.Since(start) < 10*time.Second*enginetest.TimeoutScale(), "resumed after %v", time.Since(start))
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
-	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) <= held && time.Now().Before(deadline) {
+	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchTurn) <= held && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) > held, "the resumed jobs run again")
+	assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchTurn) > held, "the resumed jobs run again")
 
 	start = time.Now()
 	assert.NoError(e.Shutdown(context.Background()))
 	assert.True(time.Since(start) < 10*time.Second*enginetest.TimeoutScale(), "Shutdown took %v", time.Since(start))
 }
 
-// TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain pins the drain order: batches holding connections - as a
-// batch with no deadline may, here held at a breakpoint while the test holds the rest of the pool - are cancelled
-// before Shutdown waits on the workers, so a worker in flight that needs a connection to record its step gets one and
-// the drain ends. Cancelled after the workers' drain, the batches would hold the connections for as long as the drain
-// waited on the worker, which is forever.
+// TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain pins the drain order: a batch holding a connection - here
+// held at a breakpoint inside its transaction, as a statement with no deadline may hold one, while the test holds the
+// rest of the pool - is cancelled before Shutdown waits on the workers, so a worker in flight that needs a connection
+// to record its step gets one and the drain ends. Cancelled after the workers' drain, the batch would hold its
+// connection for as long as the drain waited on the worker, which is forever.
 func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -166,40 +166,32 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	})
 	assert.NoError(e.SetHost(mux))
 	e.janitorManual = false
-	// A connection for every job held at the breakpoint, and more for the worker's claim: held, the jobs would take
-	// every connection of the test-mode cap, and the task would never start.
-	e.testConnCap = 2 * defaultTestConnCap
-	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchConn)
+	e.diags.Seams().Break(diagnostics.CheckpointReapBatchLocked)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	ages := e.janitorOn(1).JobAges(time.Now())
-	delete(ages, janitor.JobArchiveRetention) // a turn and no batch connection: it never reaches the breakpoint
-	jobs := len(ages)
-	assert.Must(assert.True(jobs > 0, "the janitor has jobs"))
-	assert.Must(assert.True(db.Stats().MaxOpenConnections > jobs, "a pool of %d holds the %d jobs and the worker",
-		db.Stats().MaxOpenConnections, jobs))
 
 	_, err = e.Create(t.Context(), "janitor/graph", nil, nil)
 	assert.Must(assert.NoError(err))
 	<-entered
-	// Every job holds its batch's connection at the breakpoint; the test takes the rest of the pool.
-	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
-	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) < jobs && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	assert.Must(assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) >= jobs, "every job holds a connection"))
+	// A tree stamped for deletion: fast deletion locks its root and holds its transaction's connection at the
+	// breakpoint. The test takes the rest of the pool.
+	root := seedTrees(t, db, 1, callShape)[0]
+	_, err = db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root)
+	assert.Must(assert.NoError(err))
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(t.Context(), diagnostics.CheckpointReapBatchLocked, 10*time.Second*enginetest.TimeoutScale()),
+		"a batch holds its transaction"))
 	var conns []*sql.Conn
 	defer func() {
 		for _, c := range conns {
 			c.Close()
 		}
 	}()
-	// Bounded, so a count that does not match the jobs holding connections fails rather than waits for good.
+	// Bounded, so a pool that does not match the one connection held fails rather than waits for good.
 	taking, cancel := context.WithTimeout(t.Context(), 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
-	for len(conns) < db.Stats().MaxOpenConnections-jobs {
+	for len(conns) < db.Stats().MaxOpenConnections-1 {
 		c, err := db.DB.Conn(taking)
 		assert.Must(assert.NoError(err))
 		conns = append(conns, c)
@@ -215,7 +207,7 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
-		e.diags.Seams().Resume(diagnostics.CheckpointJanitorBatchConn)
+		e.diags.Seams().Resume(diagnostics.CheckpointReapBatchLocked)
 		for _, c := range conns {
 			c.Close()
 		}

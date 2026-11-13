@@ -101,14 +101,11 @@ const stampedDueSQL = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MIL
 
 // round runs one batch.
 func (f *FastDeletion) round(ctx context.Context, batch batchFunc) (progress bool) {
-	err := batch(ctx, func(ctx context.Context, h handle) error {
+	_ = batch(ctx, func(ctx context.Context, h handle) error { // one that did not run made no progress
 		progress = f.batch(ctx, h)
 		f.boundary.Store(&boundary{dueRoot{flowID: f.after}, f.count, f.ordinal, f.partitioned})
 		return nil
 	})
-	if err != nil {
-		f.logError(ctx, "Janitor: taking a connection", "error", err) // the batch did not run
-	}
 	return progress
 }
 
