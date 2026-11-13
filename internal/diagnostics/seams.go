@@ -35,8 +35,7 @@ func Join(parts ...string) string {
 // in the graph, not the URL ExecuteTask receives.
 //
 // Every component's seams are named here - the engine's, the pistons', the Sonars', the janitors' - so there is one
-// catalogue, and a test arms the very string a component consults. internal/reaper keeps its own copies of its
-// names, which the engine's tests pin equal to these.
+// catalogue, and a test arms the very string a component consults.
 
 // --- Fault injection ---
 //
@@ -108,7 +107,7 @@ const (
 	FaultPeerBeatErr = "peerBeatErr" // bare and by shard: a shard's registry beat writes nothing, so this replica stops proving its liveness THERE, while running on
 
 	// Reaping and archiving:
-	FaultReapSelectErr      = "reapSelectErr"      // the reaper's due-root SELECT errors
+	FaultReapSelectErr      = "reapSelectErr"      // the janitor's due-root SELECT errors
 	FaultReapSizeErr        = "reapSizeErr"        // by root flow_id: sizing a selected root fails
 	FaultReapMidTree        = "reapMidTree"        // bare and by root flow_id: a move or delete fails after its steps, before its flows
 	FaultReapContention     = "reapContention"     // the archive move fails on lock contention (a deadlock victim)
@@ -119,7 +118,7 @@ const (
 	FaultArchiveMark        = "archiveMarkErr"     // by root flow_id: a Delete's or Purge's mark of an archived root fails
 	FaultArchiveMaintainErr = "archiveMaintainErr" // an archive maintenance pass fails after its work
 
-	// The janitors, beside the reaper's names above, which their jobs consult too:
+	// The janitors, beside the names above, which their jobs consult too:
 	FaultJanitorConnErr        = "janitorConnErr"        // a janitor's batch cannot take its connection
 	FaultJanitorRetentionStamp = "janitorRetentionStamp" // by root flow_id: live retention's stamp fails under its roots' locks
 	FaultJanitorMarkedProbe    = "janitorMarkedProbe"    // the archive deletion sweep's probe of a day's marked roots fails
@@ -256,7 +255,7 @@ const (
 	CheckpointPeerPass = "peerPass"
 
 	// Reaping and archiving:
-	CheckpointReapBatchLocked      = "reapBatchLocked"      // a reaper batch has locked its due roots, inside its transaction
+	CheckpointReapBatchLocked      = "reapBatchLocked"      // a janitor batch has locked its due roots, inside its transaction
 	CheckpointReapBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
 	CheckpointReapChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
 	CheckpointReapStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed

@@ -33,7 +33,7 @@ import (
 // Deletion is deferred (mark, then reap), so a doomed flow is still readable during its grace window - it
 // looks perfectly forkable. Fork names a SPECIFIC step, unlike Continue, which searches for a base and can
 // simply skip a doomed turn; so naming a doomed flow is an error, not a fallback. Without the guard, Fork
-// clones the origin's rows while the reaper concurrently deletes that same root_flow_id tree, and the result
+// clones the origin's rows while the janitor concurrently deletes that same root_flow_id tree, and the result
 // is a partial or empty clone: a silently corrupt fork instead of a clean 409.
 //
 // Both roads to a doomed flow are covered: an author's DeleteOnCompletion (stamped on success, grace window),
@@ -85,7 +85,7 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 		assert.Error(err, "History of a delete-marked flow 404s - it is logically gone")
 
 		// And Fork of one of its steps is refused. The step is real and the rows are all still present -
-		// only the guard stands between this call and a clone racing the reaper.
+		// only the guard stands between this call and a clone racing the janitor.
 		if !assert.NotEqual("", bStepKey) {
 			return
 		}
@@ -118,8 +118,8 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 		_, err = eng.Await(ctx, forkKey)
 		assert.NoError(err)
 
-		// Now mark the origin for deletion. The rows are still there (the reaper is a background sweep), so
-		// nothing but the guard stands between Fork and a clone racing the reaper.
+		// Now mark the origin for deletion. The rows are still there (the janitor is a background sweep), so
+		// nothing but the guard stands between Fork and a clone racing the janitor.
 		if !assert.NoError(eng.Delete(ctx, flowKey)) {
 			return
 		}
@@ -132,7 +132,7 @@ func TestDeleteguardsflow_ForkRejectsADoomedFlow(t *testing.T) {
 }
 
 // TestDeleteguardsflow_ContinueRejectsADoomedFlow pins that Continue of a flow scheduled for deletion is a 409, as
-// Fork's is. The flow's row survives until the reaper sweeps it, so an unguarded Continue would build a new flow
+// Fork's is. The flow's row survives until the janitor sweeps it, so an unguarded Continue would build a new flow
 // on one that is logically gone.
 func TestDeleteguardsflow_ContinueRejectsADoomedFlow(t *testing.T) {
 	t.Parallel()

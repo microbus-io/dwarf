@@ -116,9 +116,6 @@ matching one before working there:**
 - **`internal/archiver/CLAUDE.md`** - one shard's archive day tables: why a day is made by its own migration
   sequence, why the catalog and not the migration records says which days exist, retention by days, and the
   one-statement locate with its sparse directory.
-- **`internal/reaper/CLAUDE.md`** - removing closed trees from one shard's live tables: why it is a package with one
-  instance per run, the two walkers and their coverage, why an archive failure never becomes permission to delete, the
-  attempt limit, the move's column rules, and the root lock it shares with Fork.
 - **`internal/janitor/CLAUDE.md`** - one shard's background jobs on a replica that dispatches it: why each job has a
   goroutine of its own, the idle wait after a round without progress, why every batch takes a fresh turn and one
   connection, why the janitors stop before the workers drain, fast archiving and fast deletion.

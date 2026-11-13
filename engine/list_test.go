@@ -353,13 +353,13 @@ func TestList_RequiredInputsAndStatuses(t *testing.T) {
 	}
 }
 
-// TestList_TheLimitIsAboveAReaperBatch pins that the lists' maximum Limit stays above the reaper's batch: a batch's
+// TestList_TheLimitIsAboveAJanitorBatch pins that the lists' maximum Limit stays above the janitor's batch: a batch's
 // trees share one archive time, and a caller paging ListClosed by window cannot page across a tie larger than its Limit.
-func TestList_TheLimitIsAboveAReaperBatch(t *testing.T) {
+func TestList_TheLimitIsAboveAJanitorBatch(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngine()
-	assert.True(maxListLimit > e.reapBatchRows, "the most a list returns (%d) must exceed a reaper batch (%d rows)", maxListLimit, e.reapBatchRows)
+	assert.True(maxListLimit > e.reapBatchRows, "the most a list returns (%d) must exceed a janitor batch (%d rows)", maxListLimit, e.reapBatchRows)
 	assert.True(maxListLimit > e.reapBatch, "and its roots (%d)", e.reapBatch)
 	assert.True(maxListLimit > janitor.MaxBatchFlows, "and an archiving batch's flows (%d)", janitor.MaxBatchFlows)
 }

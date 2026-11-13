@@ -56,8 +56,7 @@ type handle interface {
 // takes it.
 const stealGrace = 30 * time.Second
 
-// The descriptions of the counters more than one job creates, and internal/reaper too, each word for word the same in
-// every one of them: two instruments of one name and different descriptions are exported as two streams of that name.
+// The descriptions of the counters more than one job creates, each word for word the same in every one of them: two instruments of one name and different descriptions are exported as two streams of that name.
 // The idle waits: how long a job waits after a round without progress. A fast job polls for work that keeps arriving.
 // A repair job - a sweep, large-tree archiving - normally has none: polled every second it would cost a turn, a
 // connection and its reads every second on every shard, and retry a root or tree that keeps failing every second - a

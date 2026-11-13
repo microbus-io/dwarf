@@ -221,7 +221,7 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 		if err := targetedFault(seams, diagnostics.FaultJanitorRetentionStamp, locked...); err != nil {
 			return err
 		}
-		none, noneArg := noAttemptSQL(tx.DriverName())
+		none, noneArg := NoAttemptSQL(tx.DriverName())
 		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+
 			", updated_at=NOW_UTC() WHERE flow_id IN ("+database.IntList(locked)+")", noneArg); err != nil {
 			return errors.Trace(err)

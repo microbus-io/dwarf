@@ -91,7 +91,6 @@ func expiryEngine(t *testing.T, expiration time.Duration) (*Engine, *sdkmetric.M
 	if err := e.SetFlowExpiration(expiration); err != nil {
 		t.Fatal(err)
 	}
-	e.reapInterval = time.Hour
 	if err := e.Startup(t.Context()); err != nil {
 		t.Fatal(err)
 	}

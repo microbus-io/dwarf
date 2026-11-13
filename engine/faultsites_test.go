@@ -17,7 +17,7 @@ limitations under the License.
 // New fault sites, each ending a "documented but untested" recovery gap. Every test arms one of the
 // new faults (debug.go) and drives the exact recovery path it exists to exercise - the residual orphan hole,
 // a subgraph-spawn failure, an atomic lifecycle-transaction rollback, host-panic isolation, a lost
-// failure-delivery backstopped by the wedge sweep, and the reaper's SELECT-error resilience.
+// failure-delivery backstopped by the wedge sweep, and the janitor's SELECT-error resilience.
 package engine
 
 import (
@@ -506,7 +506,7 @@ func TestFaultSite_DeliverFailureLost_DeepSubgraph(t *testing.T) {
 	}
 }
 
-// TestFaultSite_ReapSelectErr pins the reaper's resilience to a transient due-root SELECT failure (sibling to
+// TestFaultSite_ReapSelectErr pins the janitor's resilience to a transient due-root SELECT failure (sibling to
 // diagnostics.FaultReapMidTree, which covers the delete half): the pass logs and bails without deleting, and the NEXT
 // pass reaps cleanly.
 func TestFaultSite_ReapSelectErr(t *testing.T) {

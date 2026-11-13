@@ -34,7 +34,7 @@ import (
 // create-purge steady state, sampling drift periodically. Unlike the concurrency sweep (which measures
 // throughput/latency over short windows), the soak asks a different question: does anything drift or wedge
 // over time? It exercises the full operation surface - Create/Run/Await, Interrupt/Resume, Continue, and
-// retention (DeleteOnCompletion + a periodic Purge) so the reaper churns - and watches goroutines, heap,
+// retention (DeleteOnCompletion + a periodic Purge) so the janitor churns - and watches goroutines, heap,
 // row counts, and the engine's alarm counters (dwarf_steps_unwedged / dwarf_flows_orphaned /
 // dwarf_steps_write_failed must stay at zero).
 
@@ -140,7 +140,7 @@ func runSoak(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	// Retention sweep: ListClosed a page of flows (the cross-shard read path under load), then Purge
 	// completed non-disposable flows (continue chains, fork sources) once they age past the grace
 	// window, so their rows don't grow unbounded and the operator-driven Purge path is exercised
-	// alongside the DeleteOnCompletion reaper.
+	// alongside the DeleteOnCompletion deletions.
 	stopCh := make(chan struct{})
 	var sweeper sync.WaitGroup
 	sweeper.Go(func() {
@@ -225,7 +225,7 @@ loop:
 	return report
 }
 
-// runDisposable creates and awaits one mixed-shape flow marked DeleteOnCompletion (the reaper removes it
+// runDisposable creates and awaits one mixed-shape flow marked DeleteOnCompletion (the janitor removes it
 // after the grace window), occasionally reading its outcome back via Snapshot during that window. Each
 // flow carries a fuzzed extra payload - random size (0..8KB) and content - so state rows vary realistically
 // rather than repeating one fixed shape.

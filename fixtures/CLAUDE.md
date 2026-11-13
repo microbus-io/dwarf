@@ -33,9 +33,9 @@ and calls `Startup` itself.
   dominates the measurement / floods the fuzz output. `SetLogger` before `Startup` takes over entirely.
 - **The janitors run their jobs only when a test drives them** - `accessors.ArchiveNow`, or an engine test's
   `reapDueFlows` - never in the background, so a fixture that holds a closed or stamped tree in the live tables
-  (a Delete, then a Fork expecting 409) is not raced by them. The reaper still ticks every 15 s.
+  (a Delete, then a Fork expecting 409) is not raced by them.
 - **`DWARF_STAGE_ROWS=<n>` runs the suite with staged archival on**: every engine's Startup reads it into
-  `reapStageRows`, so every tree over `n` rows is archived in stages (`internal/reaper/CLAUDE.md`). `1` stages every
+  `reapStageRows`, so every tree over `n` rows is archived in stages (`internal/janitor/CLAUDE.md`). `1` stages every
   tree of more than one row. Off when unset, as in production; the engine logs a warning when it is set.
 
 The `testHashedID` switches the open path into test mode: `resolveShardDSN` (`internal/database`)

@@ -17,7 +17,7 @@ limitations under the License.
 // Deterministic race pins, driven by the seams instead of a timing hammer:
 //   - Resume-loses-to-Terminate: a checkpoint holds resume() before its transaction so a Terminate can win the
 //     race every run, proving resume 409s and rolls its step writes back.
-//   - Reaper-deletes-a-running-descendant: the reaper removes the whole root_flow_id tree regardless of
+//   - Reaper-deletes-a-running-descendant: the janitor removes the whole root_flow_id tree regardless of
 //     descendant status, so a live orphan under a closed root is reaped (deleteFlow guards only the root).
 package engine
 
@@ -120,10 +120,10 @@ func TestResumeLosesToTerminate_Deterministic(t *testing.T) {
 
 }
 
-// TestReaperDeletesRunningDescendant pins the reaper's tree-delete: it removes the whole root_flow_id tree regardless of
+// TestReaperDeletesRunningDescendant pins the janitor's tree-delete: it removes the whole root_flow_id tree regardless of
 // descendant status. deleteFlow 409s only on a running *root*; a running subgraph *descendant* (an orphan, a
 // state only a bug leaves) is deleted anyway. Here the descendant is forged into `running` under a
-// closed root, then the reaper removes it along with the root.
+// closed root, then the janitor removes it along with the root.
 func TestReaperDeletesRunningDescendant(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -175,10 +175,10 @@ func TestReaperDeletesRunningDescendant(t *testing.T) {
 		assert.Equal(1, running) // a running descendant now exists
 	}
 
-	// Stamp the closed root due (as Delete/DeleteOnCompletion would) and reap. The reaper only selects roots
+	// Stamp the closed root due (as Delete/DeleteOnCompletion would) and reap. The janitor only selects roots
 	// where `DATE_ADD_MILLIS(updated_at, delete_after_ms) <= NOW_UTC()`, so backdate updated_at 60s to put the
 	// due moment unconditionally in the past (delete_after_ms=1 alone hinges on sub-ms timing - flaky). The
-	// reaper then deletes by root_flow_id, so the running descendant goes too - no reguard on descendant status.
+	// janitor then deletes by root_flow_id, so the running descendant goes too - no reguard on descendant status.
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", -60000, rootID)
 	assert.NoError(err)
 	e.reapDueFlows(ctx)

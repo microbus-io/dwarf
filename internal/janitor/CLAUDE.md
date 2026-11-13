@@ -5,9 +5,9 @@
 > the archive deletion sweep, archive retention, expiration - chunked deletion, the shared sweep machinery, or the
 > janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
-> `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
-> taken over - `DeleteLive` - and the rationale of the staged protocol and of chunked deletion) and
-> `internal/archiver/CLAUDE.md` (the day tables).
+> `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/archiver/CLAUDE.md` (the day tables, the
+> directory, why a row goes into a day only once the next is whole) and `internal/migrations/CLAUDE.md` (the column
+> catalog and the indexes the scans walk).
 
 ## What a Janitor is, and what a job is
 
@@ -109,9 +109,8 @@ Pinned by `TestJanitor_DrainReturnsWhereAJobWouldWait`.
 ## Fast archiving (`fastarchiving.go`)
 
 The janitor's first job (`JobFastArchiving`): the closed roots as they come due, by close time, one batch a round,
-moved into today's archive in one transaction - or deleted, at a retention of 0. The move, its root locks and the
-rechecks under them, the directory rows and the archive time are the reaper's, carried over (`move.go`;
-`internal/reaper/CLAUDE.md` holds their rationale while the reaper stands).
+moved into today's archive in one transaction - or deleted, at a retention of 0. The move - its root locks and the
+rechecks under them, the directory rows and the archive time - is under "The move" below.
 
 - **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
   moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
@@ -169,16 +168,44 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
   logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
   episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
-- **The counters it shares with the reaper** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,
-  `dwarf_flows_reaped` - are created on the same meter by both packages, each with its description written word for
-  word the same in both: two instruments of one name with different descriptions are exported as two streams of that
-  name. The reaper does not import the janitor; the text is duplicated until the reaper is deleted.
+- **The counters more than one job creates** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,
+  `dwarf_flows_reaped` - take their descriptions from one constant each (`job.go`): two instruments of one name with
+  different descriptions are exported as two streams of that name.
 - **The recheck under the root lock is the authority, not the scan:** a root selected and sized is moved only if it is
   still a closed root due, unstamped, and with no archive attempt when locked (`TestMove_TheLockRechecksEveryRoot`); a
   stamped one only if still stamped and due (`TestDelete_TheLockRechecksTheStamp`).
 - **The position's close time is normalized** (`database.StoredTime`) before it is bound back: a MySQL driver with a
-  DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are the reaper's strings, named in
-  `internal/diagnostics`, so a test arming one arms both.
+  DSN `loc` other than UTC places the stored wall clock in that location. The fault and checkpoint names are
+  `internal/diagnostics`' (`FaultReap*`, `CheckpointReap*`).
+
+## The move (`move.go`)
+
+A batch of trees leaves the live tables in one transaction: moved into a day's archive tables, or deleted.
+
+- **The root lock is two-sided.** Every transaction that removes a tree, live or archived, locks its root first with
+  the strength a `DELETE` takes (`lockRoots`: `FOR UPDATE`, or the `touch` flip), skipping a held root on PostgreSQL
+  and MySQL. The engine's Fork locks its source root `FOR NO KEY UPDATE`, which conflicts with it, so a Fork and a
+  removal of one tree serialize. Either side weakening its lock breaks the other; the engine's `lockRows` names this
+  one.
+- **The janitor makes no table.** It archives into today only while the archive's record holds tomorrow whole; a
+  missing tomorrow holds closed trees live while the deletions go on (`TestMove_NoClosedTreeMovesWhileTomorrowIsNotWhole`).
+- **`archived_at` is the move's time, clamped to its filing day's last millisecond** (`archivedAtSQL`), so a day holds
+  only rows archived on it. A quiet margin before the day's end (`quietMargin`: a minute, or an eighth of a short day)
+  stops archive moves only; a test turns it off.
+- **The flows move by name, the steps by column order.** `archivedFlowColumns` names every flow column the day tables
+  have, `archived_at` apart, so not the live-only `archive_attempt_at`; the steps move with `RETURNING *` / `SELECT *`,
+  so the day's steps table must keep the live column order (a rule in `internal/migrations/CLAUDE.md`). Both pinned by
+  `TestMove_NamesEveryFlowsColumn`. On PostgreSQL each table moves in one `DELETE ... RETURNING` into an `INSERT`, so
+  what is archived is exactly what is deleted; elsewhere it is copied, then deleted, and a straggler is archived as it
+  was at the copy.
+- **The directory rows for a late or early filing are written in the move's transaction**, from the same rows;
+  `DirectoryHours` decides which (`TestMove_DirectoryNamesOnlyWhatTheLocateCannotFind`). Directory, flows and steps go
+  together: a lost response after a commit may undercount a metric, but a retry finds the root gone, and no partial
+  tree is ever published.
+- **An archive failure never becomes permission to delete.** At a positive retention a tree archiving fails on stays
+  live until live retention gives it up, past its retention (above); a late successful move still takes its retention
+  from its filing day.
+- **`MoveTrees`** is the move into a day of the caller's choosing, for an engine test that files a tree there.
 
 ## Fast deletion (`fastdeletion.go`)
 
@@ -317,8 +344,7 @@ from the archive's day tables' retention, a job of its own.
 
 ## The archive deletion sweep (`deletemarked.go`)
 
-The job that deletes the archived trees marked for deletion (`JobArchiveDeletionSweep`; the type keeps the reaper's
-name, `DeleteMarked`): **every** archived tree a Delete or a Purge removes - the calls only mark it, a statement each
+The job that deletes the archived trees marked for deletion (`JobArchiveDeletionSweep`, type `DeleteMarked`): **every** archived tree a Delete or a Purge removes - the calls only mark it, a statement each
 (user), and the published copy a Delete takes back from a tree whose live copy is being deleted.
 
 - **Each sweep goes through the retained days, oldest first, a probe a day** (`markedIn`, on the day's deletion index:
@@ -414,22 +440,75 @@ the directory's rows for each flow deleted with it there. **Its SQL, and the siz
 table suffix** (`""` for the live tables, `daySuffix(day)` for a day's), never a table name (user). The mark is the
 authorization, durable, so a chunked deletion
 needs nothing in memory to finish (`TestChunk_ARestartResumesTheDeletion`) and two replicas on one tree serialize per
-chunk (`TestChunk_TwoJanitorsShareATree`). The order and the reads are the reaper's (`internal/reaper/CLAUDE.md`,
-"Chunked deletion of a large live tree", holds their rationale while the reaper stands): descendants newest first, each
-flow's steps then the flow, the root's steps, then the root after two probes that nothing else is left
-(`TestChunk_ALateDescendantKeepsTheRoot`); every read bounded by the budget, never by the tree; a flow row charged its
-own bytes (`TestChunk_AFlowRowIsChargedItsBytes`, `TestChunk_AChunkKeepsToItsBytes`). The position (`chunkPos`) is kept
-by the job deleting the tree and lost with it; a lost position costs a reread from the newest descendant, not a row.
+chunk (`TestChunk_TwoJanitorsShareATree`). A deletion that grows with its tree eventually cannot finish in one
+transaction, and then never finishes: the delete wall.
+
+- **Descendants first, newest first, each flow's steps then the flow; the root's steps; then the root, last.**
+  Children are read 256 at a time (`treeChunk`), from the chunk's position (`chunkPos`), so a read seeks past the
+  entries earlier chunks deleted, which stay in the indexes until vacuum. The position also holds the last step deleted
+  of a flow part deleted, so the next chunk seeks past that flow's deleted steps: read from the start, a flow of a
+  million steps - one `forEach` flow is one - would cost each chunk every step deleted before it (measured on
+  PostgreSQL before vacuum, 112 ms against 42 ms for the last chunk of a 100,000-step child). The position is kept by
+  the job deleting the tree and lost with it; a lost position costs a reread from the newest descendant, not a row.
+- **Every read in a chunk is bounded by its budget, never by the tree.** Which children fit is decided by sizing at
+  most the budget's worth of their steps (`stepsSizeUpTo`, a `LIMIT` or `TOP` under a `COUNT` and a sum of their byte
+  counts) with the children's own bytes, halving the run of children until it fits; a child larger than what is left
+  has a budget's worth of its steps deleted. **Do not size the children with a full `COUNT ... GROUP BY`**: it recounts
+  a large child's remaining steps on every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at
+  4,000 steps a child). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a literal
+  list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's own steps
+  only with that index keyed on `(flow_id, step_id)`.
+- **A budget is rows and bytes, and a chunk stops at whichever it reaches first** (`limit`, `size.go`), the byte counts
+  read from the `*_bytes` columns, so no payload is read to size it. **A chunk takes at least one step only while it
+  has taken nothing** (`stepsWithin`'s `fresh`): a step over the whole budget then goes alone, and a chunk that already
+  took rows ends rather than overshoot its bytes. **A flow row is charged its own bytes before it is taken**
+  (`rowFits`, `flowBytes`): it goes with its last steps only when both fit, and otherwise first in the next chunk
+  (`TestChunk_AFlowRowIsChargedItsBytes`, `TestChunk_AChunkKeepsToItsBytes`).
+- **The root goes only after a recheck that the tree holds nothing else:** two probes, the first remaining descendant
+  and the first root step, not an `EXISTS` over the tree, which MariaDB materializes over the whole steps index
+  (275 ms on a 100,000-child tree). On MySQL and MariaDB the probes are locking reads, since a plain read there sees the
+  snapshot the chunk's first plain read took. A closed tree gains no flow, so this guards against a bug, not a path
+  (`TestChunk_ALateDescendantKeepsTheRoot`).
+- **Readers never see part of a tree**: the engine's reads reject a tree whose root is marked
+  (`engine/CLAUDE.md`, "Reading an archived flow").
 
 ## Large-tree archiving (`largearchiving.go`)
 
 The third job (`JobLargeArchiving`): every tree whose staged archive attempt has started - one too large to move in
 one transaction, its attempt started by fast archiving or by sweep archiving - copied into its attempt's day
 over as many transactions as it takes, invisible there, then published in one small one: the root last, the live root
-stamped for deletion with its attempt kept. The protocol - the attempt as the copy's identity and day, the stamp groups,
-the publication's wait for the next day, a dropped day replacing the attempt, `NOT EXISTS` rewrites, the open-flow
-guard, Delete abandoning the copy - is the reaper's, carried over (`internal/reaper/CLAUDE.md`, "Staged archival of a
-large tree", holds its rationale while the reaper stands).
+stamped for deletion with its attempt kept. The protocol:
+
+- **The attempt.** `claimAttempt`, under the live root's lock while the root is still due, joins the attempt T in
+  `archive_attempt_at`, or starts one at `NOW_UTC()` - only while the day is startable (before the quiet margin,
+  tomorrow whole) and only when T falls in the filing day, so the stamp groups have room. **T is the attempt's
+  identity and its day** (`DayOf(T)`), so two copiers on one T write the same rows, and a copier holding a replaced T
+  fails its next lock. A root with an attempt goes the staged way whatever its size, unsized
+  (`TestStage_AnAttemptedRootIsStagedWhateverItsSize`), and the atomic move locks only roots with none, so a selection
+  made before a claim cannot move the tree into a day that holds staged rows. When staging, a batch holds no more than
+  the staging threshold, rows and bytes, so a tree over it is alone and staged (`TestStage_EveryTreeOverTheThresholdIsStaged`).
+- **Every chunk re-locks the root and rechecks it: closed, unstamped, its attempt still T** (`stageChunk`). It copies
+  descendants in `flow_id` order, each flow's steps and then its flow row and directory row, bounded by the budget as a
+  chunked deletion is. Each write inserts only what is not there (`NOT EXISTS` by the stable id), so a rerun writes the
+  same rows (`TestStage_RestartInsideLargeFlow`). A tree holding a flow that is not closed is refused: only a bug leaves
+  one, and its copy would not be settled.
+- **Archive times are stamp groups, never the commit's time:** descendant i (in `flow_id` order) is stamped
+  `T + i/4096` ms (`stageGroup`), the root `T + G` with `G = ceil(N/4096)`. A flow's time is a function of the tree
+  alone, and no staged tree puts more than 4,096 flows on one time. A stamp past the day's end is an error that holds
+  the tree: a clamp would put its flows on one time. The lists show a staged tree under its attempt's time.
+- **Publication is the last chunk:** the root's last steps, its flow row and directory row, and the live root stamped
+  `delete_after_ms=1` with T kept and its `archived_at` copied from the archive root, in one transaction. Stamped with T
+  means published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`).
+  **It waits for the day after the attempt's to be whole**, since a locate finds a flow only where the day after its
+  own is. **A waiting copy first runs a statement on its own day**: a copy whose every row is in writes nothing else
+  there, so without it a dropped day would never fail a statement and the copy would wait forever
+  (`TestStage_ADroppedDayIsReplacedWhileWaitingToPublish`).
+- **A dropped day replaces the attempt.** A chunk's statement on a dropped `DayOf(T)` ends its transaction, so a fresh
+  one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
+  their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
+  archiver drops a day's flows table first).
+- **A Delete during staging** stamps the root and clears T, so the copier's next lock fails and the rows it copied stay
+  in the day, invisible, until the day drops (`TestStage_ADeleteAbandonsTheCopy`; the engine's Delete).
 
 - **It finds its trees by their attempt, through `idx_dwarf_flows_attempt`**, never by walking the due roots: one
   `LIMIT 1` after its position in `flow_id` order, wrapping at the end, so an attempt behind any number of roots without
@@ -446,7 +525,7 @@ large tree", holds its rationale while the reaper stands).
   only then does the job wait: idling after any tree without progress would let one stuck tree hold every other to a
   chunk a second (`TestStage_AStuckTreeDoesNotHoldTheOthers`). A failed chunk counts in `dwarf_archive_move_failures`
   and is logged.
-- **At a retention of 0 it copies nothing**, as the reaper's archive path never ran there: a tree whose attempt an earlier
+- **At a retention of 0 it copies nothing**, since nothing is archived there: a tree whose attempt an earlier
   run started is fast archiving's to delete, which it does attempt or not (its move fences on the attempt only when
   archiving, and its stamp clears it). Copying it as well would race the deletion and could publish a tree into an
   archive that keeps nothing (`TestStage_RetentionZeroArchivesNothing`).
@@ -485,5 +564,23 @@ large tree", holds its rationale while the reaper stands).
 Staging is off in production (`reapStageRows` 0): fast archiving starts no attempt, and the job copies only attempts
 already there. The engine and fixtures suites exercise it with `DWARF_STAGE_ROWS=1`.
 
+## The archive attempt (`attempt.go`) and publication accounting
+
+A live root's `archive_attempt_at` holds when its staged copy began: the copy's day and its identity.
+
+- **Every stamp of a live root but a publication clears the attempt in the same UPDATE** (`NoAttemptSQL`): live
+  retention's, a retention of 0's, Delete's. So a root stamped with an attempt is one published to the archive whose
+  live copy is being deleted (`AttemptedSQL`), and the engine routes reads, Fork and Continue of it to the archive's
+  copy. An expiration's mark writes none: an open root never has an attempt.
+- **`dwarf_flows_archived` counts publication; `dwarf_flows_reaped` counts live removals without it**, so their sum
+  does not count a staged tree twice. The deletions tell a published live copy from an unarchived tree under the root
+  lock (`publishedSQL`): stamped with its attempt, or carrying the `archived_at` its publication copied - which survives
+  a Delete clearing the attempt (`TestStage_PublishedCleanupNotUnarchived`, `TestDelete_APublishedLiveCopyIsNotCountedReaped`).
+  This provenance is not a visibility or authorization guard.
+
+## Tests
+
 Its tests run on a rig (`rig_test.go`): an isolated shard database, an archive with today's tables made, and a Manual
-janitor whose settings a test changes between passes.
+janitor whose settings a test changes between passes. Trees are seeded by direct `INSERT` (`seedTrees`), as valid
+closed trees. The engine keeps the behaviour oracle - archived reads, Purge, Delete, DeleteOnCompletion, expiration,
+the archive metrics - and its own copy of the seeder.

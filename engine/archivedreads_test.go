@@ -172,7 +172,7 @@ func TestArchivedReads_ArchivingChangesNoRead(t *testing.T) {
 	}
 }
 
-// readAcrossTheMove runs read held at checkpoint cp, after its first statement on the live tables, while the reaper
+// readAcrossTheMove runs read held at checkpoint cp, after its first statement on the live tables, while the janitor
 // moves the tree, and returns its result, failing the test unless the flow named by flowKey left the live tables. The
 // read's statements hold no locks between them, so the move commits while it is held, and its later statements run
 // after the move.
@@ -290,7 +290,6 @@ func TestArchivedReads_AwaitParkedAcrossTheMoveGetsTheOutcome(t *testing.T) {
 	t.Cleanup(unblock) // runs first, so a failed test frees the worker
 	e.SetHost(endingMux(release, started))
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	e.latchSweepInterval = time.Hour // the test sweeps
 	assert.NoError(e.SetRetention(30))
 	assert.Must(assert.NoError(e.Startup(ctx)))
@@ -381,7 +380,6 @@ func refEngine(t *testing.T) *Engine {
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(refTreeMux())
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	if err := e.SetRetention(30); err != nil {
 		t.Fatal(err)
 	}
@@ -876,7 +874,6 @@ func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
 		t.Cleanup(func() { e.Shutdown(context.Background()) })
 		e.SetHost(nestedMux())
 		e.archiveGrace = 0
-		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
 		assert.Must(assert.NoError(e.Startup(ctx)))
 		fk, err := e.Create(ctx, "nest/root", nil, nil)
@@ -910,7 +907,6 @@ func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
 		t.Cleanup(func() { e.Shutdown(context.Background()) })
 		e.SetHost(fanFailMux())
 		e.archiveGrace = 0
-		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
 		assert.Must(assert.NoError(e.Startup(ctx)))
 		fk, err := e.Create(ctx, "fan/root", nil, nil)
@@ -937,7 +933,7 @@ func TestArchivedReads_ForkFromAnArchivedSource(t *testing.T) {
 	})
 }
 
-// TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile pins Fork against the reaper: a source archived before the lock
+// TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile pins Fork against the janitor: a source archived before the lock
 // that opens Fork's live pass - the source is terminal, so it can be - is forked from the archive; and a source whose
 // day is gone by the archive pass is not found.
 func TestArchivedReads_ForkWhoseSourceIsArchivedMeanwhile(t *testing.T) {
@@ -1084,7 +1080,6 @@ func TestArchivedReads_ForkReadsTheArchivedGraph(t *testing.T) {
 		t.Cleanup(func() { e.Shutdown(context.Background()) })
 		e.SetHost(nestedFanMux())
 		e.archiveGrace = 0
-		e.reapInterval = time.Hour
 		assert.NoError(e.SetRetention(30))
 		assert.Must(assert.NoError(e.Startup(ctx)))
 		return e
@@ -1165,13 +1160,13 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		select {
 		case <-reaped:
 		case <-time.After(10 * time.Second * enginetest.TimeoutScale()):
-			t.Fatal("the reaper waited on the root Fork held")
+			t.Fatal("the janitor waited on the root Fork held")
 		}
 	} else {
 		// The pass waits on the root Fork holds.
 		select {
 		case <-reaped:
-			t.Error("the reaper finished while Fork held the source root")
+			t.Error("the janitor finished while Fork held the source root")
 		case <-time.After(500 * time.Millisecond * enginetest.TimeoutScale()):
 		}
 	}
@@ -1182,7 +1177,7 @@ func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 		_, _, sourceID, _, err := keys.ParseFlowKey(fk)
 		assert.NoError(err)
 		held, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", sourceID)
-		assert.NotZero(held, "the reaper moved the source tree while Fork held it")
+		assert.NotZero(held, "the janitor moved the source tree while Fork held it")
 	}
 	if !assert.NoError(r.err) {
 		return
@@ -1210,7 +1205,7 @@ func renameTable(ctx context.Context, db *sequel.DB, from, to string) error {
 }
 
 // TestArchivedReads_ForkWaitingOnTheMoveForksFromTheArchive pins Fork when its lock on the source root waits for a
-// reaper batch moving that tree: once the move commits, the live tables no longer hold the root, and the Fork must
+// janitor batch moving that tree: once the move commits, the live tables no longer hold the root, and the Fork must
 // find it in the archive rather than answer that the flow is scheduled for deletion - which a plain read of the root
 // after the wait reported on MySQL, whose transaction kept the snapshot from before the wait. The Fork's wait is not
 // observable, so the test gives it a moment to block; a Fork that had not yet blocked passes either way.

@@ -34,7 +34,7 @@ import (
 // preceding ORDER BY ("Invalid usage of the option NEXT in the FETCH statement"). Every LIMIT_OFFSET must
 // therefore carry an ORDER BY - even a pure existence probe where ordering is semantically irrelevant.
 //
-// This exact class broke SQL Server CI once (the reaper's due-root SELECT) and passes silently on the other
+// This exact class broke SQL Server CI once (the background removal's due-root SELECT) and passes silently on the other
 // three dialects, so it is worth a permanent guard rather than a dialect-CI round-trip. The check walks each
 // non-test source file's AST, flattens every string-concatenation chain (so an ORDER BY and a LIMIT_OFFSET in
 // different `+`-joined literals of the same statement are seen together), and fails any flattened SQL that

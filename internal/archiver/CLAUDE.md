@@ -60,16 +60,16 @@ its schema differs by dialect, and a sequel release may change it. Two consequen
 after - at any day length of 15 seconds or more, so in production; below that, as many as cover 30 seconds (`daysAhead`:
 15 at the tests' 2-second days). Rows are archived into the day they are
 archived - but for two writers into a past day. The batch a pass has in flight when the day turns lands in the day
-that just ended, its `archived_at` clamped to that day's last millisecond (`DayEnds`; the engine's reaper also stops a
+that just ended, its `archived_at` clamped to that day's last millisecond (`DayEnds`; the janitor's archiving also stops a
 margin before midnight, so this is rare). A staged archive attempt keeps the day it started in, across midnight, and
-publishes into it (`internal/reaper/CLAUDE.md`). **A drop takes the flows table first** (`dropDay`): a drop that
+publishes into it (`internal/janitor/CLAUDE.md`). **A drop takes the flows table first** (`dropDay`): a drop that
 stops between the two leaves no flows table, so such a publication fails on the missing table and is replaced, rather
 than inserting a root whose steps are gone. At a retention of 1 or more that day is kept through the whole of the next;
-at 0 nothing is archived. The reaper makes no table, and archives only while the archive's record holds tomorrow
+at 0 nothing is archived. The janitor makes no table, and archives only while the archive's record holds tomorrow
 whole (`Whole`). `EnsureToday` (Startup) and `Maintain` (every maintenance pass) make them, so at a day's length a day
 exists a whole day before it begins, and is missing at its start only after two days of failed passes. **Do not cut
 short days to two ahead.** Two days of 2 seconds leave the maintenance loop 4 seconds of slack, and making a day is a
-`Migrate` of DDL, slowest on MySQL and SQL Server: under several dialect gates run at once on one machine the reaper
+`Migrate` of DDL, slowest on MySQL and SQL Server: under several dialect gates run at once on one machine archiving
 found tomorrow not whole, its one pass archived nothing, and `TestDirectory_ShortDaysNameMovesFarFromTheHour` failed on
 MySQL and SQL Server. The cost of 30 seconds is 16 days made at Startup instead of 3, on short days only.
 **The day after tomorrow keeps a locate's `created+1` in place**: for a flow
@@ -85,7 +85,7 @@ Nothing drops today or a day after it - `Maintain` drops days before today minus
 day after today - so a maintenance pass reads only the clock until the day changes, rather than a `Migrate` and a
 catalog read per day. The record is per Archive, so each replica, and each Startup, checks once. `Maintain` reports a
 pass that advanced it (`newDay`), which the janitor counts as archive retention's progress. What it misses is a
-current day's tables dropped by hand; the reaper's move then fails, and the closed trees stay in the live tables until
+current day's tables dropped by hand; the janitor's move then fails, and the closed trees stay in the live tables until
 the day changes.
 
 **A day that cannot be dropped does not hold back the next.** `dropDays` goes on past a failed day - its lock held
@@ -134,7 +134,7 @@ made ahead - a shorter length's numbering, seen by a longer one - so Startup fai
 a shorter length reads a longer one's days as long expired, and its retention drops them.
 
 **`TodayLeft` rounds down.** The clock reads whole seconds, so up to one has passed by the reading; rounded down, the
-reaper never takes a day to last past its end.
+janitor never takes a day to last past its end.
 
 ### Locating an archived row
 
@@ -160,7 +160,7 @@ it for every archived read.
 - **The directory (`dwarf_flow_days`, a live table: `flow_id` to `day`) names only what the probes cannot find**: a
   flow archived two or more days after its creation day, or on a day before it (a straggler created while a batch
   begun before midnight ran, reachable only when a day is shorter than an hour). `DirectoryHours(day)` gives the
-  creation hours outside which a flow archived on `day` is named, and the reaper writes the rows in the move's own
+  creation hours outside which a flow archived on `day` is named, and the janitor writes the rows in the move's own
   transaction from the same rows it moves. Keeping both halves of the rule here - the probes and the hours - is what
   keeps them agreeing. So the directory holds the flows that ran about a day or longer (long approvals, long sleeps),
   none of the minute- or hour-long flows that make up the volume. **Do not make it name every archived flow** to drop
@@ -188,7 +188,7 @@ it for every archived read.
   statement again - the day after, then the directory alone, which a drop cannot reach. The statement does not say
   which table was missing, and need not. Days drop oldest first, so a missing creation day is the usual case; and **a
   row goes into a day only once the day after it is whole** (`ensureCurrent` makes the three days in order and records
-  them only together, and the reaper archives only after it), so when the day after the creation day is missing, the
+  them only together, and the janitor archives only after it), so when the day after the creation day is missing, the
   creation day holds nothing of the flow either. Keep that order: an archive into a day whose next day may be missing
   would make this leave out a day that holds the flow. A flow created on day 1 and archived on day 5 is still found
   once days 1 and 2 are gone.
@@ -211,7 +211,7 @@ it for every archived read.
   and the caller's read of it then fails on the missing table; the read paths take `IsUndefinedTableError` as not
   found. On MySQL a probe of a table being dropped waits behind the `DROP`'s metadata lock, which can itself wait on a
   long statement; only a locate of a day being dropped meets it, and the caller's deadline bounds it.
-- **A day with one table** - half made, or off PostgreSQL half dropped - holds no row a locate may find (the reaper
+- **A day with one table** - half made, or off PostgreSQL half dropped - holds no row a locate may find (the janitor
   writes only into a day `ensure` saw whole, and a drop is of an expired day). With its flows table gone it reads as
   dropped; with its steps table gone its flows table answers, empty.
 - **Retention deletes a day's directory rows** (`forgetDaysBefore`, every `Maintain` pass and `DropBefore`), by a bound
@@ -228,7 +228,7 @@ catalog read that began before a later read or before a drop by the archive not 
 preferred to a directory row, a dropped directory day returned as written, the creation day dropped and
 then both (the directory alone finding a later day), a day with either table missing, a failure other than a missing
 table (one only a probe meets) not read as a 404, `DirectoryHours` against the creation day for several day lengths, and retention deleting the
-directory's expired rows across batches. `internal/reaper`'s `TestMove_Directory*` pin the reaper's half - which moves it names - and the engine's
+directory's expired rows across batches. `internal/janitor`'s `TestMove_Directory*` pin the janitor's half - which moves it names - and the engine's
 `directory_test.go` a reader's `Refresh` on every pass of its catalog refresh.
 
 Pinned by `archiver_test.go` (the substitution itself by `internal/migrations`' tests): a day made with the live tables'

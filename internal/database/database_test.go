@@ -73,7 +73,7 @@ func TestResolveShardDSN_TestModeSubstitutesShardIndex(t *testing.T) {
 }
 
 // TestOnEach_ErrorNamesTheFailingShard pins that a shard's failure is attributable. Without the "shard"
-// property an operator sees the reaper or the refiller fail with a bare driver error and no clue WHICH
+// property an operator sees a background sweep or the refiller fail with a bare driver error and no clue WHICH
 // database is unhealthy - in a package whose contract is that a persistent outage degrades loudly.
 //
 // Also pins the deterministic choice among concurrent failures: every shard is attempted, and the LOWEST

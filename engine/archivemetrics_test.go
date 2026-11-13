@@ -24,8 +24,8 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/migrations"
-	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 	"go.opentelemetry.io/otel/attribute"
@@ -42,7 +42,6 @@ func meteredArchiveEngine(t *testing.T, mux *hosts.Mux, retention int) (*Engine,
 	e.SetHost(mux)
 	e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	if err := e.SetRetention(retention); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +103,7 @@ func backdate(t *testing.T, e *Engine, rootID int, ago time.Duration) {
 }
 
 // TestArchiveMetrics_TheReaperCountsWhatItMoves pins the archiving instruments: the flows archived, counted per flow
-// of each tree; the lag, read at fast archiving's last probe, 0 once none is due; the reaper pass's time; and, while
+// of each tree; the lag, read at fast archiving's last probe, 0 once none is due; and, while
 // archiving fails, the failing time without premature deletion. The lag's value past the grace is pinned by
 // internal/janitor's TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace.
 func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
@@ -145,7 +144,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
 	assert.Equal(int64(4), sumAt(rm, "dwarf_flows_archived", shard1), "nothing more archived")
 	failing, _ = failingAt(rm, "1")
 	assert.True(failing >= 0.02, "failing since the first pass, got %v", failing)
@@ -168,8 +167,8 @@ func TestArchiveMetrics_DeletionsAreCountedByReason(t *testing.T) {
 
 	rm := collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_flows_removed", map[string]string{"shard": "1", "side": removedFromLive, "op": "delete"}))
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonNoRetention}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonDeleted}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonNoRetention}))
 	assert.Zero(sumAt(rm, "dwarf_flows_archived", nil))
 }
 
@@ -185,7 +184,7 @@ func TestArchiveMetrics_RemovalsAreCountedBySide(t *testing.T) {
 	purged := closedKeys(t, e, 1)
 	e.reapDueFlows(ctx)
 	assert.NoError(e.Delete(ctx, deleted[0]))
-	live := closedKeys(t, e, 1) // left in the live tables: the reaper does not pass again
+	live := closedKeys(t, e, 1) // left in the live tables: the janitor does not drain again
 	removed, _, err := e.Purge(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
 	assert.Equal(1, removed, "the archived root %s, not the live one %s", purged[0], live[0])
@@ -256,7 +255,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 }
 
-// TestArchiveMetrics_AReplicaThatStopsReapingForgets pins that a replica forgets a shard's reaper readings once it
+// TestArchiveMetrics_AReplicaThatStopsReapingForgets pins that a replica forgets a shard's janitor readings once it
 // stops dispatching there: when it dispatches again, it reports no old failure or lag, and its next failure starts a
 // fresh failure interval.
 func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
@@ -286,7 +285,7 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	// Returning to the shard does not authorize deletion.
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
 }
 
 // An unavailable archive holds records without incrementing either deletion counter.
@@ -314,8 +313,8 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 		t.Skip("midnight passed during the passes")
 	}
 	rm := collect(t, reader)
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonNoRetention}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonNoRetention}))
 }
 
 // TestArchiveMetrics_TheSweepReportsHeldWork pins the sweep gauges of closed trees, which sweep archiving reports:
@@ -345,7 +344,7 @@ func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	assert.True(ok)
 	assert.True(age >= 119)
 	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 4, "fast archiving's batch and the sweep's three")
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
+	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
 	e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(t.Context())
 	rm = collect(t, reader)
@@ -369,8 +368,8 @@ func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) 
 	e.reapDueFlows(t.Context())
 	e.reapDueFlows(t.Context())
 	rm := collect(t, reader)
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
-	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonDeleted}))
 	assert.Zero(sumAt(rm, "dwarf_flows_archived", map[string]string{"shard": "1"}))
 	assert.False(live(t, e, root))
 }

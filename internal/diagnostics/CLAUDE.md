@@ -47,8 +47,7 @@ surface. A test outside package engine reaches the engine's seams through `inter
 **This package must stay production-safe and import no component:** every component imports it for the names
 and its `Diags`, so it must not import `testing`, `testarossa` or anything test-only - which is why the names
 cannot live in `internal/enginetest`, the shared test helpers - nor any component, or the two are an import
-cycle. The reaper is the exception that proves the second rule: it predates the catalogue and keeps its own copies
-of its names, pinned equal to these by `engine`'s `TestJanitor_SharesTheReapersFaultNames`.
+cycle.
 
 **Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
 effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be

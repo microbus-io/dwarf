@@ -27,7 +27,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/migrations"
-	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
@@ -36,14 +35,13 @@ import (
 )
 
 // runningJanitorEngine starts an engine whose janitors run their jobs in the background, waiting idle a short while,
-// archiving closed roots at once, with the reaper kept out of the way.
+// archiving closed roots at once, with the janitors run by the test.
 func runningJanitorEngine(t *testing.T, mux *hosts.Mux) *Engine {
 	t.Helper()
 	e := NewEngineUnderTest(t.Name())
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(mux)
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	e.janitorManual = false
 	e.janitorIdle = 10 * time.Millisecond
 	if err := e.SetRetention(30); err != nil {
@@ -280,28 +278,6 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	assert.Len(ages(), 0, "a shard no longer dispatched is not reported")
 }
 
-// TestJanitor_SharesTheReapersFaultNames pins the reaper's own copies of its seam names to the catalogue's, which the
-// janitor consults: a test arming a name through internal/diagnostics then arms the reaper's site as well, and the
-// janitor's beside it while both run.
-func TestJanitor_SharesTheReapersFaultNames(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
-	assert.Equal(reaper.FaultMidTree, diagnostics.FaultReapMidTree)
-	assert.Equal(reaper.FaultSizeErr, diagnostics.FaultReapSizeErr)
-	assert.Equal(reaper.FaultSelectErr, diagnostics.FaultReapSelectErr)
-	assert.Equal(reaper.FaultContention, diagnostics.FaultReapContention)
-	assert.Equal(reaper.FaultArchiveErr, diagnostics.FaultReapArchiveErr)
-	assert.Equal(reaper.FaultArchiveDelete, diagnostics.FaultArchiveDelete)
-	assert.Equal(reaper.FaultStageChunk, diagnostics.FaultReapStageChunk)
-	assert.Equal(reaper.FaultStageLost, diagnostics.FaultReapStageLost)
-	assert.Equal(reaper.CheckpointBatchLocked, diagnostics.CheckpointReapBatchLocked)
-	assert.Equal(reaper.CheckpointBeforeRootDelete, diagnostics.CheckpointReapBeforeRootDelete)
-	assert.Equal(reaper.CheckpointChunkDone, diagnostics.CheckpointReapChunkDone)
-	assert.Equal(reaper.CheckpointStageChunkDone, diagnostics.CheckpointReapStageChunkDone)
-	assert.Equal(reaper.CheckpointArchiveDeleted, diagnostics.CheckpointReapArchiveDeleted)
-	assert.Equal(reaper.ReasonNoRetention, janitor.ReasonNoRetention)
-}
-
 // TestJanitor_TheGraceOverrideReachesTheJobs pins the grace a test's ArchiveNow passes: the janitors' rounds under it
 // archive a root closed just now, which the archive grace keeps them from otherwise; and the archive grace is theirs
 // again after it.
@@ -365,10 +341,9 @@ func TestJanitor_TheSweepStartsWhatFastArchivingLeftBehind(t *testing.T) {
 				t.Skip("a held root is skipped, not waited for, on PostgreSQL, MySQL and MariaDB")
 			}
 			attempted := func(root int) bool {
-				cond, args := reaper.AttemptedSQL(db.DriverName())
 				var n int
-				assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+cond,
-					append([]any{root}, args...)...).Scan(&n)))
+				assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+
+					janitor.AttemptedSQL(db.DriverName()), root).Scan(&n)))
 				return n == 1
 			}
 			today, err := e.archiveOn(1).Today(ctx)

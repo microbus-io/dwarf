@@ -85,7 +85,7 @@ func AssertInvariants(t *testing.T, e Engine) {
 		}
 
 		// 1. No closed flow retains a non-terminal step. Delete-marked flows (delete_after_ms>0) are excluded:
-		// Delete flips an interrupted flow to cancelled but leaves its interrupted leaf for the reaper to remove
+		// Delete flips an interrupted flow to cancelled but leaves its interrupted leaf for the janitor to remove
 		// with the whole tree (deferred deletion), so a doomed row legitimately carries a non-terminal step
 		// until reaped - inert meanwhile (selection/lease-recovery ignore interrupted; Resume 409s the cancelled
 		// flow).

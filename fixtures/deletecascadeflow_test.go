@@ -123,10 +123,10 @@ func TestDeletecascadeflow(t *testing.T) {
 	_, err = eng.Step(ctx, grandchildKey)
 	assert.NoError(err)
 
-	// Delete the root flow. Delete schedules the whole tree for the reaper (it stamps the root, and the reaper
+	// Delete the root flow. Delete schedules the whole tree for deletion (it stamps the root, and the janitor
 	// removes root + descendants keyed on root_flow_id); it does not delete inline. The observable public
 	// contract is that the flow is logically gone: History 404s and it drops out of List. The physical tree
-	// removal is covered by the engine-package reaper tests.
+	// removal is covered by the engine-package deletion tests.
 	err = eng.Delete(ctx, flowKey)
 	assert.NoError(err)
 

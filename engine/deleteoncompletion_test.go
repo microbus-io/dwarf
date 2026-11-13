@@ -45,7 +45,7 @@ func shardFlowCount(t *testing.T, e *Engine, shardNum int) int {
 }
 
 // waitFlowDeleted polls until the flow's row (and steps) are gone, failing the test on timeout. Call it once the
-// flow has stopped (enginetest.AwaitFlowStatus), so the timeout covers only the reaper's tick behind it, not the
+// flow has stopped (enginetest.AwaitFlowStatus), so the timeout covers only the janitors' idle wait behind it, not the
 // flow's run as well - a run on a loaded server is unbounded.
 //
 // The timeout is a "did it hang" ceiling, not a timing contract, so it stretches under -race the same way the
@@ -73,14 +73,13 @@ func waitFlowDeleted(t *testing.T, e *Engine, flowKey string, timeout time.Durat
 	t.Fatalf("flow %s was not deleted within %s", flowKey, timeout*enginetest.TimeoutScale())
 }
 
-// shortenDeletion overrides the engine's deletion grace / reaper cadence. Must be called after
-// NewEngineUnderTest and before Startup (the reaper reads reapInterval at Startup; completeFlow reads deletionGrace at
-// completion). Per-engine fields, so there is nothing to restore. An interval under a minute means the test wants
-// removal in the background: the janitors then run their jobs (not janitorManual, test mode's default), waiting that
-// long after a round without progress. A longer one means the test drives the removals itself.
+// shortenDeletion overrides the engine's deletion grace and the janitors' cadence. Must be called after
+// NewEngineUnderTest and before Startup (completeFlow reads deletionGrace at completion). Per-engine fields, so there is
+// nothing to restore. An interval under a minute means the test wants removal in the background: the janitors then
+// run their jobs (not janitorManual, test mode's default), waiting that long after a round without progress. A longer
+// one means the test drives the removals itself.
 func shortenDeletion(e *Engine, grace, interval time.Duration) {
 	e.deletionGrace = grace
-	e.reapInterval = interval
 	if interval < time.Minute {
 		e.janitorManual = false
 		e.janitorIdle = interval
@@ -88,7 +87,7 @@ func shortenDeletion(e *Engine, grace, interval time.Duration) {
 }
 
 // TestDeleteOnCompletion_ReaperDeletesOnSuccess asserts a flow created with DeleteOnCompletion is removed (row
-// and steps) by the background reaper once its grace window elapses.
+// and steps) by the janitors in the background once its grace window elapses.
 func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -119,8 +118,8 @@ func TestDeleteOnCompletion_ReaperDeletesOnSuccess(t *testing.T) {
 }
 
 // TestDeleteOnCompletion_OutcomeObservableThenReaped asserts the new deferred-deletion contract: a disposable
-// flow stays `completed` for the grace window so Await/Snapshot serve its outcome, then the reaper removes it
-// and reads 404. A long reapInterval keeps the background reaper out; the test forces one reap pass itself.
+// flow stays `completed` for the grace window so Await/Snapshot serve its outcome, then the janitor removes it
+// and reads 404. Test mode runs the janitors only on a drain, which the test forces itself.
 func TestDeleteOnCompletion_OutcomeObservableThenReaped(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -195,8 +194,8 @@ func TestDeleteOnCompletion_RunReturnsOutcome(t *testing.T) {
 }
 
 // TestDelete_ReaperRemovesTree pins the operator path for a flow closed but not archived yet: Delete marks the root
-// (it does not delete inline), and the reaper then removes the root AND its subgraph child (keyed on root_flow_id) -
-// the no-orphan guarantee. A long reapInterval keeps the background reaper out; the test forces one reap pass.
+// (it does not delete inline), and the janitor then removes the root AND its subgraph child (keyed on root_flow_id) -
+// the no-orphan guarantee. Test mode runs the janitors only on a drain, which the test forces.
 func TestDelete_ReaperRemovesTree(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -266,15 +265,15 @@ func TestDeleteOnCompletion_KeepsFailedFlow(t *testing.T) {
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusFailed, time.Minute) // the minute bounds only a hang
 
-	// The failed flow is never scheduled for deletion, so no reaper pass - now or later - can remove it.
+	// The failed flow is never scheduled for deletion, so no drain - now or later - can remove it.
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	assert.Equal(1, enginetest.CountRows(t, e, shardNum, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND delete_after_ms=0", flowID))
 }
 
-// TestDeleteOnCompletion_ReaperCascadesSubgraph asserts that when a disposable root flow completes, the reaper
-// removes it AND its subgraph descendants (keyed on root_flow_id; the child carries no flag of its own). A
-// long reapInterval keeps the background reaper out; the test forces one reap pass once the root completes.
+// TestDeleteOnCompletion_ReaperCascadesSubgraph asserts that when a disposable root flow completes, the janitor
+// removes it AND its subgraph descendants (keyed on root_flow_id; the child carries no flag of its own). Test mode
+// runs the janitors only on a drain, which the test forces once the root completes.
 func TestDeleteOnCompletion_ReaperCascadesSubgraph(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -379,8 +378,8 @@ func TestDeleteOnCompletion_HistoryOfAChildHidesWithItsRoot(t *testing.T) {
 
 // TestDeleteOnCompletion_OutcomeObservableUnderConcurrency hammers many disposable flows concurrently to pin
 // the deferred-deletion contract under contention: every Await must return the completed outcome cleanly (the
-// flow stays observable during its grace window). A long reapInterval keeps the reaper from removing any flow
-// mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
+// flow stays observable during its grace window). A long grace and interval keep the janitors from removing any
+// flow mid-test, so a missing/errored outcome would signal a real defect (torn completion write, lost outcome).
 func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -400,7 +399,7 @@ func TestDeleteOnCompletion_OutcomeObservableUnderConcurrency(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	e.SetWorkers(8)
-	// Keep grace at the production default and the reaper effectively off, so no flow is removed mid-test
+	// Keep grace at the production default and the janitors run only by the test, so no flow is removed mid-test
 	// and a missing/errored outcome would signal a real defect.
 	shortenDeletion(e, time.Minute, time.Hour)
 	assert.Must(assert.NoError(e.Startup(t.Context())))

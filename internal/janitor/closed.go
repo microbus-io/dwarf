@@ -198,7 +198,7 @@ func stampClosed(ctx context.Context, h handle, root int, due string, dueArgs []
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
-		none, noneArg := noAttemptSQL(tx.DriverName())
+		none, noneArg := NoAttemptSQL(tx.DriverName())
 		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id="+id, noneArg); err != nil {
 			return errors.Trace(err)
 		}

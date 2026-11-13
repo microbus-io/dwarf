@@ -45,7 +45,7 @@ func name(t *testing.T, db *sequel.DB, flowID, day int) {
 	}
 }
 
-// archive writes a root flow row - its own root, so visible - into a day's flows table, as the reaper would.
+// archive writes a root flow row - its own root, so visible - into a day's flows table, as the janitor would.
 func archive(t *testing.T, db *sequel.DB, flowID, day int) {
 	t.Helper()
 	_, err := db.ExecContext(t.Context(), "INSERT INTO "+migrations.FlowsTable(day)+
@@ -366,7 +366,7 @@ func TestArchiver_ALocateErrorIsNotANotFound(t *testing.T) {
 	assert.False(sequel.IsUndefinedTableError(err), err)
 }
 
-// TestArchiver_DirectoryHours pins the bounds the reaper names flows by, for the production day and for days of
+// TestArchiver_DirectoryHours pins the bounds the janitor names flows by, for the production day and for days of
 // seconds and of hours: a flow archived on day is named exactly when its creation day is before day-1 or after day.
 func TestArchiver_DirectoryHours(t *testing.T) {
 	t.Parallel()

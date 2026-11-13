@@ -477,8 +477,8 @@ const (
 // rowCounts returns the step and flow rows in the live tables on every shard, and with archive those in every archive
 // day's tables too, with a COUNT(*) on each table: dialect-agnostic, unlike the catalog queries the disk sampler uses.
 // Each is a full scan, which the bench can afford against databases it owns, but not on a poll. The tables are counted
-// one after another, not in one snapshot, so a tree the reaper moves between two counts is counted twice or missed: a
-// count is exact to within a reaper batch. It fails if any shard fails to count: a zero would read as an empty
+// one after another, not in one snapshot, so a tree the janitor moves between two counts is counted twice or missed: a
+// count is exact to within a janitor batch. It fails if any shard fails to count: a zero would read as an empty
 // database.
 func rowCounts(ctx context.Context, eng *engine.Engine, archive bool) (steps, flows int, err error) {
 	sctx, cancel := context.WithTimeout(ctx, 30*time.Second)

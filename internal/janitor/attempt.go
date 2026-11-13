@@ -30,16 +30,17 @@ import (
 // noAttempt is archive_attempt_at's value for a live root with no archive attempt: the column's default.
 var noAttempt = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// noAttemptSQL returns the SQL of archive_attempt_at's "no attempt" value on driver, holding one placeholder, and the
-// argument to bind to it.
-func noAttemptSQL(driver string) (expr string, arg string) {
+// NoAttemptSQL returns the SQL of archive_attempt_at's "no attempt" value on driver, holding one placeholder, and the
+// argument to bind to it. Every stamp of a live root but a publication writes it in the same UPDATE, so a root stamped
+// with an attempt is one published to the archive.
+func NoAttemptSQL(driver string) (expr string, arg string) {
 	return database.SQLTime(driver, noAttempt)
 }
 
-// attemptedSQL is the condition, on a live flows row, that it has an archive attempt, with the no-attempt value
+// AttemptedSQL is the condition, on a live flows row, that it has an archive attempt, with the no-attempt value
 // inlined as the column's default spells it: idx_dwarf_flows_attempt is partial on exactly this, and a planner uses a
 // partial index only for a query whose own predicate implies the index's - which a bound value cannot show.
-func attemptedSQL(driver string) string {
+func AttemptedSQL(driver string) string {
 	if driver == "sqlite" {
 		return "archive_attempt_at>'2000-01-01 00:00:00.000'" // text, compared as NOW_UTC() spells it
 	}
@@ -48,7 +49,7 @@ func attemptedSQL(driver string) string {
 
 // attemptsAmong returns the roots among roots that have an archive attempt: one primary-key read of the roots.
 func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int]bool, error) {
-	none, arg := noAttemptSQL(q.DriverName())
+	none, arg := NoAttemptSQL(q.DriverName())
 	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+database.IntList(roots)+")"+
 		" AND archive_attempt_at>"+none, arg)
 	if err != nil {

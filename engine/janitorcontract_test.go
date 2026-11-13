@@ -33,11 +33,11 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// reaperKinds are the kinds the reaper's gauges are reported for.
-var reaperKinds = []string{"closed", "deleted", "retention"}
+// sweepKinds are the kinds the janitor's sweep gauges are reported for.
+var sweepKinds = []string{"closed", "deleted", "retention"}
 
-// holdARoot leaves the reaper holding one closed root on shard 1: its archive move fails, so repair counts it held and
-// its sweep stays open, and the pass reads an archive lag.
+// holdARoot leaves the janitor holding one closed root on shard 1: its archive move fails, so sweep archiving counts it
+// held, and fast archiving's probe reads an archive lag.
 func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	t.Helper()
 	root := seedTrees(t, db, 1, callShape)[0]
@@ -52,12 +52,12 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	e.reapDueFlows(t.Context())
 }
 
-// assertNoReaperReadings asserts that the reaper's gauges on shard 1 report no reading of a previous run: every kind's
-// series at zero, and no archive lag.
-func assertNoReaperReadings(t *testing.T, rm metricdata.ResourceMetrics) {
+// assertNoJanitorReadings asserts that the janitor's gauges on shard 1 report no reading of a previous run: every
+// kind's series at zero, and no archive lag.
+func assertNoJanitorReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	t.Helper()
 	assert := testarossa.For(t)
-	for _, kind := range reaperKinds {
+	for _, kind := range sweepKinds {
 		attrs := map[string]string{"shard": "1", "kind": kind}
 		for _, name := range []string{"dwarf_archive_held_roots", "dwarf_archive_oldest_held_seconds", "dwarf_archive_sweep_seconds"} {
 			v, ok := gaugeAt(rm, name, attrs)
@@ -85,9 +85,9 @@ func assertHeldReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	assert.True(ok, "a lag was read")
 }
 
-// TestReaperContract_ARestartForgetsTheWalksAndTheLag pins that the reaper's readings live as long as the engine's run:
+// TestJanitorContract_ARestartForgetsTheWalksAndTheLag pins that the janitor's readings live as long as the engine's run:
 // after a held root, a Shutdown and a Startup report no held root, no sweep in progress and no archive lag.
-func TestReaperContract_ARestartForgetsTheWalksAndTheLag(t *testing.T) {
+func TestJanitorContract_ARestartForgetsTheWalksAndTheLag(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -100,12 +100,12 @@ func TestReaperContract_ARestartForgetsTheWalksAndTheLag(t *testing.T) {
 
 	assert.NoError(e.Shutdown(ctx))
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	assertNoReaperReadings(t, collect(t, reader))
+	assertNoJanitorReadings(t, collect(t, reader))
 }
 
-// TestReaperContract_AFailedStartupLeavesNoReadings pins that a Startup that fails, and the one that then succeeds,
+// TestJanitorContract_AFailedStartupLeavesNoReadings pins that a Startup that fails, and the one that then succeeds,
 // report none of the previous run's readings.
-func TestReaperContract_AFailedStartupLeavesNoReadings(t *testing.T) {
+func TestJanitorContract_AFailedStartupLeavesNoReadings(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -120,15 +120,15 @@ func TestReaperContract_AFailedStartupLeavesNoReadings(t *testing.T) {
 	e.diags.Seams().InjectN(diagnostics.FaultInitRuntime, 1)
 	assert.Error(e.Startup(ctx))
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	assertNoReaperReadings(t, collect(t, reader))
+	assertNoJanitorReadings(t, collect(t, reader))
 }
 
-// TestReaperContract_EveryKindIsReportedFromTheStart pins that a dispatching engine reports the reaper's gauges for all
-// three kinds, at zero, before its first pass.
-func TestReaperContract_EveryKindIsReportedFromTheStart(t *testing.T) {
+// TestJanitorContract_EveryKindIsReportedFromTheStart pins that a dispatching engine reports the janitor's sweep gauges
+// for all three kinds, at zero, before its first round.
+func TestJanitorContract_EveryKindIsReportedFromTheStart(t *testing.T) {
 	t.Parallel()
 	_, reader := meteredArchiveEngine(t, hosts.NewMux(), 30)
-	assertNoReaperReadings(t, collect(t, reader))
+	assertNoJanitorReadings(t, collect(t, reader))
 }
 
 // TestArchiveDeletion_DeleteAndPurgeOnlyMark pins that Purge and Delete of archived trees only mark them: they
@@ -177,7 +177,7 @@ func TestArchiveDeletion_DeleteAndPurgeOnlyMark(t *testing.T) {
 	}
 }
 
-// TestArchiveDeletion_TheSweepTakesTheRowBudget pins Purge's transactions to the reaper's row budget: trees of four
+// TestArchiveDeletion_TheSweepTakesTheRowBudget pins Purge's transactions to the janitor's row budget: trees of four
 // rows each (two flows of a step each) that a Purge marked are deleted by the archive deletion sweep in transactions of
 // at most the budget: at eight, the sweep's first batch of one root, then two, then the last; at four, one a
 // transaction.
@@ -191,7 +191,6 @@ func TestArchiveDeletion_TheSweepTakesTheRowBudget(t *testing.T) {
 			t.Cleanup(func() { e.Shutdown(context.Background()) })
 			e.SetHost(hosts.NewMux())
 			e.archiveGrace = 0
-			e.reapInterval = time.Hour
 			assert.NoError(e.SetRetention(30))
 			assert.Must(assert.NoError(e.Startup(ctx)))
 			sh, err := e.db.Shard(1)
@@ -217,9 +216,9 @@ func TestArchiveDeletion_TheSweepTakesTheRowBudget(t *testing.T) {
 	}
 }
 
-// TestReaperContract_APartialPurgeCountsWhatItRemoved pins a Purge that fails part-way: it reports the roots its
+// TestJanitorContract_APartialPurgeCountsWhatItRemoved pins a Purge that fails part-way: it reports the roots its
 // committed statements marked, and dwarf_flows_removed counts exactly those. The second statement's mark is faulted.
-func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
+func TestJanitorContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -246,9 +245,9 @@ func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_removed", map[string]string{"shard": "1", "op": "purge"}))
 }
 
-// TestReaperContract_ANonDispatcherTakesNoTurn pins that a pass on a shard this replica does not dispatch takes no
-// turn there: with no turn to be had, the pass returns at once, while a dispatching replica's pass waits for one.
-func TestReaperContract_ANonDispatcherTakesNoTurn(t *testing.T) {
+// TestJanitorContract_ANonDispatcherTakesNoTurn pins that a drain on a shard this replica does not dispatch takes no
+// turn there: with no turn to be had, the drain returns at once, while a dispatching replica's waits for one.
+func TestJanitorContract_ANonDispatcherTakesNoTurn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -273,40 +272,4 @@ func TestReaperContract_ANonDispatcherTakesNoTurn(t *testing.T) {
 	start = time.Now()
 	e.reapDueFlows(bounded)
 	assert.True(time.Since(start) >= wait, "a dispatcher's pass waits for a turn: %v", time.Since(start))
-}
-
-// TestReaperContract_ThePassTimeExcludesExpiration pins dwarf_reap_pass_seconds to the reap alone: an expiration stage
-// held for half a second after it is not counted in it. The bound is the whole call's time less the hold, not the hold
-// itself: a pass on a loaded SQL Server took 0.6 s alone, which a bound of the hold read as the hold counted.
-func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
-	t.Skip("janitor step 7: the reaper's pass runs nothing and is not called, and dwarf_reap_pass_seconds goes with it")
-	t.Parallel()
-	assert := testarossa.For(t)
-	ctx := t.Context()
-	e, reader, _ := expiryEngine(t, time.Hour)
-	expiring := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
-	age(t, e, expiring, 2*time.Hour)
-
-	e.diags.Seams().Break(diagnostics.CheckpointTerminateAfterScan)
-	done := make(chan struct{})
-	start := time.Now()
-	go func() {
-		defer close(done)
-		expireNow(ctx, e)
-	}()
-	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointTerminateAfterScan, 10*time.Second*enginetest.TimeoutScale())))
-	const held = 500 * time.Millisecond
-	time.Sleep(held)
-	e.diags.Seams().Resume(diagnostics.CheckpointTerminateAfterScan)
-	<-done
-	whole := time.Since(start)
-	status, _ := statusOf(t, e, expiring)
-	assert.Equal(workflow.StatusTerminated, status, "the expiration ran in the pass")
-
-	shard1 := map[string]string{"shard": "1"}
-	rm := collect(t, reader)
-	n, ok := histCount(rm, "dwarf_reap_pass_seconds", shard1)
-	assert.True(ok && n == 1, "one pass: %d", n)
-	sum, _ := histSum(rm, "dwarf_reap_pass_seconds", shard1)
-	assert.True(sum <= (whole-held).Seconds(), "the pass took %vs of a %v call, the expiration was held %v", sum, whole, held)
 }

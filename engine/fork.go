@@ -65,7 +65,7 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	defer doneTurn()
 
 	// The live tables first, then the day the tree was archived in. Each pass opens its transaction by locking the
-	// source root, and reads the source only under that lock: the reaper locks a root before it moves the tree, so a
+	// source root, and reads the source only under that lock: the janitor locks a root before it moves the tree, so a
 	// tree the live pass locked stays live for the whole clone, and a live pass that locks nothing finds the tree
 	// archived or never there. Nothing moves back out of the archive. The fork's root span is minted once, by
 	// whichever pass first gets that far.
@@ -118,7 +118,7 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 		// against a concurrent writer the upgrade cannot wait, so SQLite returns SQLITE_BUSY (SQLITE_LOCKED under a
 		// shared cache) at once whatever the busy timeout, and every Transact retry is read-first again (measured:
 		// ~1 Fork in 8 failed under the bench soak). Locking the source root first makes the first statement a write
-		// there; on the server dialects it is a locking read, which holds off the reaper and a Delete or Purge of
+		// there; on the server dialects it is a locking read, which holds off the janitor and a Delete or Purge of
 		// the source while it is cloned. An archived source is locked in its day's table by the same statement: on
 		// SQLite and SQL Server it flips the archived root's touch, the one write an archived row takes.
 		var cerr error
@@ -166,7 +166,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 	// The root is locked only if it has closed and is not marked for deletion, tested on the row the lock takes: that is
 	// the row as it stands once the lock is granted. A root not closed is not locked at all, so a Fork refused for it
 	// crosses no lock order with Terminate. The root is named through the fork step and its token, so a key with a
-	// forged token locks nothing: the lock is a write on SQLite and SQL Server, and holds off the reaper everywhere.
+	// forged token locks nothing: the lock is a write on SQLite and SQL Server, and holds off the janitor everywhere.
 	rootOf := "flow_id=(SELECT f.root_flow_id FROM " + src.flows + " f JOIN " + src.steps + " s ON s.flow_id=f.flow_id" +
 		" WHERE f.flow_id=? AND f.created_hour=? AND s.step_id=? AND s.step_token=? AND s.flow_created_hour=?)"
 	rootArgs := []any{forkFlowID, forkStepHour, forkStepID, forkStepToken, forkStepHour}

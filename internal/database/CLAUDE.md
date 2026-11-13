@@ -156,7 +156,7 @@ archive lists its days. Pinned by `TestCheckOwner_ANonOwnerFails` (PostgreSQL).
 
 Every statement that compares a time column with a Go time binds `SQLTime`'s text, never a `time.Time`: rounded UP to
 the millisecond the columns hold (`internal/migrations/CLAUDE.md`, "Timestamps come from the database clock"), in
-UTC, cast to the dialect's column type, and clamped to the year 9999. The engine's lists and the reaper's walks both
+UTC, cast to the dialect's column type, and clamped to the year 9999. The engine's lists and the janitor's scans both
 use it; a second copy would split the rounding that keeps an inclusive and an exclusive bound exact. Pinned by
 `sqltime_test.go`, on every dialect and in a PostgreSQL session whose zone is not UTC.
 
@@ -178,7 +178,7 @@ query becomes 80ms wall-clock); the parallel shape stays at single-shard latency
 single-shard case skips the goroutines.)
 
 **The error names its shard.** `OnEach` annotates whatever it returns with a `"shard"` property
-(`errors.Trace(err, "shard", idx)`), because a bare driver error tells an operator that the reaper or the refiller
+(`errors.Trace(err, "shard", idx)`), because a bare driver error tells an operator that a background sweep or the refiller
 failed but not WHICH database is unhealthy - and this package's contract is that a persistent outage degrades
 *loudly*. It must stay a **named** pair: an unnamed `int` in this `errors` package is interpreted as an HTTP status
 code, so passing the index bare would silently stamp the error's status instead. When several shards fail
@@ -190,7 +190,7 @@ attempt was rejected: real outages mostly manifest as hangs, not errors; classif
 errors is driver-specific and brittle; and a helper that *claims* partial tolerance only in a narrow subset of failure
 modes lies to operators about resilience. `OnEach` is invoked once per shard with the resolved DB and the shard
 index; any non-nil return fails the whole call. Each caller retries on its next natural cycle (`recoverExpiredLeases`
-and the reaper on their next tick, the latch detector on its next sweep), so a transient hiccup heals within one cycle
+and the archive's catalog refresh on their next tick, the latch detector on its next sweep), so a transient hiccup heals within one cycle
 and a persistent outage degrades loudly. (The pistons do not use `OnEach`: each runs against its own shard.)
 
 **DSN format & test-mode resolution.** Each shard carries its own DSN (`Config.Shards`, index -> `ShardConfig`).

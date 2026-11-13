@@ -33,6 +33,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -551,7 +552,7 @@ func (e *Engine) snapshot(ctx context.Context, flowKey string) (*workflow.FlowOu
 }
 
 // await blocks until a flow stops. A DeleteOnCompletion flow stays `completed` (outcome observable) for the
-// deletion grace window, then the reaper removes it and await 404s.
+// deletion grace window, then the janitor removes it and await 404s.
 func (e *Engine) await(ctx context.Context, flowKey string) (*workflow.FlowOutcome, error) {
 	// A caller that named no deadline is given one. Nothing else bounds the park: a waiter is released only
 	// by a status the board reports, so a flow that never stops would block its caller for the life of the
@@ -998,10 +999,10 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	return nil
 }
 
-// deleteFlow removes a closed flow and its subgraph subtree. A live one is scheduled for deletion by the reaper - its
-// rows are not deleted inline: it stamps delete_after_ms=1 (due immediately) on the root, and the reaper removes the
-// whole tree on its next pass. An archived one is removed in its day (deleteArchivedFlow). An open flow is a 409:
-// the caller terminates it first, so Delete cannot race a Resume.
+// deleteFlow removes a closed flow and its subgraph subtree. A live one is marked for deletion - its rows are not
+// deleted inline: it stamps delete_after_ms=1 (due at once) on the root, and the janitor's deletion jobs remove the
+// whole tree. An archived one is marked in its day (deleteArchivedFlow). An open flow is a 409: the caller terminates
+// it first, so Delete cannot race a Resume.
 func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	shardNum, flowHour, flowID, flowToken, err := keys.ParseFlowKey(flowKey)
 	if err != nil {
@@ -1032,12 +1033,12 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 		return errors.Trace(err)
 	}
 	// A subgraph child cannot be deleted directly (its parent's surgraph step would dangle). Address the
-	// tree by the root key; the reaper removes descendants via root_flow_id. A child key is read-only.
+	// tree by the root key; the deletion removes descendants via root_flow_id. A child key is read-only.
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
 	// The 409 guards only the ROOT's status; a running subgraph descendant of a closed root does not block the
-	// delete. The reaper later removes the whole root_flow_id tree regardless of descendant status - safe because
+	// delete. The deletion later removes the whole root_flow_id tree regardless of descendant status - safe because
 	// the only running descendant a terminal-rooted tree can hold is a live orphan (which only a bug leaves) the
 	// wedge sweep would terminate anyway, and a worker mid-dispatch on it no-ops via the lease fence (see
 	// reapDueFlows).
@@ -1049,15 +1050,78 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	if e.archiveOn(shardNum) == nil {
 		return errors.New("the archive is not open", http.StatusServiceUnavailable)
 	}
-	result, err := e.reaper.Load().DeleteLive(ctx, db, e.dayLength(), flowID)
+	// Decided on the locked row: a publication or the live copy's cleanup can run between the checks above and the
+	// lock. The lock waits for a held root rather than skip it, which would read another owner's lock as a move to the
+	// archive. An unstamped root is stamped, its attempt cleared, so a staged copy in progress is abandoned; one in
+	// DeleteOnCompletion's grace is made due at once; a stamped root with no attempt is being deleted already; a
+	// published root - stamped with its attempt - has its archive copy marked and its attempt cleared, live root then
+	// archive root, the order publication takes them in. A root not locked has left the live tables: it is the archive's.
+	driver := db.DriverName()
+	none, noneArg := janitor.NoAttemptSQL(driver)
+	var live, archived int
+	var found, dropped bool
+	var at time.Time
+	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		live, archived, found, dropped = 0, 0, false, false
+		locked, err := lockFlowRows(ctx, tx, "flow_id=? AND surgraph_flow_id=0 AND status IN ("+database.TerminalStatusesSQL+")", flowID)
+		if err != nil || locked == 0 {
+			return errors.Trace(err)
+		}
+		found = true
+		var stamp, attempted int
+		err = tx.QueryRowContext(ctx, "SELECT delete_after_ms, CASE WHEN "+janitor.AttemptedSQL(driver)+" THEN 1 ELSE 0 END,"+
+			" archive_attempt_at FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&stamp, &attempted, &at)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		// The attempt's day must not shift with the MySQL driver's location.
+		at = database.StoredTime(at)
+		if stamp == 0 {
+			_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id=?", noneArg, flowID)
+			live = 1
+			return errors.Trace(err)
+		}
+		if attempted == 0 {
+			if stamp > 1 {
+				_, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", flowID)
+				live = 1
+				return errors.Trace(err)
+			}
+			return nil
+		}
+		res, err := tx.ExecContext(ctx, "UPDATE "+migrations.FlowsTable(archiver.DayOf(at, e.dayLength()))+
+			" SET delete_after_ms=1 WHERE flow_id=? AND delete_after_ms=0", flowID)
+		if sequel.IsUndefinedTableError(err) {
+			dropped = true
+			return errors.Trace(err)
+		}
+		if err != nil {
+			return errors.Trace(err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		archived = int(n) // none when Purge removed the archive's copy: the deletion is done
+		_, err = tx.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+none+" WHERE flow_id=?", noneArg, flowID)
+		return errors.Trace(err)
+	})
+	if dropped {
+		// The statement on the dropped day ended the transaction. A dropped day is never made again, so the copy is gone
+		// even if another Delete or the live cleanup wins before this follow-up, guarded by the stamp and the attempt.
+		expr, arg := database.SQLTime(driver, at)
+		_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+none+" WHERE flow_id=?"+
+			" AND delete_after_ms>0 AND archive_attempt_at="+expr, noneArg, flowID, arg)
+		live, archived = 0, 0
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}
-	if !result.Found {
+	if !found {
 		return e.deleteArchivedFlow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	}
-	e.metricFlowsRemoved(ctx, shardNum, removedFromLive, "delete", result.Live)
-	e.metricFlowsRemoved(ctx, shardNum, removedFromArchive, "delete", result.Archive)
+	e.metricFlowsRemoved(ctx, shardNum, removedFromLive, "delete", live)
+	e.metricFlowsRemoved(ctx, shardNum, removedFromArchive, "delete", archived)
 	return nil
 }
 

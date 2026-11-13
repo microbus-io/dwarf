@@ -29,7 +29,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/migrations"
-	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
@@ -213,10 +212,9 @@ func liveFlowStanding(ctx context.Context, db *sequel.DB, flowID int) (bool, err
 // chunks, so a read of its steps would change as they go and change back once the archive's copy answers; the
 // archive's copy, whole from publication on, answers instead.
 func liveFlowUnpublished(ctx context.Context, db *sequel.DB, flowID int) (bool, error) {
-	cond, args := reaper.AttemptedSQL(db.DriverName())
 	var one int
 	err := db.QueryRowContext(ctx, "SELECT 1 FROM dwarf_flows f JOIN dwarf_flows r ON r.flow_id=f.root_flow_id"+
-		" WHERE f.flow_id=? AND NOT (r.delete_after_ms>0 AND r."+cond+")", append([]any{flowID}, args...)...).Scan(&one)
+		" WHERE f.flow_id=? AND NOT (r.delete_after_ms>0 AND r."+janitor.AttemptedSQL(db.DriverName())+")", flowID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -229,8 +227,7 @@ func publicationColumn(driver string, t flowTables) (string, []any) {
 	if t != liveTables {
 		return "0", nil
 	}
-	cond, args := reaper.AttemptedSQL(driver)
-	return "CASE WHEN delete_after_ms>0 AND " + cond + " THEN 1 ELSE 0 END", args
+	return "CASE WHEN delete_after_ms>0 AND " + janitor.AttemptedSQL(driver) + " THEN 1 ELSE 0 END", nil
 }
 
 // archiveFlowVisible reports whether t's flows table holds the flow with flowID, visible: its root in the same table and
@@ -329,12 +326,6 @@ func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 // whatever the retention, then brings the existing days within the retention up to the archive migrations - right
 // after the shards' schema migrations, before anything reads a day.
 func (e *Engine) startArchives(ctx context.Context) error {
-	// The run's reaper, fresh, so nothing the last run learned survives into this one's readings - built before
-	// initMetrics registers the gauge callback that reads it.
-	r := reaper.New()
-	r.SetLogger(e.diags.Logger())
-	r.SetSeams(e.diags.Seams())
-	e.reaper.Store(r)
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		a := e.archiveOn(shard)
 		err := a.EnsureToday(ctx)

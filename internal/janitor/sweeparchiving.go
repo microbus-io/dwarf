@@ -322,7 +322,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 func (s *SweepArchiving) restriction(driver string, archiving bool) (where string, args []any) {
 	where, args = closedResidency(s.end.count, s.end.ordinal, s.end.partitioned, s.grace+s.overdue, stealGrace)
 	if archiving {
-		none, noneArg := noAttemptSQL(driver)
+		none, noneArg := NoAttemptSQL(driver)
 		where += " AND archive_attempt_at<=" + none
 		args = append(args, noneArg)
 	}

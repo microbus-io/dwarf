@@ -319,7 +319,7 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	if failLast.IsZero() || !canEnd || f.retentionDays <= 0 {
 		return
 	}
-	none, noneArg := noAttemptSQL(h.DriverName())
+	none, noneArg := NoAttemptSQL(h.DriverName())
 	unattempted, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)

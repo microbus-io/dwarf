@@ -88,7 +88,7 @@ func refreshDay(ctx context.Context, q sequel.Executor, a *archiver.Archive, noQ
 // archive attempt still set, or carrying the archive time its publication copied, which Delete clearing the attempt
 // keeps. Accounting only; nothing is authorized by it. And its arguments.
 func publishedSQL(driver string) (string, []any) {
-	none, noneArg := noAttemptSQL(driver)
+	none, noneArg := NoAttemptSQL(driver)
 	sentinel, arg := database.SQLTime(driver, database.MaxSQLTime().Truncate(time.Second))
 	return "((delete_after_ms>0 AND archive_attempt_at>" + none + ") OR archived_at<" + sentinel + ")", []any{noneArg, arg}
 }
@@ -100,6 +100,15 @@ type removal struct {
 	flows, unarchived int
 }
 
+// MoveTrees moves the closed trees of roots, due with no grace, into day's archive tables in one transaction, as a
+// round archiving into day would, and returns how many flow rows it moved. It is for a test that files a tree on a day
+// of its choosing.
+func MoveTrees(ctx context.Context, db *sequel.DB, seams *seamster.Seamster, archive *archiver.Archive, day int, roots []int) (moved int, err error) {
+	due, dueArgs := closedDueSQL(0)
+	removed, err := move(ctx, db, seams, roots, due, dueArgs, &filingDay{day: day, archive: archive})
+	return removed.flows, err
+}
+
 // move removes the trees of the roots it can lock among roots, in one transaction on h: moved into d's archive tables,
 // or deleted when d is nil. Each root is locked (lockRoots) and rechecked under the lock by due, with dueArgs - and,
 // archiving, for no archive attempt, which is the staged path's whatever the batch's selection saw. PostgreSQL and
@@ -109,7 +118,7 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 	roots = slices.Sorted(slices.Values(roots))
 	dueArgs = slices.Clone(dueArgs)
 	if d != nil {
-		none, noneArg := noAttemptSQL(h.DriverName())
+		none, noneArg := NoAttemptSQL(h.DriverName())
 		due, dueArgs = due+" AND archive_attempt_at<="+none, append(dueArgs, noneArg)
 	}
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {

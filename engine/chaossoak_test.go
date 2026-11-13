@@ -318,7 +318,7 @@ func registerChaosGraphs(t *testing.T, mux *hosts.Mux) {
 // TestChaosSoak_Faults layers random test-only fault injection over the chaos soak: alongside the
 // random lifecycle operations (Terminate/Resume/Fork/Delete/doorbell) a fault goroutine continuously arms
 // random recovery faults - transition/completion-commit failures, lock contention, stale-lease zombie writes,
-// dropped wakes, a lost subgraph revive, a refiller scan error (and, under longsoak, a mid-tree reaper abort)
+// dropped wakes, a lost subgraph revive, a refiller scan error (and, under longsoak, a mid-tree janitor abort)
 // - scoped to random live task names. This exercises *recovery interacting with chaos*, the surface where the
 // sharpest residue bugs hide (deferred-deletion and lease-fence races).
 //
@@ -421,7 +421,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 	}
 
 	// The fault repertoire: task-scoped commit/lease faults + process-wide wake/revive/scan faults. reapMidTree
-	// is longsoak-only (the reaper keeps its default 1m tick, so it rarely runs in the short window anyway).
+	// is longsoak-only (test mode runs the janitors only on a drain, so it rarely fires in the short window anyway).
 	type faultSpec struct {
 		name   string
 		scoped bool // append a random task node name as the scope

@@ -228,7 +228,7 @@ func TestRetention_ABadDayLengthFailsStartup(t *testing.T) {
 }
 
 // TestRetention_TheGraceFromTheEnvironment pins the benchmark's grace override: a value that is not a duration of at
-// least 0 fails Startup with a 400 before any shard opens, and a good one is the grace the reaper uses. Not parallel:
+// least 0 fails Startup with a 400 before any shard opens, and a good one is the grace the janitor uses. Not parallel:
 // it sets an environment variable.
 func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
 	assert := testarossa.For(t)
@@ -248,7 +248,7 @@ func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
 
 // TestRetention_TheStagingThresholdFromTheEnvironment pins the benchmark's staging overrides, in rows and in bytes: a
 // value that is not a whole number of at least 0 fails Startup with a 400 before any shard opens, and good ones are
-// the thresholds the reaper stages above. Not parallel: it sets an environment variable.
+// the thresholds the janitor stages above. Not parallel: it sets an environment variable.
 func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())

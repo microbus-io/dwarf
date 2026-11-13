@@ -36,9 +36,9 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// maxListLimit is the most flows a list returns in a call. It must stay above the reaper's batch
+// maxListLimit is the most flows a list returns in a call. It must stay above the janitor's batch
 // (reapBatch roots, about reapBatchRows flows): a batch's trees share one archived_at, and a caller paging ListClosed
-// by window cannot page across a tie larger than its Limit (TestList_TheLimitIsAboveAReaperBatch). A batch takes at
+// by window cannot page across a tie larger than its Limit (TestList_TheLimitIsAboveAJanitorBatch). A batch takes at
 // least one tree however large, so with IncludeSubgraphs one tree of more flows than this is a tie no walk pages across.
 const maxListLimit = 65536
 

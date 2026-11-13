@@ -121,6 +121,11 @@ func (e *Engine) janitorOn(shard int) *janitor.Janitor {
 	return nil
 }
 
+// reapDueFlows is what a test drives to reap what is due: the janitors' jobs run until they make no progress.
+func (e *Engine) reapDueFlows(ctx context.Context) {
+	e.drainJanitors(ctx, e.archiveGrace)
+}
+
 // drainJanitors runs every active janitor's jobs until they make no progress (janitor.Drain), shard by shard, with
 // grace for the archive grace and the engine's other settings as they stand: what a test drives to have the jobs do
 // what is due. A test changes the engine's fields on a running engine, so the jobs are rebuilt when the settings

@@ -322,7 +322,7 @@ func (s *ShardSet) Indices() []int {
 // whichever failed first - the ops run concurrently, so "first" would be a race).
 //
 // The returned error carries a "shard" property naming the failing shard. Without it an operator sees the
-// reaper or the refiller fail with a bare driver error and no clue WHICH database is unhealthy - and this
+// a background sweep or the refiller fail with a bare driver error and no clue WHICH database is unhealthy - and this
 // package's whole contract is that a persistent outage degrades loudly. The property is a NAMED pair
 // deliberately: an unnamed int in this errors package is read as an HTTP status code, so passing the index
 // bare would silently set the error's status.

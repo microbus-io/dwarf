@@ -766,7 +766,7 @@ func TestDispatchers_FleetLimitWarnsOnTheEdge(t *testing.T) {
 }
 
 // TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads pins that the background sweeps run where this
-// replica dispatches and nowhere else. The reaper stands in for both loops: each shard always has a
+// replica dispatches and nowhere else. The janitor stands in for both loops: each shard always has a
 // dispatcher to sweep it, and a reader running the same scan through its two-connection pool would only
 // duplicate the work, once per replica in the fleet.
 func TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads(t *testing.T) {

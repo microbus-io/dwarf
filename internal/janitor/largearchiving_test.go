@@ -133,7 +133,7 @@ func setAttempt(t *testing.T, r *rig, root int, at time.Time) {
 // time a publication copied.
 func deleteLive(t *testing.T, r *rig, root int) {
 	t.Helper()
-	none, arg := noAttemptSQL(r.db.DriverName())
+	none, arg := NoAttemptSQL(r.db.DriverName())
 	if _, err := r.db.ExecContext(t.Context(), "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id=?", arg, root); err != nil {
 		t.Fatal(err)
 	}

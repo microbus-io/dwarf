@@ -39,7 +39,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
-	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/internal/workers"
 	"github.com/microbus-io/dwarf/workflow"
@@ -290,14 +289,6 @@ type Engine struct {
 	recoveryCancel context.CancelFunc
 	recoveryWorker sync.WaitGroup
 
-	// Reaper goroutine: archives closed trees and deletes the stamped ones, on its own 15s ticker (reaperLoop).
-	// reaper is the run's, stored at Startup before anything reads it (startArchives); atomic because an operation
-	// still running from the previous run may read it while a new Startup stores the next one. reaperCancel stops
-	// the goroutine, abandoning a pass in flight.
-	reaper       atomic.Pointer[reaper.Reaper]
-	reaperCancel context.CancelFunc
-	reaperWorker sync.WaitGroup
-
 	// Janitors: one per shard for the run (shardActors.janitor), active where this replica dispatches the shard -
 	// applyRole resumes and pauses them. janitorJobsBuilt, under janitorMu, is the settings their jobs were built
 	// with. janitorCancel ends their run. janitorIdle replaces every job's idle wait for a test; janitorManual starts
@@ -308,10 +299,11 @@ type Engine struct {
 	janitorIdle      time.Duration
 	janitorManual    bool
 
-	// Archive goroutine: keeps each shard's archive day tables (shardActors.archive) - today's and the days ahead
-	// made, expired days dropped. testArchiveDay, when set, replaces the day's length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
-	// however late it runs (reaper.Config.NoQuietMargin), so a test's pass near midnight, or on a day of seconds, does
-	// what it does at noon. archiveCancel stops the loop between its statements.
+	// Archive goroutine: refreshes the catalog of each shard's archive days (shardActors.archive) where this replica
+	// does not dispatch; the janitor's archive retention keeps the days elsewhere. testArchiveDay, when set, replaces
+	// the day's length for a test (archiveDayLength). noReapQuiet, set in test mode, lets the janitor's archiving jobs
+	// archive into their day however late they run (their quiet margin off), so a test's round near midnight, or on a
+	// day of seconds, does what it does at noon. archiveCancel stops the loop between its statements.
 	testArchiveDay time.Duration
 	noReapQuiet    bool
 	archiveCancel  context.CancelFunc
@@ -339,8 +331,8 @@ type Engine struct {
 	lifetimeCancel context.CancelFunc
 
 	// Recovery/await/reap timing. Effectively constants in production (defaulted in NewEngine, then
-	// read-only); a white-box test shortens one directly, before Startup for the two read once at Startup
-	// (reapInterval, recoveryInterval), so an otherwise minutes-long path is observable.
+	// read-only); a white-box test shortens one directly, before Startup for the one read once at Startup
+	// (recoveryInterval), so an otherwise minutes-long path is observable.
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
@@ -350,16 +342,15 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
 	sweepOverdue        time.Duration // how long past due a root waits before a sweep takes it (30s)
-	reapBatch           int           // due roots one reaper batch considers (512)
-	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
-	reapBatchBytes      int           // about how many payload bytes one reaper batch moves, at least one tree (16 MiB)
+	reapBatch           int           // due roots one janitor batch considers (512)
+	reapBatchRows       int           // about how many rows one janitor batch moves, at least one tree (4096)
+	reapBatchBytes      int           // about how many payload bytes one janitor batch moves, at least one tree (16 MiB)
 	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
 	reapStageBytes      int           // the tree payload above which archival is staged, when it is; 0, no byte threshold
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
-	purgeChunk   int
-	reapInterval time.Duration // reaper goroutine tick; read once at Startup (15s)
+	purgeChunk int
 	// The expiration pass (expiration.go), which the janitor's expiration job runs: how long one pass may keep reading
 	// and starting terminations (30s), and how many rows one page of its walk reads (256).
 	expireBudget       time.Duration
@@ -424,7 +415,6 @@ func NewEngine() *Engine {
 	e.reapBatchRows = 4096
 	e.reapBatchBytes = 16 << 20
 	e.purgeChunk = 4096
-	e.reapInterval = 15 * time.Second
 	e.expireBudget = 30 * time.Second
 	e.expirePage = 256
 	e.retentionDays = defaultRetentionDays
@@ -955,9 +945,8 @@ func (e *Engine) initRuntime() error {
 	e.backlogWanted.Store(false)
 	// The background loops' contexts exist before the engine reports itself started, as their stop signals must:
 	// a drain that found one missing would not stop its loop.
-	var recoveryCtx, reaperCtx, archiveCtx, latchCtx context.Context
+	var recoveryCtx, archiveCtx, latchCtx context.Context
 	recoveryCtx, e.recoveryCancel = context.WithCancel(e.lifetimeCtx)
-	reaperCtx, e.reaperCancel = context.WithCancel(e.lifetimeCtx)
 	archiveCtx, e.archiveCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
 	var janitorCtx context.Context
@@ -1041,16 +1030,13 @@ func (e *Engine) initRuntime() error {
 			a.piston.Run(pistonCtx)
 		})
 	}
-	// The recovery loop, the reaper and the latch detector each run on their own child of the lifetime ctx, so
+	// The recovery loop, the archive loop and the latch detector each run on their own child of the lifetime ctx, so
 	// the drain stops waiting for a statement in flight rather than waiting it out: on a bloated table one sweep
 	// statement runs for minutes, and the stop must stay bounded by the steps in flight. Abandoning one strands
 	// nothing: every write they make is a single statement or a single transaction, which lands whole or not at
 	// all, and every repair is idempotent and redone by a peer or the next start.
 	e.recoveryWorker.Go(func() {
 		e.recoveryLoop(recoveryCtx)
-	})
-	e.reaperWorker.Go(func() {
-		e.reaperLoop(reaperCtx)
 	})
 	// Before Startup returns, so a shard this replica dispatches has its janitor active - and its gauges their
 	// readings - from the start.
@@ -1180,10 +1166,6 @@ func (e *Engine) drainRuntime() {
 		e.recoveryCancel()
 	}
 	e.recoveryWorker.Wait()
-	if e.reaperCancel != nil {
-		e.reaperCancel()
-	}
-	e.reaperWorker.Wait()
 	if e.archiveCancel != nil {
 		e.archiveCancel()
 	}

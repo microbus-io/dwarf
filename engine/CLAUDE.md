@@ -2217,7 +2217,7 @@ per level. The subquery resolves the
 tree first, so each walk works whether its starting flow is the root or a mid-tree node:
 
 - `allDescendantSubgraphFlows` (`Fingerprint`) - BFS *down* from the given flow over the loaded rows (any
-  status). Delete needs no walk: it marks the root, and the reaper deletes by `root_flow_id`.
+  status). Delete needs no walk: it marks the root, and the janitor deletes by `root_flow_id`.
 - `allSubgraphFlows` (the descendant set of `terminateSubtree` and of `Cancel`) - BFS *down* through
   **non-terminal** nodes only, stopping at a terminal node. Started from a mid-tree flow, as the orphan sweep
   does, it means "descendants of *this* node", not "the whole tree."
@@ -2836,7 +2836,7 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   replica claiming it and then wedging would keep its residue class forever): it feeds only the ranking, and
   the partition divides on `dispatched_at` evidence alone. A dispatcher
   that wedges still holds its slot until its row goes stale - the residual below - but it strands no class.
-- **Background sweeps run only on dispatched shards.** The reaper and every recovery repair (expired leases,
+- **Background sweeps run only on dispatched shards.** The janitors and every recovery repair (expired leases,
   wedged parks, orphaned children, orphan detection) skip a shard this replica only reads. Each is
   idempotent, so one sweeper per shard suffices, and every shard always has a dispatcher; a reader running
   them would put heavy scans through its two-connection pool once per replica in the fleet. Pinned by
@@ -3065,8 +3065,8 @@ queue this exists to keep empty.
 having queued for the right to, so it is served ahead of turn-holders that are older than it - which is
 precisely the ordering this exists to impose. It also puts the contending population back above the turn
 count. The rule is positional (`dbturn.go`): an operation takes its turn at its entry point (`opTurn`), a
-background loop (the reaper, the recovery sweeps, the backlog gauge loop, the latch poll) takes one per shard
-per pass, and the worker path takes one per database call between the phases it has already released. Take
+background loop (the recovery sweeps, the backlog gauge loop, the latch poll, the archive's catalog refresh) takes one
+per shard per pass, a janitor job one per batch, and the worker path takes one per database call between the phases it has already released. Take
 it at the OUTERMOST database operation of a path, never inside a shared helper - a turn taken while one is
 held is the nesting the enclosure rule forbids. The shard set's probes as each shard opens are the one exemption: they
 run before anything else uses the shard.
@@ -3210,7 +3210,7 @@ so a long sweep does not hide accumulated failures until completion.
 episode (`internal/janitor/CLAUDE.md`): fast archiving's begins at a scan, day or move failure and ends at a later
 move that archives something or a probe finding nothing due at the failure still live; sweep archiving's begins at
 any of its failures and ends at a sweep that completes failing nothing; large-tree archiving's begins at a failed chunk
-and ends at a lap over the started archives that fails none. Reaper readings appear only on dispatchers and are forgotten on handoff or
+and ends at a lap over the started archives that fails none. Janitor readings appear only on dispatchers and are forgotten on handoff or
 restart. Shutdown is not failure. Individual repair failures log the token-free correlation ID, never a flow key.
 `dwarf_flows_removed` counts roots at a requested stamp or archive deletion; the archive's day gauges read its
 catalog cache on all replicas. **Do not add exact live or archive counts by status, or the database's own statistics**: a
@@ -3533,8 +3533,8 @@ are deterministically flushed by then. Not an engine concern: a real exporter ke
 
 ## Data Retention
 
-**A closed root leaves the live tables about a minute after it closes** (`archiveGrace`, a minimum; the reaper's 15 s
-tick adds up to that on top): the reaper moves its whole tree into today's archive day tables, and retention drops
+**A closed root leaves the live tables about a minute after it closes** (`archiveGrace`, a minimum; fast archiving's
+1 s idle wait adds up to that on top): the janitor moves its whole tree into today's archive day tables, and retention drops
 whole days (see "The archive" below). A flow that has not closed - running, sleeping, interrupted for a human - stays
 in the live tables for as long as it takes, so nothing reaps a row a `Resume` could still revive. The read API reads an
 archived flow as it read it live ("Reading an archived flow" below), and `Fork` clones an archived source; `ListClosed`
@@ -3543,7 +3543,7 @@ end**: a tree archived late - after an outage, say - is kept its full retention 
 its hypothetical filing day (close plus archive grace) passes retention is instead eligible for deletion.
 
 **Do not shorten `archiveGrace` to cut the archive's WAL.** A shorter grace does log less - a row that leaves the live
-tables sooner outlives fewer checkpoints, so fewer of its pages are logged whole - but the reaper then deletes from
+tables sooner outlives fewer checkpoints, so fewer of its pages are logged whole - but the janitor then deletes from
 pages the hot path is still inserting into and updating, and the shard pays for it in CPU. Measured on one 32 vCPU
 PG16 shard, 8 KB JSON per step, saturated, `max_wal_size` 20 GB: 1 min / 30 s / 15 s ran 10,335 / 10,214 / 9,680
 steps/s, with whole pages logged per step 1.83 / 1.26 / 1.03 and database CPU per step 1.52 / 1.78 / 1.88 ms; at 15 s
@@ -3577,11 +3577,11 @@ Only a closed root is ever stamped, so no rows are deleted where a lifecycle op 
   flow `completed`. An *event* trigger on success, not a clock: `failed`/`terminated`/`cancelled`/`interrupted` flows
   are **never**
   scheduled (a failed disposable job is exactly the one to keep as a `Fork` source). Root-only (`surgraph_flow_id=0`),
-  not inherited by children (the reaper sweeps descendants via `root_flow_id`). During the grace window the flow stays
+  not inherited by children (the deletion sweeps descendants via `root_flow_id`). During the grace window the flow stays
   `completed` and its **outcome is observable**: `Snapshot`/`Await`/`Run` return the completed `FlowOutcome` - this is
   how a caller learns a disposable flow's result, since there is no stop callback. It is nonetheless *logically*
   gone: excluded from the lists, and `History` 404s (the full step detail is what the flow is discarding). After the
-  window the reaper removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
+  window the janitor removes it and reads 404. (`Snapshot`/`Await` deliberately serve the outcome rather than 404 - a
   hard-immediate-404 for a redaction-critical `Delete` is a deferred sub-decision.)
 
 For operator-driven removal:
@@ -3589,13 +3589,18 @@ For operator-driven removal:
 Both remove **only closed flows**. An open flow is the caller's to `Terminate` first: deleting it would hide a
 terminate inside a delete, and nothing either operation does can then race a `Resume`.
 
-- **`Delete(flowKey)`** authenticates the key and rejects a child (400) or open root (409). It then calls
-  `reaper.DeleteLive`, which decides under the live root lock whether to stamp the root, accept an existing deletion,
-  or mark a published archive copy. The returned counts feed `dwarf_flows_removed` for the appropriate side.
-  A missing live root goes to archive lookup (`deleteArchivedFlow`), which authenticates the archived row and rejects
-  a child's key before marking the root. A missing, hidden or already marked archived tree is a 404. Root locking serializes these operations with Fork. The lock and publication protocol belongs to
-  `internal/reaper/CLAUDE.md`; the API race tests are `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere`
-  and `TestPublished_ADeleteRacing*`.
+- **`Delete(flowKey)`** authenticates the key and rejects a child (400) or open root (409). It then locks the live
+  root (`lockFlowRows`, waiting rather than skipping a held root) and **decides on the locked row**, since a
+  publication or the live copy's cleanup can run between the checks and the lock: an unstamped root is stamped
+  (`delete_after_ms=1`) with its archive attempt cleared, abandoning a staged copy in progress; a root in
+  DeleteOnCompletion's grace is made due at once; a stamped root with no attempt is being deleted already; a published
+  root - stamped with its attempt - has its archive copy marked on the attempt's day and its attempt cleared, live root
+  then archive root, publication's order. A dropped day ends that transaction, and a guarded follow-up clears the
+  attempt: a dropped day is never made again. The counts feed `dwarf_flows_removed` for the appropriate side.
+  A root not locked has left the live tables, so the archive lookup (`deleteArchivedFlow`) authenticates the archived
+  row and rejects a child's key before marking the root. A missing, hidden or already marked archived tree is a 404.
+  Root locking serializes these operations with Fork; the attempt's rule is in `internal/janitor/CLAUDE.md`. The API
+  race tests are `TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere` and `TestPublished_ADeleteRacing*`.
 - **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes what
   `ListClosed` lists for the query, oldest archived first, at most `Limit` roots: the internal ascending
   `listArchived` (so its window is on `archived_at`, cut and capped as there), each root marked in the day its branch
@@ -3607,25 +3612,15 @@ terminate inside a delete, and nothing either operation does can then race a `Re
   per shard (the read, the marks), not once per shard: one turn across the stages would hold a shard's turn while
   the call merges the other shards. Pinned by `TestPurge_OldestArchivedFirstAndOnlyTheArchive`.
 
-**The reaper** is `internal/reaper`, and its mechanics - the walks, the batch move, the attempt limit, why an
-archive failure never becomes permission to delete - are in `internal/reaper/CLAUDE.md`. The engine holds the wiring
-(`reaper.go`):
+**Removing closed trees is the janitors'** (below; the mechanics in `internal/janitor/CLAUDE.md`). Three things stay
+the engine's:
 
-- **One goroutine, a 15-second ticker** (`reaperLoop`); each tick is one `reapPass`, which forgets the shards this
-  replica no longer dispatches. Every walk of the live tables, the archive's deletions and expiration are the
-  janitor's; the engine still calls the reaper for `DeleteLive` alone. Shards run concurrently.
-- **A fresh `Reaper` per run**, built in `startArchives` before `initMetrics` registers the gauge callback, so no
-  reading survives a restart or a failed Startup. Its four instruments are created on the engine's meter
-  (`SetMeter`, fed from the engine's `diagnostics.Diags`), so the engine does not register them itself. The reaper
-  keeps its setters, unlike the components built since, until it is deleted.
-- **A shard this replica stops dispatching is forgotten** (`Reaper.Forget`), so a replica that dispatches it again
-  starts afresh.
-- **`dwarf_flows_removed` is the engine's**, recorded once per shard per Purge call from the roots its statements
-  marked, what committed before a failure included (`TestReaperContract_APartialPurgeCountsWhatItRemoved`).
-- **Two invariants cross the boundary.** Fork's `lockRows` must keep conflicting with the reaper's root lock (see
-  `lockRows`), and `maxListLimit` must stay above a reaper batch (`TestList_TheLimitIsAboveAReaperBatch`).
-
-The engine's tests drive a pass with `reapDueFlows`; the `TestReaperContract_*` tests pin what the engine relies on.
+- **`dwarf_flows_removed`**, recorded once per shard per Purge call from the roots its statements marked, what
+  committed before a failure included (`TestJanitorContract_APartialPurgeCountsWhatItRemoved`), and per Delete.
+- **Two invariants cross the boundary.** Fork's `lockRows` must keep conflicting with the janitor's root lock (see
+  `lockRows`), and `maxListLimit` must stay above a janitor batch (`TestList_TheLimitIsAboveAJanitorBatch`).
+- **The `TestJanitorContract_*` tests** pin what the engine relies on: the readings forgotten at a restart and a failed
+  Startup, every sweep kind reported from the start, and no turn taken on a shard this replica only reads.
 
 **The janitors** are `internal/janitor`, one per shard for the run, each running its jobs on goroutines of their own
 while this replica dispatches the shard; their mechanics are in `internal/janitor/CLAUDE.md`. The engine holds the
@@ -3645,12 +3640,11 @@ wiring (`janitor.go`):
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace.
-- **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like the reaper's
-  gauges. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, the held-root and sweep
+- **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like every
+  janitor gauge. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, the held-root and sweep
   gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge,
   labelled by job; the archive deletion gauges are the archive deletion sweep's. **Every walk of the live tables is the
-  janitor's**, so the reaper's own pass is not called (and `dwarf_reap_pass_seconds` records nothing), and expiration is
-  the janitor's expiration job, running the engine's pass (`expirePass`). `sweepOverdue` (30 s) is the
+  janitor's**, and expiration is the janitor's expiration job, running the engine's pass (`expirePass`). `sweepOverdue` (30 s) is the
   window of both sweeps behind a fast job: a test that wants a sweep to take what its fast job passed sets it to 0
   before its first drain, since a change rebuilds the jobs and starts the fast jobs over.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), expiration
@@ -3658,7 +3652,7 @@ wiring (`janitor.go`):
   at its next drain); a test of the pass alone calls `expirePass` with the position it wants. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
   (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the
   live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
-  written against a reaper whose first tick came 15 s in. A test of the background running sets it false
+  written against background removal whose first pass came 15 s in. A test of the background running sets it false
   (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
   idle wait. A test blocks a real batch, holding its connection, at `diagnostics.CheckpointJanitorBatchConn`. **A test
   that holds every job there needs a pool larger than the job count** (`testConnCap`, 4 by default in test mode):
@@ -3668,13 +3662,13 @@ wiring (`janitor.go`):
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never
-stamped) and the reaper deletes the whole
+stamped) and the janitor deletes the whole
 `root_flow_id` tree regardless of descendant status. The only running descendant a terminal-rooted tree can hold is
 an **orphaned child** (an open child whose parent already terminalized, which only a bug leaves - see
 `recoverOrphanedSubgraphChildren`), a bug-state row the wedge sweep would terminate anyway. Deleting it is safe: a
 worker mid-dispatch on the orphan no-ops via the lease fence (claim/write matches zero rows once the tree is gone),
-so no strand and no corruption. Whichever of the reaper and the wedge sweep reaches the orphan first wins. The
-reaper therefore does **not** reguard on descendant status. Backed by a
+so no strand and no corruption. Whichever of the janitor and the wedge sweep reaches the orphan first wins. The
+janitor therefore does **not** reguard on descendant status. Backed by a
 partial index `idx_dwarf_flows_delete_after (flow_id) WHERE delete_after_ms > 0` (full `(delete_after_ms)` on MySQL and
 MariaDB, which the scan names with `FORCE INDEX`) that walks the stamped roots alone in the scan's `flow_id` order; why
 it is keyed on `flow_id` is in `internal/migrations/CLAUDE.md`. (`deletionGrace`/`reapInterval` are Engine fields, not constants, only so a test can
@@ -3683,7 +3677,7 @@ engine-package tests force a reap via `reapDueFlows`; fixtures verify the observ
 `History`/`Snapshot`.)
 
 **Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
-deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the reaper reaps only
+deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the janitor reaps only
 terminal-rooted trees. Every stamp holds it by stamping only a closed root: DeleteOnCompletion stamps the root it
 completes, expiration the root it terminates in the same UPDATE, and `Delete` refuses an open one. A closed flow never changes status again, so a live
 `delete_after_ms` never coexists with a resumable flow.
@@ -3720,7 +3714,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
 - **Staged archival is off** (`reapStageRows` 0, no setter): a tree too large to move in one transaction stays live
   until its retention deletes it, in chunks. Tests set the field to archive such a tree in stages (the protocol
-  is `internal/reaper/CLAUDE.md`'s); turning it on for production waits on the threshold's qualification. The reads
+  is `internal/janitor/CLAUDE.md`'s); turning it on for production waits on the threshold's qualification. The reads
   around it need nothing of their own: a copy is invisible until published, and a published tree is read from the
   archive (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
 - **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
@@ -3821,7 +3815,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     that stamps it.
   - **Neither pass runs in a transaction.** On MySQL a transaction's plain reads share its first read's snapshot,
     which breaks the argument above, and on SQLite's shared cache a read transaction keeps each table's lock until it
-    ends, which cycles with the reaper's move. A read must have no side effect and tolerate rows vanishing, since it
+    ends, which cycles with the janitor's move. A read must have no side effect and tolerate rows vanishing, since it
     may run on both sides.
   - **Every read of the archive closes on the visibility rule** (`archiveFlowVisible`, `archiver.VisibleSQL`), one of
     one statement included: an archived flow is there only if its root is in the same day and unmarked. A staged copy
@@ -3832,7 +3826,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     the locate returns unchecked) is a 404. Any other error is returned. Fork of a marked tree is a 404 too: it is
     deleted. Pinned by `TestArchiveVisibility_*`.
   - **A live root stamped with an archive attempt is published** (`publicationColumn`): every stamp but a publication
-    clears the attempt (`internal/reaper/CLAUDE.md`). Its live copy is being deleted, so Step, Summary, History and the
+    clears the attempt (`internal/janitor/CLAUDE.md`). Its live copy is being deleted, so Step, Summary, History and the
     lists read the archive's copy, Snapshot serves the live root until it goes, and Fork and Continue take the
     archive's copy as their source. Continue and Fork read this disposition with the status/stamp in one statement;
     a follow-up lookup can lose the live row to cleanup and misclassify a published source as deleted. `Delete` uses
@@ -3847,7 +3841,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
     right.
   - **Fork reads its source from either side and writes the clone into the live tables** (`forkFrom`, once per
     side). Each pass is one transaction that opens by locking the source root - named by the step key's flow, in
-    that side's flows table - and reads the source only under the lock (`forkSource`). The reaper locks a root
+    that side's flows table - and reads the source only under the lock (`forkSource`). The janitor locks a root
     before it moves its tree, so a root the live pass locked stays live for the whole clone; a live pass that locks
     nothing (`errForkSourceNotHere`) means the tree is archived or never existed, and the archive pass forks from
     the day. An archived root is locked in its day's table: a `touch` flip on SQLite and SQL Server, and on
@@ -3863,7 +3857,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   getting its outcome from the archive; `Continue` from an archived flow; an open archived flow an error; a day
   dropped mid-read, a directory day dropped and a tree removed mid-read each a 404; a Fork of an archived source at
   every step (a root's, a subgraph's, through a ref, a failed branch repaired) running as it did live, one whose
-  source is archived meanwhile, one reading the archived graph on a cold replica, and the reaper held off a source
+  source is archived meanwhile, one reading the archived graph on a cold replica, and the janitor held off a source
   Fork has locked.
 - **The run's archives are published whole** (`archives`, an `atomic.Pointer`), like the role flags: a `PurgeBefore`
   straddling a Shutdown/Startup restart must read one run's set, never a map being assigned.
@@ -3895,7 +3889,7 @@ only at the worker loop):
 The crew's worker-loop `CatchPanic` stays as **defense-in-depth** for panics in *engine* code on the worker
 path (transition evaluation, fan-in, etc.) outside any host call. **Nothing else contains a panic**: the
 piston and its pipeline loops, the planner, the peer Sonars, and the engine's background loops (reconcile,
-reaper, janitors, recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
+archive, janitors, recovery sweeps, backlog gauge, latch poll) run without a recover, so a panic in any of them takes down the
 replica. **That is deliberate; do not add a catch there.** Those loops call no `Host` method - the only `Host` code
 the engine runs is the three wrapped call sites above - so a panic in them is an engine bug, and a crash is what
 gets it found and fixed; a caught-and-logged panic in a loop that retries every cycle would hide it. The one
@@ -3910,7 +3904,7 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 The engine's lifetime context (`e.lifetimeCtx`) is created at Startup and cancelled only after `Shutdown` has
 drained everything. The workers run on a non-cancelable copy of it, so a step's writes are never interrupted by
-ctx cancellation. The backlog refresh, the recovery loop, the reaper, the janitors, the latch detector, the
+ctx cancellation. The backlog refresh, the recovery loop, the archive loop, the janitors, the latch detector, the
 pistons and the Sonars each run on a child of it that the drain cancels when it stops that goroutine (see "Shutdown ordering"). The only *cancellable*, time-bounded ctx on a
 worker is the `ExecuteTask` call: `executeTask` derives it from the worker's ctx with the step's `time_budget_ms`.
 
@@ -3927,7 +3921,7 @@ against a ~1.5M/s ceiling - inside the connection hold, since pgx watches during
 crew a cancelable ctx (per-worker children included) to "let shutdown reach the workers"**: the drain's stop
 signals are the cache, the gate and `drainStop`, and a per-step deadline belongs on a per-step ctx.
 
-### Shutdown ordering: janitors, then workers, then recovery/reaper/latch, then the pistons, then the Sonars
+### Shutdown ordering: janitors, then workers, then recovery/archive/latch, then the pistons, then the Sonars
 
 There is no timer goroutine and no wake channel to close (see "A cycle is UNCONDITIONAL"), so no send can
 race a close and panic a worker mid-`processStep`. `drainRuntime`:
@@ -3943,7 +3937,7 @@ janitorCancel(); stopJanitors()             // a job's batch would hold the conn
 cache.Close(); db.CloseTurns()              // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
 recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
-reaperCancel();      reaperWorker.Wait()   // ditto, a reap batch
+archiveCancel();     archiveWorker.Wait()  // ditto, a catalog refresh
 latchCancel();       latchWorker.Wait()    // the detectors stop before the boards close
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
@@ -3954,7 +3948,7 @@ every latch board Close(); lifetimeCancel()
 **The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's batch has no
 deadline and holds connections while it runs, so a worker in flight that needs one to record its step could wait on
 it, and the drain on the worker, for as long as the batch takes - forever, for a job blocked on a held lock. The
-recovery loop and the reaper can stop after the crew only because every attempt of theirs is bounded. Pinned by
+recovery loop and the archive loop can stop after the crew only because every attempt of theirs is bounded. Pinned by
 `TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which hangs with the cancellation after `crew.Drain`.
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
@@ -3968,10 +3962,10 @@ that one is deliberately left live until every goroutine has drained, while `pis
 on ctx alone. Neither needs a second signal - a cycle is a pure read and a beat is one idempotent UPDATE, so
 abandoning either mid-flight strands nothing.
 
-**The recovery loop, the reaper and the latch detector each run on a child of their own, and the drain stops
+**The recovery loop, the archive loop and the latch detector each run on a child of their own, and the drain stops
 each by cancelling it**, so the drain stops waiting for the statement a pass has in flight. Do not stop them with a signal while
 they run on the lifetime ctx: the drain then waits out the slowest background statement (measured: a stop held
-9+ minutes by the orphan, lease-recovery and reap statements on a bloated `dwarf_steps`), and `Shutdown` is
+9+ minutes by the orphan, lease-recovery and live-table removal statements on a bloated `dwarf_steps`), and `Shutdown` is
 bounded by a sweep rather than by the steps in flight, as its godoc promises.
 - **Abandoning a pass strands nothing.** Each write a pass makes is one statement or one transaction - a lease
   reset, an orphan rewind, a subtree terminate, a caller revive or re-arm, a reap batch - so an abandoned one
@@ -4023,7 +4017,7 @@ The trap for anyone re-deriving this: raw `database/sql` behaves differently, an
 broken. On MySQL and SQLite a failed statement does *not* poison a plain `sql.Tx` - the commit succeeds with that write
 silently missing (measured). It is `sequel.Tx`, not the driver, that closes the hole. Any analysis that reasons about
 driver semantics without accounting for the `autoErr` latch will "discover" a partial-commit bug that does not exist -
-in `Terminate`, in the `cohort_arrivals` bump, in the resume leaf reset, in the reaper's deletes.
+in `Terminate`, in the `cohort_arrivals` bump, in the resume leaf reset, in the janitor's deletes.
 
 What is **not** delegated to the latch, and is still checked explicitly at each site: **`RowsAffected()==0`** - a
 zero-row match is a *semantic* outcome (a lost CAS, a terminal-status guard, the resume race gate), not an error, and
@@ -4044,7 +4038,7 @@ ordering:
   (the rationale is at `pureArrival` in `dispatch.go`). Mandatory - the failure modes are under "Write-ordering &
   lock contention" above. Do not reorder these to read-first.
 - **Steps-first.** The lifecycle mutations update `dwarf_steps` before `dwarf_flows`: `Resume`, `Terminate`,
-  `failStep` and `handleInterrupt`. (The reaper locks a batch's roots first, then moves their steps before their
+  `failStep` and `handleInterrupt`. (The janitor locks a batch's roots first, then moves their steps before their
   flows.)
   `handleInterrupt` belongs here despite advancing the flow (running→interrupted): interrupt is
   **non-terminating** and marks no step `completed` in a prior standalone UPDATE, so it carries **no** orphan-strand
@@ -4066,7 +4060,7 @@ deterministic with a checkpoint inside the clone: modernc waits on a shared-cach
 which cannot be interrupted, so a probing writer blocks rather than being refused, and blocked cannot be told from
 held without a timer. Every other `Transact` in the engine already opens with a write; a new one
 that reads first needs the same. Fork reads its origin only under that lock, so a Delete that stamped the
-origin after Fork was called is a 409, and an origin the reaper removed is a 404 (`TestFork_DeletedBeforeItsLock`).
+origin after Fork was called is a 409, and an origin the janitor removed is a 404 (`TestFork_DeletedBeforeItsLock`).
 
 **The two disciplines still cross in one place on row-locking engines, and that is tolerated, not eliminated.**
 On MySQL `REPEATABLE READ` and SQL Server without RCSI, a flow-row-first transaction and a steps-first one can
@@ -4394,7 +4388,7 @@ shards" sentinel used by `Query.Shard`.
 and state-ref linker, and this replica's role there (`shardActors`). The engine's per-shard paths - `applyRole`,
 Startup, the drain - touch several actors of one shard together, so the grouping is by shard. **Do not give each
 actor's package a set type of its own**: it would only index. What every shard shares - the
-planner, the reaper, the graph and state caches - stays on the engine.
+planner, the graph and state caches - stays on the engine.
 - **Built whole, then published once** (`buildActors`, right after the shards open): a host still serving through a
   Shutdown/Startup restart reads the run's map from its operations, so the map goes out through one atomic pointer,
   whole - a map assigned in place under that read is a fatal throw. The planner and the state cache are built fresh
@@ -4478,9 +4472,9 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   `Limit` on the wire.
 - **The merge compares two servers' clocks**, so flows within the skew of each other can swap, or swap across the
   cut; the godocs say so. And `ListClosed`'s days are cut by this process's clock while its bounds compare the
-  database's, so a tree archived in the skew at the window's newer edge can be missed. **A tie is a reaper batch**
+  database's, so a tree archived in the skew at the window's newer edge can be missed. **A tie is a janitor batch**
   (`archived_at` is the move's transaction start), which is why `maxListLimit` must stay above `reapBatchRows`
-  (`TestList_TheLimitIsAboveAReaperBatch`): a caller paging by window cannot page across a tie larger than its
+  (`TestList_TheLimitIsAboveAJanitorBatch`): a caller paging by window cannot page across a tie larger than its
   `Limit`. That bounds a roots-only list (`reapBatch`, 512 roots); with `IncludeSubgraphs` a batch's one tree, which it
   takes however large, can be a tie of more flows than any `Limit`. On the dialects storing milliseconds (all but PostgreSQL) batches on different shards can share one, so a
   tie can reach shards x `reapBatchRows`: at 16 shards, the whole maximum. And **commit order is not stamp order** - a

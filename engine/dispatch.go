@@ -409,7 +409,7 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 		// flowID at 0, and counting that as a lost claim would attribute a superseded claim to candidate
 		// contention - in the one instrument whose whole purpose is attribution.
 		// On PostgreSQL the claim joins the flow row, so a step whose flow row is gone matches nothing and
-		// does count here; the reaper and Fork delete a flow's steps before the flow, so such a row should not
+		// does count here; the janitor and Fork delete a flow's steps before the flow, so such a row should not
 		// exist.
 		e.metricStepClaimLost(ctx)
 		return true, nil

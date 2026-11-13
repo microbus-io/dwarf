@@ -240,7 +240,7 @@ func TestLiveRetention_TheStampClearsTheAttempt(t *testing.T) {
 	assert.Equal(1, stampOf(t, r, root), "stamped")
 	var attempted int
 	assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+
-		attemptedSQL(r.db.DriverName()), root).Scan(&attempted))
+		AttemptedSQL(r.db.DriverName()), root).Scan(&attempted))
 	assert.Zero(attempted, "its attempt cleared")
 }
 

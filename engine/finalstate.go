@@ -692,7 +692,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		finalStateJSON = fs
 		workflowURL = wf
 		// A DeleteOnCompletion root schedules its own deletion by stamping delete_after_ms = deletionGrace, so
-		// the reaper removes it (and its subgraph descendants, keyed on root_flow_id) after the grace window.
+		// the janitor removes it (and its subgraph descendants, keyed on root_flow_id) after the grace window.
 		// It is NOT deleted inline: the flow stays `completed` for the window so its outcome is
 		// Await/Snapshot-observable (an inline delete would 404 the caller). Root-only (surgraph_flow_id=0);
 		// the stamp is part of the same status transition, so delete_after_ms > 0 always implies terminal.

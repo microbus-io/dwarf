@@ -382,7 +382,7 @@ func (l *LargeArchiving) next(ctx context.Context, q sequel.Executor) (root int,
 	first := func(op string, from int) (int, time.Time, bool, error) {
 		var id int
 		var t time.Time
-		err := q.QueryRowContext(ctx, "SELECT flow_id, archive_attempt_at FROM "+table+" WHERE "+attemptedSQL(driver)+
+		err := q.QueryRowContext(ctx, "SELECT flow_id, archive_attempt_at FROM "+table+" WHERE "+AttemptedSQL(driver)+
 			" AND delete_after_ms=0 AND surgraph_flow_id=0 AND flow_id"+op+"? ORDER BY flow_id LIMIT_OFFSET(1, 0)", from).Scan(&id, &t)
 		if err == sql.ErrNoRows {
 			return 0, time.Time{}, false, nil
@@ -413,7 +413,7 @@ func (l *LargeArchiving) probe(ctx context.Context, q sequel.Executor) {
 		from += " FORCE INDEX (idx_dwarf_flows_attempt)"
 	}
 	err := q.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), MIN(archive_attempt_at)) FROM "+from+
-		" WHERE "+attemptedSQL(driver)+" AND delete_after_ms=0 AND surgraph_flow_id=0").Scan(&ageMs)
+		" WHERE "+AttemptedSQL(driver)+" AND delete_after_ms=0 AND surgraph_flow_id=0").Scan(&ageMs)
 	if err != nil {
 		l.logError(ctx, "Janitor: reading the oldest archive attempt", "error", err)
 		return

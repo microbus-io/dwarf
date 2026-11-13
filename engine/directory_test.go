@@ -23,6 +23,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -30,15 +31,14 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// moveInto archives the tree rooted at rootID into day, as a reaper pass whose day is day would.
+// moveInto archives the tree rooted at rootID into day, as a round of the janitor's archiving whose day is day would.
 func moveInto(t *testing.T, e *Engine, rootID, day int) {
 	t.Helper()
 	sh, err := e.db.Shard(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db := sh.DB()
-	moved, err := e.reaper.Load().MoveTrees(t.Context(), db, e.archiveOn(1), day, []int{rootID})
+	moved, err := janitor.MoveTrees(t.Context(), sh.DB(), e.diags.Seams(), e.archiveOn(1), day, []int{rootID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,6 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	t.Cleanup(func() { e.Shutdown(ctx) })
 	e.SetHost(treeMux())
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	e.testArchiveDay = 2 * time.Second
 	assert.NoError(e.SetRetention(100))
 	assert.Must(assert.NoError(e.Startup(ctx)))

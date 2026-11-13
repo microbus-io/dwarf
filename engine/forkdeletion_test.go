@@ -31,7 +31,7 @@ import (
 )
 
 // TestFork_DeletedBeforeItsLock pins that Fork reads its origin under the lock that opens its transaction. A Delete
-// that lands after Fork was called and before the lock makes the Fork a 409; and an origin the reaper removed in that
+// that lands after Fork was called and before the lock makes the Fork a 409; and an origin the janitor removed in that
 // window is the 404 of an unknown key, not a missing row surfacing from deep in the clone. A fork at a step inside a
 // subgraph sees the Delete too: only the root carries the mark, so the lock is the root's.
 func TestFork_DeletedBeforeItsLock(t *testing.T) {

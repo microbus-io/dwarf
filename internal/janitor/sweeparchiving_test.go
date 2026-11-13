@@ -144,7 +144,7 @@ func TestSweep_ALateLargeRootGetsItsAttempt(t *testing.T) {
 	attempted := func() bool {
 		var n int
 		assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+
-			attemptedSQL(r.db.DriverName()), large).Scan(&n))
+			AttemptedSQL(r.db.DriverName()), large).Scan(&n))
 		return n == 1
 	}
 	r.fastRounds(ctx)

@@ -55,7 +55,7 @@ func treeCount(t *testing.T, e *Engine, flowsTable, stepsTable string, rootID in
 	return flows, steps
 }
 
-// archiveEngine starts an engine whose closed roots are due at once and whose own reaper stays out of the way, so a
+// archiveEngine starts an engine whose closed roots are due at once and whose janitors run only when the test drains them, so a
 // test drives each pass itself.
 func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	t.Helper()
@@ -63,7 +63,6 @@ func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(mux)
 	e.archiveGrace = 0
-	e.reapInterval = time.Hour
 	if err := e.SetRetention(retention); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +164,7 @@ func TestArchiving_OnlyClosedRootsPastTheGraceLeave(t *testing.T) {
 	assert.Equal(2, flows, "a flow inside its grace stays live")
 }
 
-// TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere pins Delete against the reaper: a tree archived between
+// TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere pins Delete against the janitor: a tree archived between
 // Delete's read and its stamp is deleted from the archive instead, never reported deleted while it stays there.
 func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	t.Parallel()
@@ -190,7 +189,7 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 		e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 		t.Skip("midnight passed during the pass")
 	}
-	assert.Equal(2, flows, "the reaper archived the tree while the Delete was held")
+	assert.Equal(2, flows, "the janitor archived the tree while the Delete was held")
 	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
 	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the Delete marked
