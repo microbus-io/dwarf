@@ -105,8 +105,9 @@ const maxTerminateRuns = 16
 // A tree that went terminal concurrently is a no-op, for every caller: the transaction rolls back so the step
 // writes never touch a frozen tree, and nothing is counted or signalled. ended reports whether this call ended the
 // flow at flowID. commitFault is a test-only seam name, checked before any write so a fired fault proves the whole
-// transaction rolls back atomically; pass "" for none.
-func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string) (ended bool, err error) {
+// transaction rolls back atomically; pass "" for none. With deleteTree, the UPDATE that terminates the flow at flowID
+// also marks it for deletion, due at once, so the tree is deleted rather than archived.
+func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHour int, flowToken, reason, commitFault string, deleteTree bool) (ended bool, err error) {
 	sh, err := e.db.Shard(shardNum)
 	if err != nil {
 		return false, errors.Trace(err)
@@ -254,6 +255,12 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			var ended int64
 			terminalized = make([]bool, len(allFlowIDs))
 			for i, fid := range allFlowIDs {
+				// The mark is the root's, as every deletion mark is. An open root has no archive attempt - an attempt
+				// begins only on a closed root, and Fork's clone does not copy one - so the mark writes none.
+				mark := ""
+				if deleteTree && fid.(int) == flowID {
+					mark = "delete_after_ms=1, "
+				}
 				batch.queue(func(res *sequel.BatchResults) error {
 					r, err := res.Exec()
 					if err != nil {
@@ -264,7 +271,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 					terminalized[i] = n > 0
 					return nil
 				},
-					"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, cancel_reason=?, updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+database.TerminalStatusesSQL+")",
+					"UPDATE dwarf_flows SET final_state=?, final_state_bytes=?, status=?, cancel_reason=?, "+mark+"updated_at=NOW_UTC(), touch=1-touch WHERE flow_id=? AND status NOT IN ("+database.TerminalStatusesSQL+")",
 					finalStates[i], len(finalStates[i]), workflow.StatusTerminated, reason, fid,
 				)
 			}

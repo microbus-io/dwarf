@@ -2,7 +2,8 @@
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
 > and its connection, any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
-> the archive deletion sweep, archive retention - chunked deletion, the shared sweep machinery, or the janitors' metrics.
+> the archive deletion sweep, archive retention, expiration - chunked deletion, the shared sweep machinery, or the
+> janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
 > taken over - `DeleteLive` - and the rationale of the staged protocol and of chunked deletion) and
@@ -39,8 +40,8 @@ at once by the next; a round without - nothing found, or every candidate held or
 (`SetIdle` replaces every job's for a test). **The wait follows a round without progress, not only an empty scan:** a
 job whose candidates all fail would otherwise spin on them. No failure counters, backoff or retry classes beyond that.
 
-**The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`), and archive
-retention its pass interval (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
+**The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`), archive
+retention its pass interval and expiration its own pace (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
 retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn, a connection and its reads every second
 on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
 each time. So in a healthy fleet the janitor's steady cost is the two fast jobs. The wait slows nothing that works: a
@@ -379,6 +380,31 @@ pass interval (`PassInterval`): hourly for a day of a day or longer, a twenty-fo
   fails it; `TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`). The engine's
   `CheckpointArchivePassDone` is its catalog refresh's; a test waiting for a maintenance pass waits for
   `CheckpointArchiveMaintained`.
+
+## Expiration (`expiration.go`)
+
+The job that ends the flows still open past the flow expiration (`JobExpiration`), added only while the expiration is
+on. **The pass is the engine's** (`ExpirePass`, the engine's `expirePass`): ending a tree is the engine's termination,
+the one Terminate uses, and the job holds no copy of it. What the job owns is the position - the `flow_id` the next
+pass goes on after, forgotten at a resume - and the pace; the counters (`dwarf_flows_expired`,
+`dwarf_flows_expire_failed`) stay the pass's. The walk, the budget and the mark are in `engine/CLAUDE.md`.
+
+- **Every hour, or every half of the expiration when that is shorter, and at least a minute apart** (user): a flow
+  expires up to that long after it is due. Expiring a flow within seconds makes little sense, and the setter accepts a
+  millisecond, which would otherwise poll a shard every half of one (`TestExpiration_ThePace`).
+- **Its progress is the pass's**: ended a root, or stopped at its budget with more to read. A pass stopped at its
+  budget is followed at once by the next, on a turn of its own, so a backlog drains a budget at a time without holding
+  one turn. **But a sweep from the oldest starts only an idle wait past the last one's end** (`swept`, forgotten at a
+  resume), whatever that one ended: a sweep that ended a root would otherwise start the next at once, so a steady
+  trickle of expiring flows - one per sweep, a sweep lengthened by an archive outage's closed backlog - would keep
+  every dispatcher of the shard sweeping back to back, and a drain would never return
+  (`TestExpiration_TheRoundReportsThePassProgress`).
+- **A turn on the shard and no batch connection**, as archive retention: each tree ends in a transaction of its own on
+  the shard's DB (`TestExpiration_ThePassRunsUnderATurn`).
+- **No residue class**: every dispatcher of a shard walks the same rows, and the later of two on one root finds it
+  ended and does nothing.
+- **What it ends is marked for deletion**, and the deletion jobs delete it: mostly sweep deletion, within its window,
+  since an expired root is old and so behind fast deletion's position once a newer root has been stamped.
 
 ## Chunked deletion (`chunk.go`)
 

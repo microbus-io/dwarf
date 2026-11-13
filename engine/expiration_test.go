@@ -27,6 +27,7 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -74,8 +75,8 @@ func expiryMux() *hosts.Mux {
 	return mux
 }
 
-// expiryEngine starts an engine whose flows expire after an hour, whose own reaper stays out of the way, and whose
-// counters and logs a test reads.
+// expiryEngine starts an engine whose flows expire after expiration, whose counters and logs a test reads. Its
+// janitors are Manual: the expiration job runs only on a drain.
 func expiryEngine(t *testing.T, expiration time.Duration) (*Engine, *sdkmetric.ManualReader, *logCounter) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -144,9 +145,34 @@ func age(t *testing.T, e *Engine, fk string, ago time.Duration) {
 	}
 }
 
-// expireNow runs a reaper pass that expires, as the reaper's goroutine does every expireInterval.
+// expireNow runs one expiration pass over shard 1 from the oldest flow, as the janitor's job does once a pass has
+// swept the shard.
 func expireNow(ctx context.Context, e *Engine) {
-	e.reapPass(ctx, true)
+	e.expirePass(ctx, 1, 0)
+}
+
+// markDue backdates every deletion mark on shard 1 by a second, so the next drain finds them due: a mark comes due a
+// millisecond after it is made, and a drain right behind it can finish first.
+func markDue(t *testing.T, e *Engine) {
+	t.Helper()
+	sh, err := e.db.Shard(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = sh.DB().ExecContext(t.Context(), "UPDATE dwarf_flows SET updated_at=DATE_ADD_MILLIS(updated_at, ?) WHERE delete_after_ms>0", -1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gone reports whether fk reads as not found: deleted, live and archive alike.
+func gone(t *testing.T, e *Engine, fk string) bool {
+	t.Helper()
+	_, err := e.Snapshot(t.Context(), fk)
+	if err != nil && errors.StatusCode(err) != http.StatusNotFound {
+		t.Fatal(err)
+	}
+	return err != nil
 }
 
 // statusOf returns a flow's status, and its terminate reason.
@@ -161,7 +187,8 @@ func statusOf(t *testing.T, e *Engine, fk string) (status, reason string) {
 
 // TestExpiration_TerminatesTheOldOpenRoots pins the pass: a running root and an interrupted one older than the
 // expiration are terminated with the expiration's reason, a root parked on a subgraph with its child, and a root
-// younger than it is left alone; the counter counts the roots.
+// younger than it is left alone; the counter counts the roots. Each root it ends is marked for deletion, so the
+// janitor's deletion jobs delete the trees, children included, and archive none of them.
 func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -213,9 +240,22 @@ func TestExpiration_TerminatesTheOldOpenRoots(t *testing.T) {
 	assert.Equal(workflow.StatusInterrupted, status, "a younger flow is left alone")
 	assert.Equal(int64(3), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}), "roots, not their children")
 
+	assert.Equal(3, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows WHERE delete_after_ms=1"),
+		"each root marked for deletion with its termination, and only the roots")
+
 	// Nothing more to do: a second pass ends nothing and counts nothing.
-	expireNow(ctx, e)
+	next, progress := e.expirePass(ctx, 1, 0)
+	assert.Zero(next, "swept")
+	assert.False(progress)
 	assert.Equal(int64(3), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
+
+	markDue(t, e)
+	e.reapDueFlows(ctx)
+	for _, fk := range []string{asking, napping, parent, child} {
+		assert.True(gone(t, e, fk), "%s deleted, not archived", fk)
+	}
+	status, _ = statusOf(t, e, young)
+	assert.Equal(workflow.StatusInterrupted, status)
 }
 
 // TestExpiration_TheWalkStopsAtTheFirstYoungFlow pins the walk's stop: flows are visited in creation order, so a flow
@@ -267,7 +307,7 @@ func TestExpiration_PagesPastWhatItDoesNotEnd(t *testing.T) {
 }
 
 // TestExpiration_ThePassKeepsToItsBudget pins the time budget: a pass past it starts no further termination, after
-// the first, and says so once; the next pass goes on.
+// the first, says so once and reports progress, so its job runs the next at once; the next pass goes on.
 func TestExpiration_ThePassKeepsToItsBudget(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -279,21 +319,23 @@ func TestExpiration_ThePassKeepsToItsBudget(t *testing.T) {
 	age(t, e, first, 2*time.Hour)
 	age(t, e, second, 2*time.Hour)
 
-	expireNow(ctx, e)
+	next, progress := e.expirePass(ctx, 1, 0)
+	assert.True(progress, "stopped at its budget")
 	status, _ := statusOf(t, e, first)
 	assert.Equal(workflow.StatusTerminated, status, "a pass always ends one")
 	status, _ = statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "past the budget, the rest waits")
 	assert.Equal(1, logs.count("Expiring flows: the pass reached its time budget"))
 
-	expireNow(ctx, e)
+	e.expirePass(ctx, 1, next)
 	status, _ = statusOf(t, e, second)
 	assert.Equal(workflow.StatusTerminated, status)
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
 }
 
-// TestExpiration_OffByDefault pins that an engine never told otherwise expires nothing, however old, and that a
-// reader of a shard expires nothing there.
+// TestExpiration_OffByDefault pins that an engine never told otherwise has no expiration job and expires nothing,
+// however old, that a reader of a shard expires nothing there, that a dispatcher with the expiration on does, and
+// that turning it off removes the job.
 func TestExpiration_OffByDefault(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -301,16 +343,29 @@ func TestExpiration_OffByDefault(t *testing.T) {
 	e, _, _ := expiryEngine(t, 0)
 	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 1000*time.Hour)
-	expireNow(ctx, e)
+	_, ok := e.janitorOn(1).JobAges(time.Now())[janitor.JobExpiration]
+	assert.False(ok, "no expiration job")
+	e.reapDueFlows(ctx)
 	status, _ := statusOf(t, e, old)
 	assert.Equal(workflow.StatusInterrupted, status)
 
 	e.flowExpiration = time.Hour
-	e.dispatchFlag(1).Store(false)
-	expireNow(ctx, e)
-	e.dispatchFlag(1).Store(true)
+	setRole(e, 1, false)
+	e.reapDueFlows(ctx)
+	setRole(e, 1, true)
 	status, _ = statusOf(t, e, old)
 	assert.Equal(workflow.StatusInterrupted, status, "a reader leaves the shard to its dispatchers")
+	e.reapDueFlows(ctx) // the dispatcher's job expires and marks it; its deletion may wait for the mark to come due
+	markDue(t, e)
+	e.reapDueFlows(ctx)
+	assert.True(gone(t, e, old), "the dispatcher's job expires it, and the deletion jobs delete it")
+	_, ok = e.janitorOn(1).JobAges(time.Now())[janitor.JobExpiration]
+	assert.True(ok, "the expiration job")
+
+	e.flowExpiration = 0
+	e.reapDueFlows(ctx)
+	_, ok = e.janitorOn(1).JobAges(time.Now())[janitor.JobExpiration]
+	assert.False(ok, "turned off, the job is removed")
 }
 
 // TestExpiration_SetterRules pins the setter: negative is a 400, 0 and any positive duration are accepted, and it
@@ -340,10 +395,10 @@ func TestExpiration_TerminateSubtreeReportsWhatItClosed(t *testing.T) {
 	fk := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	shard, hour, id, token, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
-	ended, err := e.terminateSubtree(ctx, shard, id, hour, token, "first", "")
+	ended, err := e.terminateSubtree(ctx, shard, id, hour, token, "first", "", false)
 	assert.NoError(err)
 	assert.True(ended)
-	ended, err = e.terminateSubtree(ctx, shard, id, hour, token, "again", "")
+	ended, err = e.terminateSubtree(ctx, shard, id, hour, token, "again", "", false)
 	assert.NoError(err)
 	assert.False(ended)
 }
@@ -365,14 +420,15 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	// Past the budget at once: the failed attempt is the pass's one.
 	e.expireBudget = time.Nanosecond
 	e.diags.Seams().InjectN(diagnostics.FaultExpireTerminate, 1)
-	expireNow(ctx, e)
+	next, _ := e.expirePass(ctx, 1, 0)
 	status, _ := statusOf(t, e, second)
 	assert.Equal(workflow.StatusInterrupted, status, "a failed attempt counts against the budget")
 
 	// The next pass goes on after the failed root and sweeps the rest; the failed root waits for the next sweep.
 	e.expireBudget = time.Minute
 	e.diags.Seams().InjectN(diagnostics.FaultExpireTerminate, 1)
-	expireNow(ctx, e)
+	next, _ = e.expirePass(ctx, 1, next)
+	assert.Zero(next, "swept")
 	status, _ = statusOf(t, e, first)
 	assert.Equal(workflow.StatusInterrupted, status, "its termination failed, and a pass goes on from where the last stopped")
 	status, _ = statusOf(t, e, second)
@@ -393,9 +449,9 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 }
 
 // TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot pins the budget on a walk that terminates nothing and the
-// position kept across passes: closed flows waiting for the reaper, more than one pass reads within its budget, stop
-// each pass at the budget, and the passes after it go on from where it stopped until they reach the expired root
-// behind them. Walking from the oldest each time, no pass would ever reach it.
+// position passed from one pass to the next: closed flows waiting for archiving, more than one pass reads within its
+// budget, stop each pass at the budget, and the passes after it go on from where it stopped until they reach the
+// expired root behind them. Walking from the oldest each time, no pass would ever reach it.
 func TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -412,67 +468,55 @@ func TestExpiration_AClosedPrefixDoesNotHoldBackAnExpiredRoot(t *testing.T) {
 	open := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, open, 2*time.Hour)
 
-	expireNow(ctx, e)
+	next, progress := e.expirePass(ctx, 1, 0)
+	assert.True(progress, "stopped at its budget")
 	status, _ := statusOf(t, e, open)
 	assert.Equal(workflow.StatusInterrupted, status, "a pass that terminates nothing keeps to its budget")
 	assert.Equal(1, logs.count("Expiring flows: the pass reached its time budget"))
 
 	for range closed - 1 {
-		expireNow(ctx, e)
+		next, _ = e.expirePass(ctx, 1, next)
 	}
 	status, _ = statusOf(t, e, open)
 	assert.Equal(workflow.StatusInterrupted, status, "one page of closed flows per pass")
-	expireNow(ctx, e)
+	next, _ = e.expirePass(ctx, 1, next)
 	status, reason := statusOf(t, e, open)
 	assert.Equal(workflow.StatusTerminated, status, "reached by going on from where the last pass stopped")
 	assert.Equal(expirationReason(time.Hour), reason)
 
 	// The next pass finds nothing after it, so the one after starts from the oldest again.
-	assert.NotEqual(0, e.expirePositions.of(1))
-	expireNow(ctx, e)
-	assert.Equal(0, e.expirePositions.of(1), "swept")
+	assert.NotEqual(0, next)
+	next, _ = e.expirePass(ctx, 1, next)
+	assert.Zero(next, "swept")
 }
 
-// TestExpiration_AHandoffForgetsThePosition pins that a replica that stops dispatching a shard forgets where its
-// walk there stopped, so it starts from the oldest when it takes the shard up again.
-func TestExpiration_AHandoffForgetsThePosition(t *testing.T) {
+// TestExpiration_TheJobPassesAsItsJanitorResumes pins the wiring: the janitor's expiration job runs a pass as its
+// janitor resumes, not an idle wait in - half an hour at this expiration - so a replica that lives shorter than the
+// wait, or takes the shard up again, still expires flows.
+func TestExpiration_TheJobPassesAsItsJanitorResumes(t *testing.T) {
 	t.Parallel()
-	assert := testarossa.For(t)
-	e, _, _ := expiryEngine(t, time.Hour)
-	e.expirePositions.set(1, 42)
-	setRole(e, 1, false)
-	e.reapPass(t.Context(), false)
-	setRole(e, 1, true)
-	assert.Equal(0, e.expirePositions.of(1))
-}
-
-// TestExpiration_TheReaperRunsThePassAtOnce pins the wiring: the reaper's goroutine runs the pass on its first tick,
-// not an interval in, so a replica that lives shorter than the interval still expires flows. The flow is made old
-// before that first tick, which comes a few seconds after Startup.
-func TestExpiration_TheReaperRunsThePassAtOnce(t *testing.T) {
-	t.Parallel()
-	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(expiryMux())
-	assert.NoError(e.SetFlowExpiration(time.Hour))
-	tick := 3 * time.Second * enginetest.TimeoutScale()
-	e.reapInterval = tick
-	e.expireInterval = time.Hour
-	started := time.Now()
-	assert.Must(assert.NoError(e.Startup(t.Context())))
+	if err := e.SetFlowExpiration(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	e.janitorManual = false
+	if err := e.Startup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	old := startOpen(t, e, "exp/ask", workflow.StatusInterrupted)
 	age(t, e, old, 2*time.Hour)
-	if time.Since(started) >= tick {
-		t.Skip("the setup outlasted the reaper's first tick")
-	}
-	deadline := started.Add(tick + 10*time.Second*enginetest.TimeoutScale())
+	setRole(e, 1, false)
+	setRole(e, 1, true)
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for {
-		if status, _ := statusOf(t, e, old); status == workflow.StatusTerminated {
-			return
+		outcome, err := e.Snapshot(t.Context(), old)
+		if errors.StatusCode(err) == http.StatusNotFound || (err == nil && outcome.Status == workflow.StatusTerminated) {
+			return // terminated, and perhaps deleted already
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the reaper's first tick did not expire the flow")
+			t.Fatal("the resumed job did not expire the flow")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

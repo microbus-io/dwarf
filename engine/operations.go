@@ -827,7 +827,7 @@ func (e *Engine) terminate(ctx context.Context, flowKey string, reason string) e
 
 	// The root has no ancestors by construction, so this walks DOWN only - see terminateSubtree, which the orphan
 	// sweep shares.
-	_, err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, diagnostics.FaultTerminateCommit)
+	_, err = e.terminateSubtree(ctx, shardNum, flowID, flowHour, flowToken, reason, diagnostics.FaultTerminateCommit, false)
 	return errors.Trace(err)
 }
 

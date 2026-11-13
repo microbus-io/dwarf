@@ -44,6 +44,7 @@ type janitorSettings struct {
 	batchRoots, batchRows, batchBytes int
 	stageRows, stageBytes             int
 	noQuietMargin                     bool
+	expiration                        time.Duration
 }
 
 // janitorSettingsFor returns the settings the engine's fields give, with grace for the archive grace.
@@ -53,14 +54,16 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 		batchRoots: e.reapBatch, batchRows: e.reapBatchRows, batchBytes: e.reapBatchBytes,
 		stageRows: e.reapStageRows, stageBytes: e.reapStageBytes,
 		noQuietMargin: e.noReapQuiet,
+		expiration:    e.flowExpiration,
 	}
 }
 
 // addJanitorJobs adds a shard's janitor its jobs - archive retention; fast archiving, sweep archiving behind it and
 // large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live retention; the
-// archive deletion sweep - built with s, replacing the ones it has, which start over. Archive retention comes first: a
-// drain runs the jobs in that order, and fast archiving archives only into days archive retention has made.
-func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
+// archive deletion sweep; expiration, when the flow expiration is on - built with s, replacing the ones it has, which
+// start over. Archive retention comes first: a drain runs the jobs in that order, and fast archiving archives only
+// into days archive retention has made.
+func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, archive *archiver.Archive, s janitorSettings) {
 	j.AddJob(janitor.JobArchiveRetention, janitor.NewArchiveRetention(archive, e.retentionDays))
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
@@ -93,6 +96,13 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s
 	dm := janitor.NewDeleteMarked(archive, e.retentionDays)
 	dm.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	j.AddJob(janitor.JobArchiveDeletionSweep, dm)
+	if s.expiration <= 0 {
+		j.RemoveJob(janitor.JobExpiration)
+		return
+	}
+	j.AddJob(janitor.JobExpiration, janitor.NewExpiration(s.expiration, func(ctx context.Context, after int) (int, bool) {
+		return e.expirePass(ctx, shard, after)
+	}))
 }
 
 // stopJanitors stops every shard's janitor and returns once they all have. A stopped janitor releases what its jobs
@@ -125,14 +135,14 @@ func (e *Engine) drainJanitors(ctx context.Context, grace time.Duration) {
 	for _, shard := range shards {
 		a := actors[shard]
 		if want != built {
-			e.addJanitorJobs(a.janitor, a.archive, want)
+			e.addJanitorJobs(a.janitor, shard, a.archive, want)
 		}
 		a.janitor.Drain(ctx)
 	}
 	restore := e.janitorSettingsFor(e.archiveGrace)
 	if restore != want {
 		for _, shard := range shards {
-			e.addJanitorJobs(actors[shard].janitor, actors[shard].archive, restore)
+			e.addJanitorJobs(actors[shard].janitor, shard, actors[shard].archive, restore)
 		}
 	}
 	e.janitorMu.Lock()

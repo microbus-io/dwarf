@@ -23,25 +23,18 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// reaperLoop runs the expiration pass on its own plain ticker: on the first tick, and on any tick at least
-// expireInterval after the last that ran it, per shard this replica dispatches; on every tick it forgets the shards this
-// replica no longer dispatches. The first run is at once, not an interval in, so that a replica living shorter than the
-// interval still expires flows. It ends on ctx, which drainRuntime cancels. Removing trees from the live tables and
-// from the archive is the janitor's.
+// reaperLoop forgets, on every tick of its plain ticker, what the reaper recorded about the shards this replica no
+// longer dispatches. It ends on ctx, which drainRuntime cancels. Removing trees from the live tables and from the
+// archive, and expiration, are the janitor's.
 func (e *Engine) reaperLoop(ctx context.Context) {
 	ticker := time.NewTicker(e.reapInterval)
 	defer ticker.Stop()
-	var lastExpire time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			periodic := time.Since(lastExpire) >= e.expireInterval
-			if periodic {
-				lastExpire = time.Now()
-			}
-			e.reapPass(ctx, periodic)
+			e.reapPass(ctx)
 		}
 	}
 }
@@ -51,32 +44,13 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 	e.drainJanitors(ctx, e.archiveGrace)
 }
 
-// reapPass, with periodic, runs the expiration pass, per shard this replica dispatches, in one turn each; with or
-// without, it forgets what it recorded about the shards this replica no longer dispatches.
-func (e *Engine) reapPass(ctx context.Context, periodic bool) {
+// reapPass forgets what the reaper recorded about the shards this replica no longer dispatches: a replica that resumes
+// dispatching one later saw none of what happened meanwhile, so it starts afresh.
+func (e *Engine) reapPass(ctx context.Context) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
-			// A replica that resumes dispatching later saw none of what happened meanwhile, so it starts afresh: an
-			// old position is only a hint about work seen before the handoff.
-			e.forgetReaping(shard)
-			return nil // see reaperLoop
+			e.reaper.Load().Forget(shard)
 		}
-		if !periodic || e.flowExpiration <= 0 {
-			return nil
-		}
-		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
-		// connections like any other caller instead of taking them from work already under way.
-		ctx, doneTurn := e.dbTurn(ctx, shard)
-		defer doneTurn()
-		// Janitor step 8: the archive deletion sweep is the janitor's. Kept, commented out, as the reference.
-		// r.DeleteMarked(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a})
-		e.expireOn(ctx, db, shard)
 		return nil
 	})
-}
-
-// forgetReaping forgets what the reaper and the expiration walk recorded about shard.
-func (e *Engine) forgetReaping(shard int) {
-	e.reaper.Load().Forget(shard)
-	e.expirePositions.forget(shard)
 }

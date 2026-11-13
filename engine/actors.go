@@ -119,7 +119,7 @@ func (e *Engine) buildActors(ctx context.Context, dayLength time.Duration) error
 		a.janitor = janitor.New(sh, e.diags)
 		a.janitor.SetManual(e.janitorManual)
 		a.janitor.SetIdle(e.janitorIdle)
-		e.addJanitorJobs(a.janitor, a.archive, settings)
+		e.addJanitorJobs(a.janitor, idx, a.archive, settings)
 		actors[idx] = a
 	}
 	e.buildSonars(ctx, actors)
