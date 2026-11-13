@@ -68,7 +68,10 @@ func (e *Engine) stateCacheBudget() (int64, string) {
 // linkerFor returns the Linker serving a shard. Every shard opened at Startup has one, so a nil return
 // means the shard set changed under us - impossible while running, since the set is construction-time only.
 func (e *Engine) linkerFor(shardNum int) *staterefs.Linker {
-	return e.linkers[shardNum]
+	if a := e.actorsOn(shardNum); a != nil {
+		return a.linker
+	}
+	return nil
 }
 
 // decodeAnchorColumn decodes an anchor's state or changes column into its fields. An empty column holds none, as

@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -82,12 +83,13 @@ var testPeerCadence = 50 * time.Millisecond
 // early-returns.
 const reconcileTicksPerCadence = 8
 
-// sonarFor returns the Sonar watching one shard, or nil before Startup has built them.
+// sonarFor returns the Sonar watching one shard, or nil before Startup has built them and for a shard whose Sonar could
+// not be built.
 func (e *Engine) sonarFor(shard int) *peers.Sonar {
-	if e.sonars == nil {
-		return nil
+	if a := e.actorsOn(shard); a != nil {
+		return a.sonar
 	}
-	return e.sonars[shard]
+	return nil
 }
 
 // replicasOn is how many replicas are registered on one shard - what the fleet-limit check prices and the
@@ -118,7 +120,7 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 	return sh.Residency()
 }
 
-// buildSonars creates one Sonar per open shard, before anything is sized from a Sonar. Errors are logged
+// buildSonars creates one Sonar for each shard of actors, before anything is sized from a Sonar. Errors are logged
 // rather than returned: a shard without one falls back to dispatching solo there with the WHOLE budget and
 // unpartitioned selection, since its peers never see its row and go on splitting the budget among
 // themselves - so that shard holds up to about twice its budget, in exchange for never being left without a
@@ -134,10 +136,9 @@ func (e *Engine) partitionOn(shard int) (replicas, ordinal int, ok bool) {
 // hold on any shard, so it returns to its place in the order, and takes the start time when no shard has a row.
 // Registration writes the chosen value over whatever a surviving row holds, so shards that disagreed - a row
 // pruned on one and not another while the replica was down - agree again whatever the reads found.
-func (e *Engine) buildSonars(ctx context.Context) {
-	e.sonars = make(map[int]*peers.Sonar, e.db.NumShards())
+func (e *Engine) buildSonars(ctx context.Context, actors map[int]*shardActors) {
 	_, rtts := e.shardFacts()
-	indices := slices.Sorted(slices.Values(e.db.Indices()))
+	indices := slices.Sorted(maps.Keys(actors))
 	type placed struct {
 		place int
 		sonar *peers.Sonar
@@ -184,7 +185,7 @@ func (e *Engine) buildSonars(ctx context.Context) {
 			// exercise is the same policy against the same rows.
 			s.SetCadence(e.peerCadence())
 		}
-		e.sonars[idx] = s
+		actors[idx].sonar = s
 	}
 }
 
@@ -197,9 +198,12 @@ func (e *Engine) buildSonars(ctx context.Context) {
 // across shards, so the whole fleet costs one wait rather than one per shard.
 func (e *Engine) joinFleet(ctx context.Context) {
 	var wg sync.WaitGroup
-	for idx, s := range e.sonars {
+	for idx, a := range e.allActors() {
+		if a.sonar == nil {
+			continue
+		}
 		wg.Go(func() {
-			if err := s.Join(ctx); err != nil {
+			if err := a.sonar.Join(ctx); err != nil {
 				// Not fatal: the pools simply size for whatever this shard's reading found, and the Sonar's own
 				// loop repairs a missing row and re-reads within a cadence.
 				e.diags.Logger().ErrorContext(ctx, "Joining the fleet", "shard", idx, "error", err)
@@ -251,8 +255,11 @@ func (e *Engine) sleepPeerGrace(ctx context.Context, d time.Duration) {
 // the start of a drain; best effort - a shard whose write fails keeps this replica ranked until the row ages
 // out or leaveFleet deletes it.
 func (e *Engine) withdrawFromFleet(ctx context.Context) {
-	for idx, s := range e.sonars {
-		if err := s.Withdraw(ctx, e.dispatchesOn(idx)); err != nil {
+	for idx, a := range e.allActors() {
+		if a.sonar == nil {
+			continue
+		}
+		if err := a.sonar.Withdraw(ctx, e.dispatchesOn(idx)); err != nil {
 			e.diags.Logger().ErrorContext(ctx, "Withdrawing from the fleet", "shard", idx, "error", err)
 		}
 	}
@@ -265,8 +272,11 @@ func (e *Engine) withdrawFromFleet(ctx context.Context) {
 // UPDATEs, so once its loop has returned nothing can resurrect the row this deletes. Best effort - a missed
 // delete just ages out of peers' counts on its own.
 func (e *Engine) leaveFleet(ctx context.Context) {
-	for idx, s := range e.sonars {
-		if err := s.Leave(ctx); err != nil {
+	for idx, a := range e.allActors() {
+		if a.sonar == nil {
+			continue
+		}
+		if err := a.sonar.Leave(ctx); err != nil {
 			e.diags.Logger().ErrorContext(ctx, "Leaving the fleet", "shard", idx, "error", err)
 		}
 	}

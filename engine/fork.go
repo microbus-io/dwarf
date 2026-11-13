@@ -74,11 +74,11 @@ func (e *Engine) forkFlow(ctx context.Context, stepKey string, stateOverrides an
 	if !errors.Is(err, errForkSourceNotHere) {
 		return flowKey, errors.Trace(err)
 	}
-	set := e.archives.Load()
-	if set == nil || set.byShard[shardNum] == nil {
+	a := e.archiveOn(shardNum)
+	if a == nil {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}
-	day, err := e.locateRetained(ctx, set, shardNum, forkFlowID, forkStepHour)
+	day, err := e.locateRetained(ctx, a, forkFlowID, forkStepHour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return "", errors.New("step not found", http.StatusNotFound)
 	}

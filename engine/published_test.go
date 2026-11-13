@@ -45,7 +45,7 @@ func publish(t *testing.T, e *Engine, rootKey string, at time.Time) (day int) {
 		t.Fatal(err)
 	}
 	db := sh.DB()
-	day = archiver.DayOf(at, e.archives.Load().dayLength)
+	day = archiver.DayOf(at, e.dayLength())
 	cols := strings.Join(columnsOf(t, db, migrations.FlowsTable(day)), ", ")
 	stamp, arg := database.SQLTime(db.DriverName(), at)
 	for _, stmt := range []struct {
@@ -172,7 +172,7 @@ func TestPublished_DeleteOfACopyAlreadyGone(t *testing.T) {
 			_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
 			at := time.Now()
 			if gone == "dropped" {
-				at = at.Add(-10 * e.archives.Load().dayLength) // a day whose tables were never made, as a dropped day
+				at = at.Add(-10 * e.dayLength()) // a day whose tables were never made, as a dropped day
 				sh, err := e.db.Shard(1)
 				assert.Must(assert.NoError(err))
 				db := sh.DB()
@@ -225,7 +225,7 @@ func TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	purged, _, _, _ := treeKeys(t, e)
 	deleted, _, _, _ := treeKeys(t, e)
@@ -235,7 +235,7 @@ func TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater(t *testing.T) {
 		moveInto(t, e, id, today)
 		ids = append(ids, id)
 	}
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	e.reapBatchRows = 1 // every tree is larger than a batch

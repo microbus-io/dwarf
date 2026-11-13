@@ -349,18 +349,18 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 	// this process's across midnight.
 	// At a retention of 0 that is today alone: nothing is archived then, but today's tables can still hold what a run
 	// with a retention archived before a restart.
-	set := e.archives.Load()
-	if set == nil {
+	dayLength := e.dayLength()
+	if dayLength == 0 {
 		return nil, nil
 	}
-	today := archiver.DayOf(now, set.dayLength)
-	fromDay := max(archiver.DayOf(w.lower, set.dayLength), today-max(e.retentionDays, 0))
-	toDay := min(archiver.DayOf(w.upper.Add(-time.Nanosecond), set.dayLength), today)
+	today := archiver.DayOf(now, dayLength)
+	fromDay := max(archiver.DayOf(w.lower, dayLength), today-max(e.retentionDays, 0))
+	toDay := min(archiver.DayOf(w.upper.Add(-time.Nanosecond), dayLength), today)
 	if span := toDay - fromDay + 1; span > maxArchiveWindowDays {
 		return nil, errors.New("the time window reaches %d days of the archive; a call reads at most %d", span,
 			maxArchiveWindowDays, http.StatusBadRequest)
 	}
-	if toDay == today && archiver.DayOf(w.upper.Add(-time.Nanosecond), set.dayLength) > today {
+	if toDay == today && archiver.DayOf(w.upper.Add(-time.Nanosecond), dayLength) > today {
 		toDay++
 	}
 	if toDay < fromDay {
@@ -376,7 +376,7 @@ func (e *Engine) listArchived(ctx context.Context, query workflow.Query, limit i
 		if query.Shard != 0 && shardIdx != query.Shard {
 			return nil
 		}
-		a := set.byShard[shardIdx]
+		a := e.archiveOn(shardIdx)
 		if a == nil {
 			return nil
 		}

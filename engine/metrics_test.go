@@ -556,10 +556,10 @@ func TestMetrics_RefillInstrumented(t *testing.T) {
 	// consult the idle flag, so the forced cycles run in full. Clearing the flag here instead released the
 	// engine's own Run goroutine to cycle the same pipeline alongside these calls - a real data race, and
 	// one that fails whichever OTHER tests happen to be running when the detector trips.
-	e.pistons[1].SetTallyCadence(0, 0)
-	e.pistons[1].SetSupplyCadence(0, 0)
-	e.pistons[1].Cycle(ctx)
-	e.pistons[1].Cycle(ctx)
+	e.actorsOn(1).piston.SetTallyCadence(0, 0)
+	e.actorsOn(1).piston.SetSupplyCadence(0, 0)
+	e.actorsOn(1).piston.Cycle(ctx)
+	e.actorsOn(1).piston.Cycle(ctx)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {

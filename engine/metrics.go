@@ -167,10 +167,7 @@ func (m *engineMetrics) shardAttrOpts(shard int) *attrOpts {
 // in unit tests (and unconfigured standalone use) the instruments are no-ops and the callback is never
 // invoked, which also keeps the background backlog refresh from ever querying (see backlogLoop).
 func (e *Engine) initMetrics() error {
-	meter := e.diags.MeterProvider().Meter(metricScope)
-	// Held so the components resolve their own instruments from the SAME meter, keeping one instrumentation
-	// scope per engine however many modules record into it.
-	e.diags.SetMeter(meter)
+	meter := e.diags.Meter()
 	m := &engineMetrics{}
 
 	var errs []error
@@ -447,7 +444,6 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	}
 
 	now := time.Now()
-	archives := e.archives.Load()
 	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
 	// and stays honest while a shard is unreadable (the count holds, and blindFor is what says why).
 	for _, idx := range e.db.Indices() {
@@ -493,8 +489,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 				}
 			}
 		}
-		if archives != nil && archives.byShard[idx] != nil {
-			a := archives.byShard[idx]
+		actors := e.actorsOn(idx)
+		if actors != nil {
+			a := actors.archive
 			days := a.DaysIn(math.MinInt, math.MaxInt)
 			o.ObserveInt64(g.archiveDays, int64(len(days)), shard)
 			if len(days) > 0 {
@@ -504,11 +501,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		}
 		// Only while dispatching: a reader's piston is idle and has no reading, and a replica that just
 		// stopped dispatching must not keep reporting the lag of a shard it no longer looks at.
-		if dispatching == 1 && e.pistonsReady.Load() {
-			if p := e.pistons[idx]; p != nil {
-				if lag, ok := p.DispatchLag(); ok {
-					o.ObserveFloat64(g.dispatchLag, lag.Seconds(), shard)
-				}
+		if dispatching == 1 && actors != nil {
+			if lag, ok := actors.piston.DispatchLag(); ok {
+				o.ObserveFloat64(g.dispatchLag, lag.Seconds(), shard)
 			}
 		}
 	}

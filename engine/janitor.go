@@ -26,32 +26,16 @@ import (
 	"github.com/microbus-io/dwarf/internal/janitor"
 )
 
-// startJanitors makes and starts a janitor for every shard, for the run, on ctx, with its jobs: active on a shard this
-// replica dispatches, paused on the others. applyRole resumes and pauses them as the roles change; each job reads its
-// residue class from its shard, where the shard's Sonar publishes it.
-func (e *Engine) startJanitors(ctx context.Context) error {
-	settings := e.janitorSettingsFor(e.archiveGrace)
-	janitors := map[int]*janitor.Janitor{}
-	for _, shard := range e.db.Indices() {
-		sh, err := e.db.Shard(shard)
-		if err != nil {
-			return err
-		}
-		j := janitor.New(sh, e.diags)
-		j.SetManual(e.janitorManual)
-		j.SetIdle(e.janitorIdle)
-		e.addJanitorJobs(j, shard, settings)
-		j.Start(ctx)
+// startJanitors starts every shard's janitor for the run, on ctx: active on a shard this replica dispatches, paused on
+// the others. applyRole resumes and pauses them as the roles change; each job reads its residue class from its shard,
+// where the shard's Sonar publishes it.
+func (e *Engine) startJanitors(ctx context.Context) {
+	for shard, a := range e.allActors() {
+		a.janitor.Start(ctx)
 		if e.dispatchesOn(shard) {
-			j.Resume()
+			a.janitor.Resume()
 		}
-		janitors[shard] = j
 	}
-	e.janitorMu.Lock()
-	e.janitors = janitors
-	e.janitorJobsBuilt = settings
-	e.janitorMu.Unlock()
-	return nil
 }
 
 // janitorSettings are what the engine builds a janitor's jobs with, taken from its fields.
@@ -72,13 +56,9 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 	}
 }
 
-// addJanitorJobs adds shard's janitor its jobs - fast archiving into the shard's archive, and fast deletion - built
+// addJanitorJobs adds a shard's janitor its jobs - fast archiving into the shard's archive, and fast deletion - built
 // with s, replacing the ones it has, which start over.
-func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, s janitorSettings) {
-	var archive *archiver.Archive
-	if set := e.archives.Load(); set != nil {
-		archive = set.byShard[shard]
-	}
+func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
 	fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
@@ -90,21 +70,20 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, s janitorSettings
 	j.AddJob(janitor.JobFastDeletion, fd)
 }
 
-// stopJanitors stops every janitor and returns once they all have.
+// stopJanitors stops every shard's janitor and returns once they all have. A stopped janitor releases what its jobs
+// registered, its gauges among them, whether or not it was started.
 func (e *Engine) stopJanitors() {
-	e.janitorMu.Lock()
-	janitors := e.janitors
-	e.janitorMu.Unlock()
-	for _, j := range janitors {
-		j.Stop()
+	for _, a := range e.allActors() {
+		a.janitor.Stop()
 	}
 }
 
 // janitorOn is the janitor of shard, or nil when it has none.
 func (e *Engine) janitorOn(shard int) *janitor.Janitor {
-	e.janitorMu.Lock()
-	defer e.janitorMu.Unlock()
-	return e.janitors[shard]
+	if a := e.actorsOn(shard); a != nil {
+		return a.janitor
+	}
+	return nil
 }
 
 // drainJanitors runs every active janitor's jobs until they make no progress (janitor.Drain), shard by shard, with
@@ -113,20 +92,22 @@ func (e *Engine) janitorOn(shard int) *janitor.Janitor {
 // differ from the ones they were built with, and rebuilt with the engine's own after a drain under another grace.
 func (e *Engine) drainJanitors(ctx context.Context, grace time.Duration) {
 	e.janitorMu.Lock()
-	janitors, built := e.janitors, e.janitorJobsBuilt
+	built := e.janitorJobsBuilt
 	e.janitorMu.Unlock()
-	shards := slices.Sorted(maps.Keys(janitors))
+	actors := e.allActors()
+	shards := slices.Sorted(maps.Keys(actors))
 	want := e.janitorSettingsFor(grace)
 	for _, shard := range shards {
+		a := actors[shard]
 		if want != built {
-			e.addJanitorJobs(janitors[shard], shard, want)
+			e.addJanitorJobs(a.janitor, a.archive, want)
 		}
-		janitors[shard].Drain(ctx)
+		a.janitor.Drain(ctx)
 	}
 	restore := e.janitorSettingsFor(e.archiveGrace)
 	if restore != want {
 		for _, shard := range shards {
-			e.addJanitorJobs(janitors[shard], shard, restore)
+			e.addJanitorJobs(actors[shard].janitor, actors[shard].archive, restore)
 		}
 	}
 	e.janitorMu.Lock()

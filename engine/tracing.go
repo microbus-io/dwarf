@@ -38,8 +38,9 @@ const traceScope = metricScope
 var traceProp = propagation.TraceContext{}
 
 // initProviders resolves the tracer and meter providers for this run into diags - the configured ones, else the
-// global ones - and sets the engine's tracer from the tracer provider. Called from Startup before the shards open,
-// whose sequel layer instruments itself with both.
+// global ones - and sets the engine's tracer and meter from them. Called from Startup before the shards open, whose
+// sequel layer instruments itself with both, and before the shards' actors are built, which create their instruments
+// on the meter.
 func (e *Engine) initProviders() {
 	tp := resolveTracerProvider(e.tracerProvider, otel.GetTracerProvider())
 	e.diags.SetTracerProvider(tp)
@@ -49,6 +50,8 @@ func (e *Engine) initProviders() {
 		mp = otel.GetMeterProvider()
 	}
 	e.diags.SetMeterProvider(mp)
+	// One meter, so every component records under one instrumentation scope per engine.
+	e.diags.SetMeter(mp.Meter(metricScope))
 }
 
 // otelStandInPkg and otelStandInType name OTel's global stand-in provider: what otel.GetTracerProvider()

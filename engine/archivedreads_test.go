@@ -507,7 +507,7 @@ func archivedDay(t *testing.T, e *Engine, flowKey string) flowTables {
 	if err != nil {
 		t.Fatal(err)
 	}
-	day, err := e.archives.Load().byShard[shard].LocateFlow(t.Context(), id, hour)
+	day, err := e.archiveOn(shard).LocateFlow(t.Context(), id, hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1260,7 +1260,7 @@ func TestArchivedReads_ADayPastTheRetentionIsNotRead(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 1)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-5))

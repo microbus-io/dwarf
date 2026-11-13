@@ -290,8 +290,8 @@ func TestSetMaxPriority(t *testing.T) {
 	assert.Must(assert.NoError(e2.Startup(t.Context())))
 	assert.Error(e2.SetMaxPriority(4), "construction-time only")
 
-	for _, p := range e2.pistons {
-		assert.Equal(3, p.MaxPriority(), "every piston counts the engine's range")
+	for _, a := range e2.allActors() {
+		assert.Equal(3, a.piston.MaxPriority(), "every piston counts the engine's range")
 	}
 
 	_, err := e2.Create(t.Context(), "maxprio/g", nil, &workflow.FlowOptions{Priority: 4})

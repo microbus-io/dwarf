@@ -37,9 +37,6 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
-	"github.com/microbus-io/dwarf/internal/janitor"
-	"github.com/microbus-io/dwarf/internal/latch"
-	"github.com/microbus-io/dwarf/internal/peers"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/reaper"
@@ -192,12 +189,17 @@ type Engine struct {
 	// while its own claim is still in flight) and expires it with no per-entry sweep - see the package doc.
 	claims *claimstracker.Tracker
 
-	// Peer discovery: one Sonar per shard owns this replica's row in that shard's dwarf_peers registry and
-	// publishes what reading it implies - how many replicas hold connections to the shard (its pool
-	// divisor) and which residue class of step_id this replica selects there (its work divisor). Built in
-	// Startup before anything is sized from them, read-only thereafter; sonarCancel stops their loops. See
-	// peers.go and internal/peers.
-	sonars      map[int]*peers.Sonar
+	// actors is the run's actors by shard (actors.go): Startup builds and publishes a fresh map per run, so a host
+	// still serving through a Shutdown/Startup restart reads one run's map or the other's - a map assigned in place
+	// under that read is a fatal throw. Each published map is read-only. runDayLength is the run's archive day, in
+	// nanoseconds, stored with it.
+	actors       atomic.Pointer[map[int]*shardActors]
+	runDayLength atomic.Int64
+
+	// Peer discovery: each shard's Sonar (shardActors.sonar) owns this replica's row in that shard's dwarf_peers
+	// registry and publishes what reading it implies - how many replicas hold connections to the shard (its pool
+	// divisor) and which residue class of step_id this replica selects there (its work divisor). sonarCancel stops
+	// their loops. See peers.go and internal/peers.
 	sonarCancel context.CancelFunc
 	sonarPool   sync.WaitGroup
 	// reconcileStop ends the loop that keeps the derived pool sizes in step with what the Sonars observe.
@@ -208,13 +210,6 @@ type Engine struct {
 	// own. Per shard because the roles are: a fleet change on one shard must not re-push every other
 	// shard's unchanged sizes, and an unchanged one must not mask a change elsewhere.
 	lastAppliedSlots map[int]int
-	// roles is this replica's standing on each shard: whether it dispatches there - the doorbell's gate and
-	// pickShard's preference - and how many steps its workers are processing there. Startup builds a fresh
-	// map per run and PUBLISHES it through the pointer: a host still serving through a Shutdown/Startup
-	// restart reads it from Create, and a map assigned in place under that read is a fatal throw. Each
-	// published map is read-only; its dispatch flags are flipped by applyRole under poolsLock, and its
-	// in-flight counts are moved lock-free by the workers. Read through dispatchFlag and inFlightOn.
-	roles atomic.Pointer[map[int]*shardRole]
 	// heldDivisors is, for each shard this replica stopped dispatching while its workers still had steps in
 	// flight there, the divisor its held pool was last sized with: the pool and turnstile keep a share until
 	// those steps finish. Owned by poolsLock.
@@ -276,20 +271,16 @@ type Engine struct {
 	inFlightStateBytes atomic.Int64
 	inFlightStateSteps atomic.Int64
 
-	// Candidate supply: one piston per shard, each cycling its own database on its own clock with no
-	// barrier against its peers. They share the planner (each shard's tally retained, so every shard plans
-	// against the merged picture without waiting for the slowest) and the candidate cache. The maps are built in initRuntime before started flips true
-	// and are read-only thereafter.
+	// Candidate supply: one piston per shard (shardActors.piston), each cycling its own database on its own clock
+	// with no barrier against its peers. They share the planner (each shard's tally retained, so every shard plans
+	// against the merged picture without waiting for the slowest) and the candidate cache. The planner is built
+	// fresh per run with the actors.
 	//
 	// pistonCancel stops them: piston.Run ends on ctx alone, and the lifetime ctx is deliberately not
 	// cancelled until every other goroutine has drained, so the pistons need a cancellable child of it.
 	planner      *planner.Planner
-	pistons      map[int]*piston.Piston
 	pistonCancel context.CancelFunc
 	pistonPool   sync.WaitGroup
-	// pistonsReady is set once every piston is in the map. The metrics callback is registered before the
-	// pistons are built, so it reads the map only after this.
-	pistonsReady atomic.Bool
 
 	// Per-band backlog gauges: the shard's leader refreshes them in the background (backlogLoop) and the
 	// metrics callback reads the cache. backlogBands remembers every band reported per shard, so one that
@@ -315,44 +306,39 @@ type Engine struct {
 	reaperCancel context.CancelFunc
 	reaperWorker sync.WaitGroup
 
-	// Janitors: one per shard for the run (startJanitors), active where this replica dispatches the shard - applyRole
-	// resumes and pauses them. The map is replaced at Startup and read under janitorMu, with janitorJobsBuilt, the
-	// settings their jobs were built with. janitorCancel ends their run. janitorIdle replaces every job's idle wait for
-	// a test; janitorManual starts no job goroutine, for a test that runs the jobs through reapDueFlows.
+	// Janitors: one per shard for the run (shardActors.janitor), active where this replica dispatches the shard -
+	// applyRole resumes and pauses them. janitorJobsBuilt, under janitorMu, is the settings their jobs were built
+	// with. janitorCancel ends their run. janitorIdle replaces every job's idle wait for a test; janitorManual starts
+	// no job goroutine, for a test that runs the jobs through reapDueFlows.
 	janitorMu        sync.Mutex
-	janitors         map[int]*janitor.Janitor
 	janitorJobsBuilt janitorSettings
 	janitorCancel    context.CancelFunc
 	janitorIdle      time.Duration
 	janitorManual    bool
 
-	// Archive goroutine: keeps each shard's archive day tables - today's and the days ahead made, expired days
-	// dropped. archives is the run's set, published at Startup; testArchiveDay, when set, replaces the day's
-	// length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
+	// Archive goroutine: keeps each shard's archive day tables (shardActors.archive) - today's and the days ahead
+	// made, expired days dropped. testArchiveDay, when set, replaces the day's length for a test (archiveDayLength). noReapQuiet, set in test mode, lets a reaper pass archive into its day
 	// however late it runs (reaper.Config.NoQuietMargin), so a test's pass near midnight, or on a day of seconds, does
 	// what it does at noon. archiveCancel stops the loop between its statements.
-	archives       atomic.Pointer[archiveSet]
 	testArchiveDay time.Duration
 	noReapQuiet    bool
 	archiveCancel  context.CancelFunc
 	archiveWorker  sync.WaitGroup
 
-	// Await latch: one board per shard for callers to park on, each with a detector goroutine that asks its
-	// shard which of those flows have settled. A stop this replica commits reaches its board instantly
-	// through signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the
-	// detectors, abandoning a sweep in flight.
-	latches     map[int]*latch.Board
+	// Await latch: one board per shard for callers to park on (shardActors.latch), each with a detector goroutine
+	// that asks its shard which of those flows have settled. A stop this replica commits reaches its board instantly
+	// through signalStop; the detector is what makes a PEER's stop observable. latchCancel stops the detectors,
+	// abandoning a sweep in flight.
 	latchCancel context.CancelFunc
 	latchWorker sync.WaitGroup
 
 	// Parsed graphs, so a dispatch reads no graph column. The graph JSON is frozen at flow creation, so an entry
 	// never goes stale.
 	graphs *graphcache.Cache
-	// State-ref linkers, one per shard: they decide which state fields a successor step stores by reference
-	// rather than by value, and resolve those references back. Per shard because a step id is only unique
-	// within one. They share stateCache, one budget of resolved bytes for the whole replica, so it goes to
+	// State-ref linkers, one per shard (shardActors.linker): they decide which state fields a successor step stores
+	// by reference rather than by value, and resolve those references back. Per shard because a step id is only
+	// unique within one. They share stateCache, one budget of resolved bytes for the whole replica, so it goes to
 	// the shards this replica dispatches rather than being split among shards it may never run.
-	linkers    map[int]*staterefs.Linker
 	stateCache *staterefs.Cache
 
 	// Lifecycle
@@ -852,9 +838,16 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	// The archive tables of today and the days ahead exist before this replica serves anything.
-	err = e.startArchives(ctx, dayLength)
+	// Every shard's actors, built and published before anything reads them; none runs yet.
+	err = e.buildActors(ctx, dayLength)
 	if err != nil {
+		e.db.Close()
+		return errors.Trace(err)
+	}
+	// The archive tables of today and the days ahead exist before this replica serves anything.
+	err = e.startArchives(ctx)
+	if err != nil {
+		e.stopJanitors()
 		e.db.Close()
 		return errors.Trace(err)
 	}
@@ -881,14 +874,6 @@ func (e *Engine) Startup(ctx context.Context) error {
 	e.fleetOverLimit = map[int]bool{}
 	e.heldDivisors = map[int]int{}
 	e.poolsLock.Unlock()
-	// One role per open shard, rebuilt per run and filled in by the sizing loop below, before anything that
-	// could ring a doorbell is running.
-	roles := make(map[int]*shardRole, len(shards))
-	for idx := range shards {
-		roles[idx] = &shardRole{}
-	}
-	e.roles.Store(&roles)
-
 	// Announce this replica on every shard, wait for peers to notice, and read each shard's fleet back -
 	// then size every pool from the derived budget split by THAT shard's count. Those are the real sizes,
 	// taken before any worker dispatches, so the replica takes on work with pools already correct for the
@@ -897,8 +882,8 @@ func (e *Engine) Startup(ctx context.Context) error {
 	// The announce-then-wait ordering is what keeps the join from exceeding a shard's connection budget even
 	// momentarily - peers hold pools sized for the fleet WITHOUT this replica until they read again, so it
 	// shrinks them first and grows into the space afterward. It costs one wait for the whole fleet, since the
-	// shards join in parallel.
-	e.buildSonars(ctx)
+	// shards join in parallel. Each shard's role is filled in by the sizing loop below, before anything that could
+	// ring a doorbell is running.
 	e.joinFleet(ctx)
 	totalConns := 0
 	for _, idx := range e.db.Indices() {
@@ -932,9 +917,10 @@ func (e *Engine) Startup(ctx context.Context) error {
 
 	if err := e.initRuntime(); err != nil {
 		// initRuntime fails only before it spawns anything, so what remains to undo is Startup's own work: the
-		// registry rows joinFleet wrote, which peers would otherwise count for the fresh window, and the open
-		// shards. Shutdown cannot do it - the engine never reported itself started.
+		// registry rows joinFleet wrote, which peers would otherwise count for the fresh window, the janitors'
+		// gauges, and the open shards. Shutdown cannot do it - the engine never reported itself started.
 		e.leaveFleet(context.Background())
+		e.stopJanitors()
 		e.db.Close()
 		return errors.Trace(err)
 	}
@@ -982,17 +968,11 @@ func (e *Engine) initRuntime() error {
 	// a pinned SetWorkers spawns its maximum in full, and the derived resident set is only a floor.
 	e.cache.Init(min(maxWorkers, e.workersDispatch))
 	e.drainStop = make(chan struct{})
-	// One planner for the whole replica, one piston per shard. Reset rather than reused across a
-	// Shutdown/Startup cycle: a tally left from the previous run would claim a band nobody is serving.
-	e.planner = planner.New()
-	e.pistonsReady.Store(false)
-	e.pistons = make(map[int]*piston.Piston)
 	e.backlogMu.Lock()
 	e.backlogByShard = map[int]shardBacklog{}
 	e.backlogBands = map[int]map[int]bool{}
 	e.backlogMu.Unlock()
 	e.backlogWanted.Store(false)
-	e.linkers = make(map[int]*staterefs.Linker)
 	// The background loops' contexts exist before the engine reports itself started, as their stop signals must:
 	// a drain that found one missing would not stop its loop.
 	var recoveryCtx, reaperCtx, archiveCtx, latchCtx context.Context
@@ -1003,31 +983,7 @@ func (e *Engine) initRuntime() error {
 	var janitorCtx context.Context
 	janitorCtx, e.janitorCancel = context.WithCancel(e.lifetimeCtx)
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
-	// Fresh boards per run: the previous ones were closed at drain, and a closed board turns every Await
-	// away. The resolver is non-nil, so New cannot fail.
-	e.latches = make(map[int]*latch.Board)
-	for _, idx := range e.db.Indices() {
-		board, _ := latch.New(func(ctx context.Context, flowKeys []string) (map[string]string, error) {
-			return e.resolveStoppedFlows(ctx, idx, flowKeys)
-		})
-		// The park rendezvous, wired only under test so a production board holds no hook and Latch pays one
-		// atomic load. Fired unscoped and scoped by flow key, for the same reason signalStop fires both: a
-		// scoped fire does not wake an unscoped waiter, and a test may be waiting for THIS caller to park
-		// while a subgraph child's or a peer's Await parks alongside it.
-		if e.diags.Seams().Enabled() {
-			board.SetOnPark(func(flowKey string) {
-				e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.CheckpointAwaitParked)
-				e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.Join(diagnostics.CheckpointAwaitParked, flowKey))
-			})
-		}
-		e.latches[idx] = board
-	}
 	e.started.Store(true)
-
-	// The state cache exists before the gauge callback that reads it is registered.
-	cacheBudget, cacheSource := e.stateCacheBudget()
-	e.stateCache = staterefs.NewCache(cacheBudget)
-	e.diags.Logger().InfoContext(e.lifetimeCtx, "State cache sized", "bytes", cacheBudget, "source", cacheSource)
 
 	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
 	// emitting. Falls back to the global (no-op) provider when none was injected.
@@ -1036,48 +992,17 @@ func (e *Engine) initRuntime() error {
 		e.diags.Logger().ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
 
-	// Build the pistons now that the cache is sized: each takes its own shard's handle, the shared planner
-	// and the shared cache. A piston starts idle on a shard this replica does not dispatch, and on every
-	// shard of an await-only replica (SetWorkers(0)): it claims no work, and its idling reports as much,
-	// which is what keeps the replica out of that shard's candidate partition.
-	idle := int(e.workers.Load()) == 0
 	if e.diags.Seams().IsFault(diagnostics.FaultInitRuntime) {
 		e.unwindRuntime()
 		return errors.New("injected fault: " + diagnostics.FaultInitRuntime)
 	}
-	for _, idx := range e.db.Indices() {
-		// A shard without a piston has no supply cycle, so nothing on it is ever dispatched while the replica
-		// goes on advertising itself as alive there - a half-supplied engine reporting success. Startup
-		// returns an error; use it. Both failures are near-impossible today (the shard set is already open,
-		// the arguments are non-nil), which is exactly why continuing quietly is the wrong default: the only
-		// way to reach here is a bug, and a loud one is cheaper than a degraded fleet.
-		sh, dbErr := e.db.Shard(idx)
-		if dbErr != nil {
-			e.unwindRuntime()
-			return errors.New("resolving shard %d for its piston: %w", idx, dbErr)
-		}
-		db := sh.DB()
-		// One state-ref Linker per shard, built from the same handle: it needs the shard's driver name (the
-		// only dialect-dependent term in the size policy) and it caches resolved payload bytes under step
-		// ids, which are unique only within a shard.
-		e.linkers[idx] = staterefs.New(db.DriverName(), idx, e.stateCache)
-		p, perr := piston.New(sh, e.diags, e.planner, &e.cache)
-		if perr != nil {
-			e.unwindRuntime()
-			return errors.New("building piston for shard %d: %w", idx, perr)
-		}
-		p.SetMaxPriority(e.maxPriority)
-		// The two halves of this shard's peer accounting meet through the shard and here, rather than through
-		// either package knowing the other: the piston selects within the residue class the shard's Sonar
-		// publishes on the shard, and that Sonar stamps this replica as SERVING the shard only when the piston
-		// says it is turning. Both are reads of live state, so neither captures anything that could go stale.
-		if s := e.sonarFor(idx); s != nil {
-			s.SetEvidence(p.Liveness)
-		}
-		p.SetIdle(idle || !e.dispatchesOn(idx))
-		e.pistons[idx] = p
+	// A piston idles on a shard this replica does not dispatch, and on every shard of an await-only replica
+	// (SetWorkers(0)): it claims no work, and its idling reports as much, which is what keeps the replica out of
+	// that shard's candidate partition.
+	idle := e.zeroWorkers()
+	for idx, a := range e.allActors() {
+		a.piston.SetIdle(idle || !e.dispatchesOn(idx))
 	}
-	e.pistonsReady.Store(true)
 
 	// Derive each piston's cycle period now that the cache is sized and the roles are known. recomputePools
 	// re-derives it on every later role change.
@@ -1131,9 +1056,9 @@ func (e *Engine) initRuntime() error {
 	// strands nothing.
 	pistonCtx, pistonCancel := context.WithCancel(e.lifetimeCtx)
 	e.pistonCancel = pistonCancel
-	for _, p := range e.pistons {
+	for _, a := range e.allActors() {
 		e.pistonPool.Go(func() {
-			p.Run(pistonCtx)
+			a.piston.Run(pistonCtx)
 		})
 	}
 	// The recovery loop, the reaper and the latch detector each run on their own child of the lifetime ctx, so
@@ -1150,15 +1075,13 @@ func (e *Engine) initRuntime() error {
 	})
 	// Before Startup returns, so a shard this replica dispatches has its janitor active - and its gauges their
 	// readings - from the start.
-	if err := e.startJanitors(janitorCtx); err != nil {
-		e.diags.Logger().ErrorContext(janitorCtx, "Starting the janitors", "error", err)
-	}
+	e.startJanitors(janitorCtx)
 	e.archiveWorker.Go(func() {
 		e.archiveLoop(archiveCtx)
 	})
-	for shard, board := range e.latches {
+	for shard, a := range e.allActors() {
 		e.latchWorker.Go(func() {
-			e.latchLoop(latchCtx, shard, board)
+			e.latchLoop(latchCtx, shard, a.latch)
 		})
 	}
 	// On a child of the lifetime ctx, so the drain can abandon an aggregate in flight rather than wait out its
@@ -1177,9 +1100,12 @@ func (e *Engine) initRuntime() error {
 	// every peer sized its pools for a fleet that includes us.
 	sonarCtx, sonarCancel := context.WithCancel(e.lifetimeCtx)
 	e.sonarCancel = sonarCancel
-	for _, s := range e.sonars {
+	for _, a := range e.allActors() {
+		if a.sonar == nil {
+			continue
+		}
 		e.sonarPool.Go(func() {
-			s.Run(sonarCtx)
+			a.sonar.Run(sonarCtx)
 		})
 	}
 	e.reconcileStop = make(chan struct{})
@@ -1218,8 +1144,8 @@ func (e *Engine) drainRuntime() {
 	// within the dispatch window and select its residue class themselves, instead of leaving those steps to the
 	// steal grace for as long as an in-flight task holds the drain open. The reconcile loop that re-derives the
 	// mode has stopped, so it holds.
-	for _, p := range e.pistons {
-		p.SetIdle(true)
+	for _, a := range e.allActors() {
+		a.piston.SetIdle(true)
 	}
 	// Give up every dispatcher slot if the drain turns out to be LONG. A draining replica takes on no new
 	// work, but its row stays fresh until it leaves the fleet at the very end, and a fresh row keeps its rank
@@ -1307,8 +1233,8 @@ func (e *Engine) drainRuntime() {
 	// Wake every blocked Await so it returns a shutdown error rather than waiting out its own context on a
 	// board nothing will ever release again - every goroutine that could have is drained above. A caller
 	// already holding a stop status keeps it and returns that outcome instead.
-	for _, board := range e.latches {
-		board.Close()
+	for _, a := range e.allActors() {
+		a.latch.Close()
 	}
 	if e.lifetimeCancel != nil {
 		e.lifetimeCancel()

@@ -70,8 +70,7 @@ func purgeDone(limit, took, gone int) bool {
 // holding the vacuum horizon and the shard's turn for its length. dwarf_flows_removed counts each shard's total once,
 // what committed before a failure included.
 func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int, error) {
-	set := e.archives.Load()
-	if set == nil || len(roots) == 0 {
+	if e.allActors() == nil || len(roots) == 0 {
 		return 0, nil
 	}
 	r := e.reaper.Load()

@@ -94,11 +94,11 @@ func TestDelete_AnArchivedFlowIsDeletedInItsDay(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	rootKey, childKey := archivedTreeKeys(t, e, root, today)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	assert.Equal(2, namedFlows(t, e, today, root), "the directory names the root and its child")
@@ -131,7 +131,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.purgeChunk = 1
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-2))
@@ -231,11 +231,11 @@ func TestLifecycle_AnArchivedFlowAnswersAsAClosedOne(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	rootKey, childKey := archivedTreeKeys(t, e, root, today)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
@@ -268,11 +268,11 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	rootKey, _ := archivedTreeKeys(t, e, root, today)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	history, err := e.History(ctx, rootKey)

@@ -125,14 +125,14 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 48}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	derived, tallyGap := e.pistons[1].TallyCadence()
+	derived, tallyGap := e.actorsOn(1).piston.TallyCadence()
 	assert.True(derived > 0, "a started engine derives and pushes a period")
 
 	// The two loops are paced SEPARATELY, and the supply loop's gap is derived from its own period rather
 	// than pinned. A flat constant cannot stay a fuse: wherever the derived period lands under it - any
 	// pinned SetWorkers - it silently becomes the supply rate and under-supplies the cache against its own
 	// drain. The tally loop keeps the constant, having no buffer to derive from.
-	supplyInterval, supplyGap := e.pistons[1].SupplyCadence()
+	supplyInterval, supplyGap := e.actorsOn(1).piston.SupplyCadence()
 	assert.Equal(derived, supplyInterval, "both loops start from the same derived period")
 	assert.Equal(pipeline.DefaultMinGap, tallyGap, "the tally loop's fuse is the flat constant")
 	assert.Equal(min(pipeline.DefaultMinGap, derived/supplyGapDivisor), supplyGap,
@@ -147,8 +147,8 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	// The override pins BOTH loops - it exists to measure the refiller unpaced, and pacing half of it would
 	// measure neither arm.
 	assert.NoError(e.setRefillInterval(42 * time.Millisecond))
-	ti, _ := e.pistons[1].TallyCadence()
-	si, _ := e.pistons[1].SupplyCadence()
+	ti, _ := e.actorsOn(1).piston.TallyCadence()
+	si, _ := e.actorsOn(1).piston.SupplyCadence()
 	assert.Equal(42*time.Millisecond, ti, "the override pins the tally loop live")
 	assert.Equal(42*time.Millisecond, si, "and the supply loop with it")
 
@@ -156,8 +156,8 @@ func TestRefillInterval_OverridePinsAndRestores(t *testing.T) {
 	// supply loop pinned at the sweep's last value forever - and the sweep that set it has moved on, so the
 	// arm it is still pacing at is one nobody is measuring.
 	assert.NoError(e.setRefillInterval(0))
-	ti, tg := e.pistons[1].TallyCadence()
-	si, sg := e.pistons[1].SupplyCadence()
+	ti, tg := e.actorsOn(1).piston.TallyCadence()
+	si, sg := e.actorsOn(1).piston.SupplyCadence()
 	assert.Equal(derived, ti, "<=0 restores derivation")
 	assert.Equal(tallyGap, tg, "and the tally loop's fuse with it")
 	assert.Equal(supplyInterval, si, "and the supply loop, which the override pinned too")
@@ -256,11 +256,11 @@ func TestRefillInterval_IndependentOfShardCount(t *testing.T) {
 	defer many.Shutdown(t.Context())
 	start(many, 8)
 
-	solo, _ := one.pistons[1].SupplyCadence()
+	solo, _ := one.actorsOn(1).piston.SupplyCadence()
 	assert.True(solo > 8*time.Millisecond && solo < 9*time.Millisecond,
 		"a worker-bound period settles at 1/sustainedDrainPerConn ~= 8.3ms, got %v", solo)
 	for idx := 1; idx <= 8; idx++ {
-		got, _ := many.pistons[idx].SupplyCadence()
+		got, _ := many.actorsOn(idx).piston.SupplyCadence()
 		assert.Equal(solo, got, "shard %d's period must not scale with the shard count (solo %v)", idx, solo)
 	}
 }
@@ -344,7 +344,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 	// CAPPED at the cache capacity (min(due, capacity)) - the scan stops counting a key past capacity,
 	// which is all the plan can ever consume from one key, so the cap is lossless. SetWorkers(0) makes
 	// this fixture's capacity small, so the assertion is the capped value, not the raw backlog depth.
-	band, tallies, err := e.pistons[1].ScanBand(ctx, 1)
+	band, tallies, err := e.actorsOn(1).piston.ScanBand(ctx, 1)
 	if !assert.NoError(err) {
 		return
 	}
@@ -359,7 +359,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// fetch runs phase 3 for the tenants at the band, keyed by tenant.
 	fetch := func(perKey int) (map[string][]int, error) {
-		got, err := e.pistons[1].FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: tenants, PerKeyCap: perKey}})
+		got, err := e.actorsOn(1).piston.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: tenants, PerKeyCap: perKey}})
 		byKey := map[string][]int{}
 		for slot, ids := range got {
 			byKey[slot.Key] = ids
@@ -412,7 +412,7 @@ func TestRefillInterval_OverrideSerializesWithAPoolRecompute(t *testing.T) {
 	defer e.Shutdown(t.Context())
 	assert.NoError(e.SetHost(noopHost{}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	derived, _ := e.pistons[1].SupplyCadence()
+	derived, _ := e.actorsOn(1).piston.SupplyCadence()
 	const pinned = 42 * time.Millisecond
 	if !assert.NotEqual(pinned, derived, "fixture: the pin must differ from the derived period") {
 		return
@@ -429,10 +429,10 @@ func TestRefillInterval_OverrideSerializesWithAPoolRecompute(t *testing.T) {
 		t.Error("the override applied while a pool recompute held poolsLock")
 	case <-time.After(50 * time.Millisecond):
 	}
-	si, _ := e.pistons[1].SupplyCadence()
+	si, _ := e.actorsOn(1).piston.SupplyCadence()
 	assert.Equal(derived, si, "nothing is pushed while a recompute holds the lock")
 	e.poolsLock.Unlock()
 	<-done
-	si, _ = e.pistons[1].SupplyCadence()
+	si, _ = e.actorsOn(1).piston.SupplyCadence()
 	assert.Equal(pinned, si, "the override applies once the recompute is done")
 }

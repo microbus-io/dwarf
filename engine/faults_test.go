@@ -569,7 +569,7 @@ func TestFault_RefillScanErrPreservesCache(t *testing.T) {
 	assert.Equal(2, e.cache.Len())
 	e.diags.Seams().InjectN(diagnostics.FaultRefillScanErr, 1<<20)
 
-	_, _, err := e.pistons[1].ScanBand(ctx, 1)
+	_, _, err := e.actorsOn(1).piston.ScanBand(ctx, 1)
 	assert.Error(err, "the engine's seams must reach its pistons")
 	assert.Equal(2, e.cache.Len(), "a failed scan does not discard the healthy candidates")
 }

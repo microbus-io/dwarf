@@ -224,8 +224,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, hosts.NewMux(), 1)
-	set := e.archives.Load()
-	a := set.byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	shard1 := map[string]string{"shard": "1"}
@@ -242,7 +241,7 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	began := time.Since(a.DayEnds(today - 6)).Seconds()
 	assert.True(oldest > 0 && oldest <= began && oldest > began-60, "day %d began %vs ago, got %v", today-5, began, oldest)
 
-	e.maintainArchives(ctx, set)
+	e.maintainArchives(ctx)
 	assert.NoError(e.PurgeBefore(ctx, a.DayEnds(today-1)))
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
@@ -254,14 +253,14 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert.Zero(sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 
 	e.diags.Seams().InjectN(diagnostics.FaultArchiveMaintainErr, 1)
-	e.maintainArchives(ctx, set)
+	e.maintainArchives(ctx)
 	rm = collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 
 	// A pass cut short by Shutdown is not a failure.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	e.maintainArchives(cancelled, set)
+	e.maintainArchives(cancelled)
 	rm = collect(t, reader)
 	assert.Equal(int64(1), sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 }
@@ -306,7 +305,7 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	closedRoots(t, e, 1)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	sh, err := e.db.Shard(1)
@@ -408,7 +407,7 @@ func TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure(t *testing.T) 
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.Must(assert.NoError(err))
 	for _, table := range []string{migrations.FlowsTable(today + 1), migrations.StepsTable(today + 1)} {

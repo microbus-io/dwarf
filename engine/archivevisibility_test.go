@@ -100,7 +100,7 @@ func TestArchiveVisibility_AChildWithoutItsRootIsHidden(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	rootKey, childKey, _, childStep := treeKeys(t, e)
 	_, _, childID, _, _ := keys.ParseFlowKey(childKey)
@@ -135,12 +135,12 @@ func TestArchiveVisibility_AMarkedTreeIsHidden(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	rootKey, childKey, rootStep, childStep := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
 	moveInto(t, e, rootID, today)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	assert.Equal(2, closedListed(t, e), "archived and visible")
@@ -177,7 +177,7 @@ func TestArchiveVisibility_RootsListingsWalkTheRootsIndex(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))

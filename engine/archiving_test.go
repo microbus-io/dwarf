@@ -133,7 +133,7 @@ func TestArchiving_OnlyClosedRootsPastTheGraceLeave(t *testing.T) {
 	disposable, err := e.Create(ctx, "arch/parent", nil, &workflow.FlowOptions{DeleteOnCompletion: true})
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, disposable, workflow.StatusCompleted, time.Minute)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 
 	// The stamp is due a millisecond after completion on the database clock, so a pass may come too soon.
@@ -149,7 +149,7 @@ func TestArchiving_OnlyClosedRootsPastTheGraceLeave(t *testing.T) {
 	_, _, askedID, _, _ := keys.ParseFlowKey(asked)
 	flows, _ = treeCount(t, e, "dwarf_flows", "dwarf_steps", askedID)
 	assert.Equal(1, flows, "an interrupted flow has not closed")
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now == today {
+	if now, _ := e.archiveOn(1).Today(ctx); now == today {
 		archFlows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), disposableID)
 		assert.Equal(0, archFlows, "and not archived")
 	}
@@ -179,13 +179,13 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.Delete(ctx, fk) }()
 	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeDeleteStamp, 10*time.Second))
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	e.reapDueFlows(ctx)
 	_, _, rootID, _, err := keys.ParseFlowKey(fk)
 	assert.NoError(err)
 	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); flows == 0 && now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); flows == 0 && now != today {
 		e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 		t.Skip("midnight passed during the pass")
 	}
@@ -253,7 +253,7 @@ func TestArchiving_ARemovalOfADroppedDayIsNoError(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	roots := seedTrees(t, db, 2, callShape)
 	moveInto(t, e, roots[0], today)

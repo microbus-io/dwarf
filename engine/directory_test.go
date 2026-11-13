@@ -38,7 +38,7 @@ func moveInto(t *testing.T, e *Engine, rootID, day int) {
 		t.Fatal(err)
 	}
 	db := sh.DB()
-	moved, err := e.reaper.Load().MoveTrees(t.Context(), db, e.archives.Load().byShard[1], day, []int{rootID})
+	moved, err := e.reaper.Load().MoveTrees(t.Context(), db, e.archiveOn(1), day, []int{rootID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func located(t *testing.T, e *Engine, flowKey string) (int, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return e.archives.Load().byShard[1].LocateFlow(t.Context(), id, hour)
+	return e.archiveOn(1).LocateFlow(t.Context(), id, hour)
 }
 
 // TestDirectory_ShortDaysNameMovesFarFromTheHour pins the directory with days shorter than the key's hour, as tests and
@@ -88,7 +88,7 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	db := sh.DB()
 	var named int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+archiver.DirectoryTable+" WHERE day=?", day).Scan(&named))
-	before, from := e.archives.Load().byShard[1].DirectoryHours(day)
+	before, from := e.archiveOn(1).DirectoryHours(day)
 	if hour < before || hour >= from {
 		assert.Equal(2, named, "the root and its child are named")
 	} else {
@@ -124,7 +124,7 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-3))
@@ -140,7 +140,7 @@ func TestDirectory_AReaderRefreshesTheDaysItLocates(t *testing.T) {
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err), "not probed before the read")
 
 	e.dispatchFlag(1).Store(false)
-	e.maintainArchives(ctx, e.archives.Load())
+	e.maintainArchives(ctx)
 	day, err := a.LocateFlow(ctx, 999999, hour)
 	assert.NoError(err)
 	assert.Equal(today-3, day)

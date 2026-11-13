@@ -93,7 +93,7 @@ func TestRetention_StartupMakesTodaysArchive(t *testing.T) {
 	e.SetHost(hosts.NewMux())
 	before := archiver.DayOf(time.Now(), archiver.DefaultDayLength)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	today, err := e.archives.Load().byShard[1].Today(t.Context())
+	today, err := e.archiveOn(1).Today(t.Context())
 	assert.NoError(err)
 	if today != before {
 		t.Skip("midnight passed during Startup")
@@ -115,7 +115,7 @@ func TestRetention_ZeroStillMakesToday(t *testing.T) {
 	assert.NoError(e.SetRetention(0))
 	before := archiver.DayOf(time.Now(), archiver.DefaultDayLength)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	today, err := e.archives.Load().byShard[1].Today(t.Context())
+	today, err := e.archiveOn(1).Today(t.Context())
 	assert.NoError(err)
 	if today != before {
 		t.Skip("midnight passed during Startup")
@@ -133,12 +133,12 @@ func TestRetention_PurgeBeforeDropsTheOlderDays(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	for day := today - 3; day < today; day++ {
 		assert.NoError(makeArchiveDay(t, e, day))
 	}
-	dayLength := e.archives.Load().dayLength
+	dayLength := e.dayLength()
 	assert.NoError(e.PurgeBefore(ctx, dayStart(today-1, dayLength).Add(time.Hour)))
 	assert.False(hasArchiveDay(t, e, today-3) || hasArchiveDay(t, e, today-2), "days before the one given are dropped")
 	assert.True(hasArchiveDay(t, e, today-1) && hasArchiveDay(t, e, today), "the day given and after are kept")
@@ -159,7 +159,7 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	e.testArchiveDay = 2 * time.Second
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	// The loop passes every second at this day length, so it may drop the day while it is being made, and the
 	// migration then fails on a table already gone: a drop either way, so its error is not the test's.
@@ -190,16 +190,15 @@ func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	// The loop passes once at its start, then an hour later; the day is made once that first pass is done.
 	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)
-	set := e.archives.Load()
-	today, err := set.byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-5))
 
 	e.dispatchFlag(1).Store(false)
-	e.maintainArchives(ctx, set)
+	e.maintainArchives(ctx)
 	assert.True(hasArchiveDay(t, e, today-5), "a reader leaves the shard's archive to its dispatchers")
 	e.dispatchFlag(1).Store(true)
-	e.maintainArchives(ctx, set)
+	e.maintainArchives(ctx)
 	assert.False(hasArchiveDay(t, e, today-5), "a dispatcher drops the expired day")
 }
 
@@ -219,7 +218,7 @@ func TestRetention_ABadDayLengthFailsStartup(t *testing.T) {
 	}
 	t.Setenv(archiveDayEnv, "10s")
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	assert.Equal(10*time.Second, e.archives.Load().dayLength)
+	assert.Equal(10*time.Second, e.dayLength())
 }
 
 // TestRetention_TheGraceFromTheEnvironment pins the benchmark's grace override: a value that is not a duration of at
@@ -261,7 +260,7 @@ func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
 	t.Setenv(stageRowsEnv, "131072")
 	t.Setenv(stageBytesEnv, "67108864")
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	cfg := e.reaperConfig(t.Context(), e.archives.Load(), 0)
+	cfg := e.reaperConfig(t.Context(), 0)
 	assert.Equal(131072, cfg.StageRows)
 	assert.Equal(67108864, cfg.StageBytes)
 }

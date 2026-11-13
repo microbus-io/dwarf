@@ -111,11 +111,10 @@ func init() {
 	}
 	accessors.FlowsClosed = func(eng any) int64 { return eng.(*Engine).flowsClosedCount.Load() }
 	accessors.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {
-		set := eng.(*Engine).archives.Load()
-		if set == nil || set.byShard[shard] == nil {
+		a := eng.(*Engine).archiveOn(shard)
+		if a == nil {
 			return nil, nil
 		}
-		a := set.byShard[shard]
 		if err := a.Refresh(ctx); err != nil {
 			return nil, err
 		}

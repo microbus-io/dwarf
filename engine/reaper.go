@@ -67,9 +67,9 @@ func (e *Engine) reapDueFlows(ctx context.Context) {
 
 // reaperConfig is one pass's settings, from the engine's fields, read anew for every pass since tests change them
 // on a running engine. The steal grace is two reaper ticks, so a slow or departed peer's roots wait about three ticks
-// rather than forever. The day's length comes from the archive set; without one it is resolved as at Startup, and
-// only when retention needs it.
-func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.Duration) reaper.Config {
+// rather than forever. The day's length is the run's; before a run it is resolved as at Startup, and only when
+// retention needs it.
+func (e *Engine) reaperConfig(ctx context.Context, grace time.Duration) reaper.Config {
 	cfg := reaper.Config{
 		Batch:         e.reapBatch,
 		BatchRows:     e.reapBatchRows,
@@ -85,8 +85,8 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 		NoQuietMargin: e.noReapQuiet,
 	}
 	switch {
-	case set != nil:
-		cfg.DayLength = set.dayLength
+	case e.dayLength() > 0:
+		cfg.DayLength = e.dayLength()
 	case e.retentionDays > 0:
 		cfg.DayLength = archiver.DefaultDayLength
 		if d, err := e.archiveDayLength(ctx); err == nil {
@@ -101,9 +101,8 @@ func (e *Engine) reaperConfig(ctx context.Context, set *archiveSet, grace time.D
 // then deletes the marked archive trees left and runs the expiration pass. Each shard's pass is one turn: the
 // reaper's pass, then the periodic stages, one after the other. dwarf_reap_pass_seconds times the reaper's pass alone.
 func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic bool) {
-	set := e.archives.Load()
 	r := e.reaper.Load()
-	cfg := e.reaperConfig(ctx, set, grace)
+	cfg := e.reaperConfig(ctx, grace)
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		if !e.dispatchesOn(shard) {
 			// A replica that resumes dispatching later saw none of what happened meanwhile, so it starts afresh: an
@@ -115,10 +114,7 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic boo
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
-		var a *archiver.Archive
-		if set != nil {
-			a = set.byShard[shard]
-		}
+		a := e.archiveOn(shard)
 		r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
 			return e.partitionOn(shard)
 		}})

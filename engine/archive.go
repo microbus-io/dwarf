@@ -65,12 +65,11 @@ func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
-	set := e.archives.Load()
-	day := archiver.DayOf(before, set.dayLength)
+	day := archiver.DayOf(before, e.dayLength())
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		ctx, doneTurn := e.opTurn(ctx, shard, "purge_before")
 		defer doneTurn()
-		a := set.byShard[shard]
+		a := e.archiveOn(shard)
 		if a == nil {
 			return errors.New("shard %d has no archive in this run; the engine is restarting", shard, http.StatusServiceUnavailable)
 		}
@@ -80,11 +79,13 @@ func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 	}))
 }
 
-// archiveSet is one run's archives: an Archive per open shard and the day's length they count in. Published whole, so
-// a call straddling a Shutdown/Startup restart reads one run's set or the other's, never a map being assigned.
-type archiveSet struct {
-	byShard   map[int]*archiver.Archive
-	dayLength time.Duration
+// archiveOn is shard's archive in the current run, or nil before the first Startup and for a shard the run did not
+// open.
+func (e *Engine) archiveOn(shard int) *archiver.Archive {
+	if a := e.actorsOn(shard); a != nil {
+		return a.archive
+	}
+	return nil
 }
 
 // flowTables names the pair of tables a read runs against: the live tables, or one archive day's. The two have the
@@ -135,11 +136,11 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 			return found, errors.Trace(err)
 		}
 	}
-	set := e.archives.Load()
-	if set == nil || set.byShard[shard] == nil {
+	a := e.archiveOn(shard)
+	if a == nil {
 		return false, nil
 	}
-	day, err := e.locateRetained(ctx, set, shard, flowID, hour)
+	day, err := e.locateRetained(ctx, a, flowID, hour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return false, nil
 	}
@@ -173,12 +174,12 @@ func (e *Engine) queryLiveOrArchive(ctx context.Context, db *sequel.DB, shard, f
 // archive's migrations (MigrateDays), so an expired day's tables can be a migration behind, and a read of them would
 // fail on the schema rather than miss. The lists cut their window the same way. The day is today on this process's
 // clock, as the lists' cut is; a skew of seconds at midnight affects only the oldest day, which is about to drop.
-func (e *Engine) locateRetained(ctx context.Context, set *archiveSet, shard, flowID, hour int) (int, error) {
-	day, err := set.byShard[shard].LocateFlow(ctx, flowID, hour)
+func (e *Engine) locateRetained(ctx context.Context, a *archiver.Archive, flowID, hour int) (int, error) {
+	day, err := a.LocateFlow(ctx, flowID, hour)
 	if err != nil {
 		return 0, errors.Trace(err)
 	}
-	if day < archiver.DayOf(time.Now(), set.dayLength)-max(e.retentionDays, 0) {
+	if day < archiver.DayOf(time.Now(), e.dayLength())-max(e.retentionDays, 0) {
 		return 0, errors.New("flow not found", http.StatusNotFound)
 	}
 	return day, nil
@@ -323,20 +324,10 @@ func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
 	return dayLength, nil
 }
 
-// startArchives builds an Archive per open shard and makes sure each shard has the tables of today and of the days
-// ahead of it before the replica serves, whatever the retention, then brings the existing days within the retention up to
-// the archive migrations - right after the shards' schema migrations, before anything reads a day.
-func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) error {
-	set := &archiveSet{byShard: make(map[int]*archiver.Archive, len(e.db.Indices())), dayLength: dayLength}
-	for _, idx := range e.db.Indices() {
-		sh, err := e.db.Shard(idx)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		db := sh.DB()
-		set.byShard[idx] = archiver.New(db, dayLength, migrations.Archive())
-	}
-	e.archives.Store(set)
+// startArchives makes sure each shard has the tables of today and of the days ahead of it before the replica serves,
+// whatever the retention, then brings the existing days within the retention up to the archive migrations - right
+// after the shards' schema migrations, before anything reads a day.
+func (e *Engine) startArchives(ctx context.Context) error {
 	// The run's reaper, fresh, so nothing the last run learned survives into this one's readings - built before
 	// initMetrics registers the gauge callback that reads it.
 	r := reaper.New()
@@ -344,7 +335,7 @@ func (e *Engine) startArchives(ctx context.Context, dayLength time.Duration) err
 	r.SetSeams(e.diags.Seams())
 	e.reaper.Store(r)
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
-		a := set.byShard[shard]
+		a := e.archiveOn(shard)
 		err := a.EnsureToday(ctx)
 		if err == nil {
 			err = a.MigrateDays(ctx, e.retentionDays)
@@ -363,38 +354,37 @@ func archivePassInterval(dayLength time.Duration) time.Duration {
 
 // archiveLoop keeps the archive of every shard this replica dispatches: one pass when it starts, then one per tick.
 func (e *Engine) archiveLoop(ctx context.Context) {
-	set := e.archives.Load()
-	ticker := time.NewTicker(archivePassInterval(set.dayLength))
+	ticker := time.NewTicker(archivePassInterval(e.dayLength()))
 	defer ticker.Stop()
 	// A pass at once, not an interval in: Startup makes days but drops none, so a fleet whose replicas live shorter
 	// than an interval would never drop an expired day.
-	e.maintainArchives(ctx, set)
+	e.maintainArchives(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.maintainArchives(ctx, set)
+			e.maintainArchives(ctx)
 		}
 	}
 }
 
 // maintainArchives is one pass of the archive loop. A reader replica keeps no archive: one replica per shard
 // suffices, and every pass is idempotent.
-func (e *Engine) maintainArchives(ctx context.Context, set *archiveSet) {
+func (e *Engine) maintainArchives(ctx context.Context) {
 	e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		// A turn on the shard, so the pass queues for its connections like any other caller.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
 		if !e.dispatchesOn(shard) {
 			// A reader maintains nothing, but its locates still need the days that exist: one catalog read a pass.
-			err := set.byShard[shard].Refresh(ctx)
+			err := e.archiveOn(shard).Refresh(ctx)
 			if err != nil {
 				e.logSweepError(ctx, "Reading the archive's days; the next pass retries", "shard", shard, "error", err)
 			}
 			return nil
 		}
-		dropped, err := set.byShard[shard].Maintain(ctx, e.retentionDays)
+		dropped, err := e.archiveOn(shard).Maintain(ctx, e.retentionDays)
 		// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
 		if err == nil && e.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
 			err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)

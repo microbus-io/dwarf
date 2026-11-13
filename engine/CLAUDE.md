@@ -1536,7 +1536,7 @@ The doc-extraction shape (a document fanned out over pages, then chunks) measure
 — read it before changing any of them.** Three things stay the engine's, because each is engine state rather than
 ref policy, and they are what `engine/staterefs.go` holds:
 
-- **Which Linker.** One per shard, built in `initRuntime` from the shard's own handle; the driver (the policy's
+- **Which Linker.** One per shard, built with the shard's actors (`buildActors`) from the shard's own handle; the driver (the policy's
   one dialect-dependent term) is a property of that handle. Every Linker reads through the replica's one
   `stateCache`, keyed by shard because a `step_id` is only unique within one (`internal/staterefs/CLAUDE.md`,
   "One Linker per shard, one Cache per replica").
@@ -2333,7 +2333,7 @@ only the lists, which already return keys, find its flow (see "Tracing"); subgra
 `Await` blocks until a flow stops (no longer `created`/`pending`/`running`); it returns on `completed`/`failed`/
 `terminated`/`cancelled`/`interrupted`. Its shape is **read, then park and read until a read sees a stop**:
 snapshot and return if the flow has already stopped; otherwise park on its shard's **latch board**
-(`internal/latch`, held in `e.latches` and found by `latchBoard`) until it settles, then snapshot to build the outcome. **The park repeats only when that
+(`internal/latch`, one of the shard's actors, found by `latchBoard`) until it settles, then snapshot to build the outcome. **The park repeats only when that
 read finds the flow running again** - an interrupted flow Resumed between its release and the read - and the
 caller's ctx is still live. Each iteration follows a release, never a timer, so it is not a poll (a sweep that
 read the row before a Resume can release the re-parked caller once more for the same stop - bounded); returning
@@ -3608,8 +3608,8 @@ archive failure never becomes permission to delete - are in `internal/reaper/CLA
   (`SetMeter`, fed from the engine's `diagnostics.Diags`), so the engine does not register them itself. The reaper
   keeps its setters, unlike the components built since, until it is deleted.
 - **`Config` is built for every pass** (`reaperConfig`) from the engine's fields, which tests change on a running
-  engine: the steal grace is two ticks, and the day's length comes from the archive set, resolved through
-  `archiveDayLength` only when there is none.
+  engine: the steal grace is two ticks, and the day's length is the run's (`dayLength`), resolved through
+  `archiveDayLength` only before a run.
 - **A shard this replica stops dispatching is forgotten** (`forgetReaping`: `Reaper.Forget` with the expiration
   walk's position), so a replica that dispatches it again starts afresh.
 - **The gauges stay here**, reading `Reaper.Observe`, because they are gated on dispatching when read.
@@ -3625,9 +3625,9 @@ The engine's tests drive a pass with `reapDueFlows`; the `TestReaperContract_*` 
 while this replica dispatches the shard; their mechanics are in `internal/janitor/CLAUDE.md`. The engine holds the
 wiring (`janitor.go`):
 
-- **Made at Startup for every shard** (`startJanitors`, in `initRuntime` before Startup returns, so a dispatched
-  shard's janitor - and the archive gauges it feeds - is active from the start), and active where this replica
-  dispatches. **`applyRole` resumes and pauses them** with the doorbell's gate and the piston's idle mode. Each
+- **Built with the shard's actors** (`buildActors`) **and started in `initRuntime`** (`startJanitors`, before
+  Startup returns, so a dispatched shard's janitor - and the archive gauges its job reports - is active from the
+  start), and active where this replica dispatches. **`applyRole` resumes and pauses them** with the doorbell's gate and the piston's idle mode. Each
   reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
@@ -3917,7 +3917,7 @@ latchCancel();       latchWorker.Wait()    // the detectors stop before the boar
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
 leaveFleet()                             // only now is the last possible beat behind us
-latches[*].Close(); lifetimeCancel()
+every latch board Close(); lifetimeCancel()
 ```
 
 **The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's batch has no
@@ -4358,6 +4358,21 @@ the not-shard-fault-tolerant contract, and the DSN/test-mode resolution — live
 **Shard routing & encoding:** external flow IDs encode the shard (`{shard}-{hour}-{flowID}-{token}`); every operation parses
 it and routes via `e.db.Shard(n)`. Indices are the declared ones (`>= 1`, sparse); `0` is the "no shard / all
 shards" sentinel used by `Query.Shard`.
+
+**A shard's actors are one entry of one map per run** (`actors.go`): its Sonar, piston, janitor, archive, latch board
+and state-ref linker, and this replica's role there (`shardActors`). The engine's per-shard paths - `applyRole`,
+Startup, the drain - touch several actors of one shard together, so the grouping is by shard. **Do not give each
+actor's package a set type of its own**: it would only index. What every shard shares - the
+planner, the reaper, the graph and state caches - stays on the engine.
+- **Built whole, then published once** (`buildActors`, right after the shards open): a host still serving through a
+  Shutdown/Startup restart reads the run's map from its operations, so the map goes out through one atomic pointer,
+  whole - a map assigned in place under that read is a fatal throw. The planner and the state cache are built fresh
+  with it.
+- **No field is written after the map is published**: a field written later races every reader. A new per-shard
+  actor is built in `buildActors`; what it learns from the fleet join (an idle mode, a period) is set through its own
+  methods, and starting it is `initRuntime`'s.
+- **A Startup that fails after `buildActors` stops the janitors** (`stopJanitors`): adding a job registers its
+  gauges, and only a stop releases them.
 
 **Shard affinity:** subgraph flows are created on the parent's shard (avoids cross-shard references during
 subgraph completion and history reconstruction). Only top-level flow creation picks a shard - a

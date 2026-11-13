@@ -382,14 +382,14 @@ type shardRole struct {
 	inFlight atomic.Int64
 }
 
-// roleOn is one shard's role in the current run's map, or nil before the first Startup and for a shard
-// that run did not open.
+// roleOn is one shard's role in the current run, or nil before the first Startup and for a shard that run did not
+// open. Its dispatch flag is flipped by applyRole under poolsLock, and its in-flight count is moved lock-free by the
+// workers.
 func (e *Engine) roleOn(shard int) *shardRole {
-	roles := e.roles.Load()
-	if roles == nil {
-		return nil
+	if a := e.actorsOn(shard); a != nil {
+		return &a.role
 	}
-	return (*roles)[shard]
+	return nil
 }
 
 // dispatchFlag is one shard's role flag in the current run's map, or nil before the first Startup and
@@ -588,16 +588,16 @@ func (e *Engine) applyRole(shard int, dispatches bool) {
 	if b := e.dispatchFlag(shard); b != nil && b.Swap(dispatches) != dispatches {
 		e.diags.Logger().Info("Shard dispatch role changed", "shard", shard, "dispatching", dispatches)
 	}
-	if p := e.pistons[shard]; p != nil {
-		p.SetIdle(!dispatches || e.zeroWorkers())
+	a := e.actorsOn(shard)
+	if a == nil {
+		return
 	}
+	a.piston.SetIdle(!dispatches || e.zeroWorkers())
 	// The janitor works only on a shard this replica dispatches.
-	if j := e.janitorOn(shard); j != nil {
-		if dispatches {
-			j.Resume()
-		} else {
-			j.Pause()
-		}
+	if dispatches {
+		a.janitor.Resume()
+	} else {
+		a.janitor.Pause()
 	}
 }
 

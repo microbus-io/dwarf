@@ -343,7 +343,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 	}
 	assert.Equal(0, e.slotsOn(1))
 	assert.False(e.dispatchesOn(1))
-	assert.True(e.pistons[1].Idle(), "a reader's piston idles")
+	assert.True(e.actorsOn(1).piston.Idle(), "a reader's piston idles")
 	assert.Equal(readerOpenConns, db.DB.Stats().MaxOpenConnections, "a reader holds the reader pool")
 
 	// Create rings the doorbell before it returns, and with the piston idle the doorbell is the only way this
@@ -360,7 +360,7 @@ func TestDispatchers_ReaderReplicaHoldsTheReaderPoolAndRunsNothing(t *testing.T)
 
 	leaveFakeFleet(t, e)
 	assert.True(e.dispatchesOn(1), "promoted once the fleet is gone")
-	assert.False(e.pistons[1].Idle())
+	assert.False(e.actorsOn(1).piston.Idle())
 	outcome, err := e.Await(ctx, fk)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusCompleted, outcome.Status, "the promoted dispatcher's scan picks the step up")
@@ -463,7 +463,7 @@ func TestDispatchers_DemotedReplicaHoldsItsPoolUntilInFlightStepsFinish(t *testi
 		return
 	}
 	assert.False(e.dispatchesOn(1), "demoted: it claims nothing new")
-	assert.True(e.pistons[1].Idle())
+	assert.True(e.actorsOn(1).piston.Idle())
 	assert.Equal(int64(flows), e.inFlightOn(1))
 	assert.Equal(heldOpen, db.DB.Stats().MaxOpenConnections, "the pool is held while steps are in flight")
 	assert.Equal(turnstilePassesPerConn*heldOpen, turnLimit(t, e, 1), "and so is the turnstile")
@@ -912,8 +912,8 @@ func TestDispatchers_DrainStopsClaimingDispatch(t *testing.T) {
 	deadline = time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
 		if dispatchAge() > 2500 {
-			for _, p := range e.pistons {
-				assert.True(p.Idle())
+			for _, a := range e.allActors() {
+				assert.True(a.piston.Idle())
 			}
 			return
 		}
@@ -963,8 +963,8 @@ func TestDispatchers_DrainingReplicasClassPassesToAPeer(t *testing.T) {
 	assert.Must(assert.NoError(drainer.Startup(t.Context())))
 	assert.Must(assert.NoError(peer.Startup(t.Context())))
 	assert.Must(assert.NoError(creator.Startup(t.Context())))
-	for _, p := range peer.pistons {
-		p.SetStealAfter(0) // the class can reach the peer only through the partition
+	for _, a := range peer.allActors() {
+		a.piston.SetStealAfter(0) // the class can reach the peer only through the partition
 	}
 
 	// Both dispatchers partition the shard between them before the drain starts, or the peer would be serving

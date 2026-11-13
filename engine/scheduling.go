@@ -137,7 +137,8 @@ func (e *Engine) recomputeRefillIntervalsWith(sizing map[int]shardSizing, roles 
 	// worker term exists to hold, i.e. straight back into the over-supply regime it was added to close.
 	dispatchers := max(1, share/2)
 	override := time.Duration(e.refillIntervalOverride.Load())
-	for idx, p := range e.pistons {
+	for idx, a := range e.allActors() {
+		p := a.piston
 		if override > 0 {
 			// The gap is the fuse against a 100%-duty-cycle loop, and a bench sweep measuring below it is the
 			// one caller entitled to say so explicitly. Only lowered, never raised: a 500ms pinned interval

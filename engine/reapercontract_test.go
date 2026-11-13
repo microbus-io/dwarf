@@ -139,11 +139,11 @@ func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	roots := seedTrees(t, db, 4, callShape)
 	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the pass")
 	}
 	var token string
@@ -188,11 +188,11 @@ func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 			sh, err := e.db.Shard(1)
 			assert.Must(assert.NoError(err))
 			db := sh.DB()
-			today, err := e.archives.Load().byShard[1].Today(ctx)
+			today, err := e.archiveOn(1).Today(ctx)
 			assert.NoError(err)
 			seedTrees(t, db, 4, callShape)
 			e.reapDueFlows(ctx)
-			if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+			if now, _ := e.archiveOn(1).Today(ctx); now != today {
 				t.Skip("midnight passed during the pass")
 			}
 
@@ -218,11 +218,11 @@ func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	roots := seedTrees(t, db, 4, callShape)
 	e.reapDueFlows(ctx)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the pass")
 	}
 

@@ -74,7 +74,7 @@ func TestList_EachListReadsItsOwnTables(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-2))
@@ -226,7 +226,7 @@ func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	assert.NoError(makeArchiveDay(t, e, today-2))
@@ -237,7 +237,7 @@ func TestListClosed_ADayAPeerDroppedIsReadAgain(t *testing.T) {
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	peer := archiver.New(db, e.archives.Load().dayLength, migrations.Archive())
+	peer := archiver.New(db, e.dayLength(), migrations.Archive())
 	_, err = peer.DropBefore(ctx, today-1)
 	assert.NoError(err)
 	assert.True(a.Whole(today-2), "this replica's record is stale")
@@ -256,7 +256,7 @@ func TestListClosed_TheWindowIsClampedToTheArchive(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
@@ -371,13 +371,13 @@ func TestListClosed_TheDayAfterTodayIsRead(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today+1) // as a pass on a database clock already past midnight would
 	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(48 * time.Hour), Limit: 10})
 	assert.NoError(err)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	assert.Equal([]int{root}, idsOf(t, got))
@@ -391,14 +391,14 @@ func TestListClosed_TheWindowRoundsUpToTheColumnsPrecision(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	unit := time.Millisecond
 	stored := time.Now().Add(-time.Minute).Truncate(unit)
 	stampArchived(t, e, today, root, stored)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today || archiver.DayOf(stored, e.archives.Load().dayLength) != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today || archiver.DayOf(stored, e.dayLength()) != today {
 		t.Skip("midnight is too close")
 	}
 	half := unit / 2
@@ -417,13 +417,13 @@ func TestListClosed_RetentionZeroStillReadsToday(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 0)
-	today, err := e.archives.Load().byShard[1].Today(ctx)
+	today, err := e.archiveOn(1).Today(ctx)
 	assert.NoError(err)
 	root := closedRoots(t, e, 1)[0]
 	moveInto(t, e, root, today)
 	got, err := e.ListClosed(ctx, workflow.Query{FromTime: time.Now().Add(-time.Hour), ToTime: time.Now().Add(time.Hour), Limit: 10})
 	assert.NoError(err)
-	if now, _ := e.archives.Load().byShard[1].Today(ctx); now != today {
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
 	assert.Equal([]int{root}, idsOf(t, got))
@@ -483,7 +483,7 @@ func TestListClosed_AFarFutureBoundMeansNoBound(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	roots := closedRoots(t, e, 1)
-	a := e.archives.Load().byShard[1]
+	a := e.archiveOn(1)
 	today, err := a.Today(ctx)
 	assert.NoError(err)
 	moveInto(t, e, roots[0], today)

@@ -1045,11 +1045,10 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 	}
 	// The root can move or publish after validation. The mutation chooses its action under the root lock.
 	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeDeleteStamp)
-	set := e.archives.Load()
-	if set == nil {
+	if e.archiveOn(shardNum) == nil {
 		return errors.New("the archive is not open", http.StatusServiceUnavailable)
 	}
-	result, err := e.reaper.Load().DeleteLive(ctx, db, set.dayLength, flowID)
+	result, err := e.reaper.Load().DeleteLive(ctx, db, e.dayLength(), flowID)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -1067,11 +1066,11 @@ func (e *Engine) deleteFlow(ctx context.Context, flowKey string) error {
 func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) (
 	day int, status string, surgraphFlowID int, err error) {
 	notFound := errors.New("flow not found", http.StatusNotFound)
-	set := e.archives.Load()
-	if set == nil || set.byShard[shardNum] == nil {
+	a := e.archiveOn(shardNum)
+	if a == nil {
 		return 0, "", 0, notFound
 	}
-	day, err = e.locateRetained(ctx, set, shardNum, flowID, flowHour)
+	day, err = e.locateRetained(ctx, a, flowID, flowHour)
 	if errors.StatusCode(err) == http.StatusNotFound {
 		return 0, "", 0, notFound
 	}

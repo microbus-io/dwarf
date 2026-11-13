@@ -48,7 +48,10 @@ func (e *Engine) latchBoard(flowKey string) *latch.Board {
 	if err != nil {
 		return nil
 	}
-	return e.latches[shard]
+	if a := e.actorsOn(shard); a != nil {
+		return a.latch
+	}
+	return nil
 }
 
 // latchLoop drives one shard's Await latch detector. One pass asks the shard which parked flows have
