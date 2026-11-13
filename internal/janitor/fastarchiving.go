@@ -91,10 +91,10 @@ type FastArchiving struct {
 	probedAt    time.Time
 
 	mu sync.Mutex
-	// lag is how long past the grace the shard's oldest due closed root had waited at the last probe; lagOK is false
-	// before the first.
-	lag   time.Duration
-	lagOK bool
+	// lagSince is when the shard's oldest due closed root at the last probe passed the grace, on this process's clock,
+	// zero for none; lagOK is false before the first probe.
+	lagSince time.Time
+	lagOK    bool
 	// failSince is when archiving began failing, zero while it is not; failLast is when it last failed.
 	failSince, failLast time.Time
 }
@@ -141,28 +141,28 @@ type route int
 
 const (
 	routeMove  route = iota // moved, or deleted at a retention of 0, in one transaction
-	routePass               // left where it is: a tree over the staging threshold
+	routePass               // left where it is: every candidate has an archive attempt, large-tree archiving's
+	routeStart              // its archive attempt started, for large-tree archiving: a tree over the staging threshold
 	routeStamp              // stamped for deletion in chunks: at a retention of 0, a tree too large for a batch
 )
 
 // attach creates the job's instruments on j's meter, and registers its gauges.
-func (f *FastArchiving) attach(j *Janitor) {
+func (f *FastArchiving) attach(j *Janitor, name string) {
 	f.j = j
 	f.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
 	errs := make([]error, 6)
-	f.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived",
-		metric.WithDescription("Counts flows moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is archiving keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart."))
-	f.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures",
-		metric.WithDescription("Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees."))
+	f.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
+	f.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures", metric.WithDescription(moveFailuresDescription))
 	f.reaped, errs[2] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	lag, err := meter.Float64ObservableGauge("dwarf_archive_lag_seconds", metric.WithUnit("s"),
-		metric.WithDescription("Per shard: how long past the archive grace the shard's oldest closed root not yet archived has waited - every replica's, and one being archived in stages - read about once a second while this replica dispatches the shard. Aggregate with max."))
+		metric.WithDescription("Per shard: how long archiving is behind - how long past the archive grace the shard's oldest closed root not yet archived has waited, every replica's and one being archived in stages included - read about once a second while this replica dispatches the shard, and aging between readings. Aggregate with max."))
 	errs[3] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
-		metric.WithDescription("Per shard: time since archiving began failing, cleared by a later move that archives something, or once every root due at the last failure has left the live tables. Retained trees remain live. Aggregate with max."))
+		metric.WithDescription(failingDescription))
 	errs[4] = err
 	shard := metric.WithAttributes(f.shardAttr)
+	jobShard := metric.WithAttributes(f.shardAttr, attribute.String("job", name))
 	f.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
@@ -170,7 +170,7 @@ func (f *FastArchiving) attach(j *Janitor) {
 		if l, ok := f.lagReading(); ok {
 			o.ObserveFloat64(lag, l.Seconds(), shard)
 		}
-		o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), shard)
+		o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), jobShard)
 		return nil
 	}, lag, failing)
 	if err := errors.Join(errs...); err != nil {
@@ -268,6 +268,9 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 		case routeMove:
 			due, dueArgs := closedDueSQL(f.grace)
 			removed, err = move(ctx, h, seams, cut, due, dueArgs, d)
+		case routeStart:
+			due, dueArgs := closedDueSQL(f.grace)
+			_, _, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
 		case routeStamp:
 			_, err = f.stampClosed(ctx, h, cut[0])
 		}
@@ -306,13 +309,16 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 // on the database's clock and the failure's on this process's, so neither clock's offset matters.
 func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	f.probedAt = time.Now()
-	_, oldest, err := f.scanClosed(ctx, h, noSeams, "", nil, 1)
+	due, oldest, err := f.scanClosed(ctx, h, noSeams, "", nil, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
 	}
 	f.mu.Lock()
-	f.lag, f.lagOK = max(oldest-f.grace, 0), true
+	f.lagSince, f.lagOK = time.Time{}, true
+	if len(due) > 0 {
+		f.lagSince = f.probedAt.Add(-max(oldest-f.grace, 0))
+	}
 	failLast := f.failLast
 	f.mu.Unlock()
 	if failLast.IsZero() || !canEnd || f.retentionDays <= 0 {
@@ -377,7 +383,7 @@ func (f *FastArchiving) cut(ctx context.Context, h handle, candidates []int, arc
 	case len(cut) > 1:
 		return cut, routeMove, nil
 	case staging && stage.over(first):
-		return cut, routePass, nil
+		return cut, routeStart, nil
 	case !archiving && batch.over(first):
 		return cut, routeStamp, nil
 	}
@@ -572,15 +578,20 @@ func (f *FastArchiving) reset() {
 	f.after, f.count, f.ordinal, f.partitioned, f.probedAt = dueRoot{}, 0, 0, false, time.Time{}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.lag, f.lagOK = 0, false
+	f.lagSince, f.lagOK = time.Time{}, false
 	f.failSince, f.failLast = time.Time{}, time.Time{}
 }
 
-// lagReading returns the lag at the last probe, and false before the first.
+// lagReading returns the lag now - how long archiving is behind - and false before the first probe. It goes on aging
+// after the probe that found the oldest due root, so the reading says how long that root has waited, not how long it
+// had when last looked at; 0 when the last probe found none due.
 func (f *FastArchiving) lagReading() (time.Duration, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.lag, f.lagOK
+	if !f.lagOK || f.lagSince.IsZero() {
+		return 0, f.lagOK
+	}
+	return max(time.Since(f.lagSince), 0), true
 }
 
 // failingFor returns how long archiving has been failing at now, or 0.

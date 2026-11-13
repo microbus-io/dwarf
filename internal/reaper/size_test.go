@@ -128,6 +128,7 @@ func TestSize_AChunkKeepsToItsBytes(t *testing.T) {
 // TestSize_AStagingChunkKeepsToItsBytes pins the staged copy's byte budget: a tree staged by its bytes is copied over
 // several chunks, each within the batch's bytes, and published whole.
 func TestSize_AStagingChunkKeepsToItsBytes(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestSize_AStagingChunkKeepsToItsBytes")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -294,6 +295,7 @@ func TestSize_AFlowRowIsChargedItsBytes(t *testing.T) {
 			assert.False(there, "the tree is gone")
 		})
 		t.Run("stage_"+shape.name, func(t *testing.T) {
+			t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestSize_AStagedFlowRowIsChargedItsBytes")
 			t.Parallel()
 			assert := testarossa.For(t)
 			ctx := t.Context()

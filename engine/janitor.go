@@ -56,8 +56,8 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 	}
 }
 
-// addJanitorJobs adds a shard's janitor its jobs - fast archiving into the shard's archive, and fast deletion - built
-// with s, replacing the ones it has, which start over.
+// addJanitorJobs adds a shard's janitor its jobs - fast archiving and large-tree archiving into the shard's archive, and
+// fast deletion - built with s, replacing the ones it has, which start over.
 func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
@@ -65,6 +65,10 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s
 	fa.SetStaging(s.stageRows, s.stageBytes)
 	fa.SetQuietMargin(!s.noQuietMargin)
 	j.AddJob(janitor.JobFastArchiving, fa)
+	la := janitor.NewLargeArchiving(archive, e.retentionDays)
+	la.SetBatch(s.batchRows, s.batchBytes)
+	la.SetQuietMargin(!s.noQuietMargin)
+	j.AddJob(janitor.JobLargeArchiving, la)
 	fd := janitor.NewFastDeletion()
 	fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	j.AddJob(janitor.JobFastDeletion, fd)

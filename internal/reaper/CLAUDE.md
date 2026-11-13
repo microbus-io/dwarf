@@ -34,8 +34,10 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 ## A pass
 
 **The fast walks are the janitor's** (`internal/janitor`): of closed trees, fast archiving; of stamped trees, fast
-deletion. A pass runs only the repair walks, and the fast walks' code stays here, commented out where the pass ran
-it, as the reference. The tests that need it are skipped with a note naming their janitor copies. Everything below
+deletion. **So is the staged copy**: the janitor's large-tree archiving copies and publishes every tree with an
+attempt, which it finds by its index; the repair walk here only starts or joins an attempt (`stage`), and the scan of
+started attempts (`resumeStarted`) does not run. A pass runs only the repair walks, and the moved code stays here,
+commented out where the pass ran it, as the reference. The tests that need it are skipped with a note naming their janitor copies. Everything below
 describes the reaper as a whole, both walkers included.
 
 On one shard the stages share the caller's turn and run serially: retention cleanup, then closed and stamped trees
@@ -167,9 +169,8 @@ no byte threshold), so a tree of few rows but heavy payloads is staged too (`Tes
   stamped `delete_after_ms=1` with T kept and its `archived_at` copied from the archive root, in one transaction,
   no whole-tree statement. Stamped with T means
   published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`). The
-  deletion kind then removes the live tree, **in the same round of the pass**: the pass walks closed trees before
-  stamped ones, so a tree published in a round - by the walk or by `resumeStarted` - is the deletion walk's right
-  after, rather than left live to the next tick (`TestStage_ALargeTreeIsPublishedWhole`).
+  live tree is then deleted as a stamped tree - by the janitor's fast deletion when a batch holds it, else by this
+  pass's chunked deletion.
 - **A dropped day replaces the attempt.** A chunk's statement on a dropped `DayOf(T)` ends its transaction, so a fresh
   one, still under the root lock and only while T is unchanged, starts a new attempt in today; the old rows went with
   their day (`TestStage_ADroppedDayIsReplaced`, `TestStage_AHalfDroppedDayIsReplaced`, the latter the reason the
@@ -230,11 +231,8 @@ no byte threshold), so a tree of few rows but heavy payloads is staged too (`Tes
   handoff or no room forgets a preference, and the tree times out once more before it is remembered: it is not a
   durable guarantee, the attempt is (`TestStage_ARestartForgetsOnlyThePreference`). A lock wait that ran out stages a
   tree that did not need it, which costs only transactions; do not add failure counters or timeout classes to avoid it.
-- **The oldest unpublished attempt is observed in both traversals**, including the scan used while new starts are
-  disabled. `walk.observeAttempts` compares samples at the same instant; a fresh age must not replace an older sample
-  merely because time passed between reads. `dwarf_archive_oldest_attempt_seconds` takes the larger of the current and
-  last complete sweep's ages, so an incomplete sweep does not erase the previous observation. A replaced attempt starts its age again, so it is
-  read beside the archive lag (`TestStage_TheOldestUnpublishedAttemptIsObserved`).
+- **`dwarf_archive_oldest_attempt_seconds` is the janitor's large-tree archiving's** (`internal/janitor/CLAUDE.md`).
+  The walks here still sample attempts (`walk.observeAttempts`) into `Observation.OldestAttempt`, which nothing reads.
 - **Copy progress is a counter apart from failures** (`dwarf_archive_staged_rows`): the rows each staging chunk
   inserted, counted as it commits, so a rerun over rows already there adds nothing. A growing attempt age with this
   moving is a large tree copying; with it flat, a stuck copy (`TestStage_TheCopiedRowsAreCounted`).

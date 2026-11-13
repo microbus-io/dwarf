@@ -42,6 +42,9 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	t.Helper()
 	root := seedTrees(t, db, 1, callShape)[0]
 	closeTreesAgo(t, db, 2*time.Minute, root)
+	// The reaper's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
+	// and DWARF_STAGE_ROWS would stage every tree.
+	e.reapStageRows = 0
 	e.reapSlice = 0
 	e.reapBatch = 1
 	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
@@ -62,7 +65,7 @@ func assertNoReaperReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 			assert.Zero(v, "%s{kind=%s}", name, kind)
 		}
 	}
-	failing, ok := gaugeAt(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": "1"})
+	failing, ok := failingAt(rm, "1")
 	assert.True(ok, "dwarf_archive_failing_seconds is reported")
 	assert.Zero(failing)
 	_, ok = gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
@@ -76,7 +79,7 @@ func assertHeldReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	assert := testarossa.For(t)
 	held, _ := gaugeAt(rm, "dwarf_archive_held_roots", map[string]string{"shard": "1", "kind": "closed"})
 	assert.Equal(float64(1), held)
-	failing, _ := gaugeAt(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": "1"})
+	failing, _ := failingAt(rm, "1")
 	assert.True(failing > 0, "archiving is failing")
 	_, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", map[string]string{"shard": "1"})
 	assert.True(ok, "a lag was read")

@@ -205,10 +205,12 @@ func (p *pass) walk(ctx context.Context, k kind, dayOf func() (*filingDay, bool)
 		}
 		d, startable := dayOf()
 		if !startable {
-			// The scan above still reports the lag; the slice goes to the trees whose staged archive has started.
-			if d != nil {
-				p.resumeStarted(ctx, k, &w, d, residency, residencyArgs, start)
-			}
+			// The scan above still reports the lag.
+			// Janitor step 5: the trees whose staged archive has started are the janitor's large-tree archiving job
+			// (internal/janitor), which finds them by their index. Kept, commented out, as the reference.
+			// if d != nil {
+			// 	p.resumeStarted(ctx, k, &w, d, residency, residencyArgs, start)
+			// }
 			return false
 		}
 		cut, via, attemptAges, err := p.rootsWithin(ctx, rootIDs(candidates), d != nil)

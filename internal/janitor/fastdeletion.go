@@ -36,11 +36,6 @@ const JobFastDeletion = "fast_deletion"
 // ReasonDeleted is the reason a stamped tree is deleted, the reason attribute of dwarf_flows_reaped.
 const ReasonDeleted = "deleted"
 
-// reapedDescription is dwarf_flows_reaped's description. Both jobs create the counter, and internal/reaper creates it
-// too, with this text word for word: two instruments of one name and different descriptions are exported as two
-// streams of that name.
-const reapedDescription = "Counts flows deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion, or a tree a retention of 0 stamped for deletion as too large for one transaction), no_retention (a retention of 0 keeps no archive), and archive_failed (an unarchived tree reached its retention cutoff). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why."
-
 // FastDeletion is the job that deletes the stamped trees - a Delete's, a DeleteOnCompletion's, a published tree's live
 // copy - as they come due: one batch a round, the stamped roots after its position in flow_id order, the position then
 // past them whatever became of them. It passes a tree too large for a batch, left to the deletion in chunks, and the
@@ -77,7 +72,7 @@ func (f *FastDeletion) SetBatch(roots, rows, bytes int) {
 }
 
 // attach creates the job's counter on j's meter.
-func (f *FastDeletion) attach(j *Janitor) {
+func (f *FastDeletion) attach(j *Janitor, _ string) {
 	f.j = j
 	f.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	var err error

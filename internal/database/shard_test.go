@@ -43,17 +43,19 @@ func TestShard_ResidencyFailsOpen(t *testing.T) {
 	assert.Equal(3, count)
 	assert.Equal(2, ordinal)
 
-	sh.SetResidency(3, 2, false, time.Now().Add(time.Hour))
-	count, ordinal, ok = sh.Residency()
-	assert.False(ok, "set without a class")
-	assert.Equal(3, count)
-	assert.Equal(0, ordinal, "an ordinal only with a class")
-
-	sh.SetResidency(3, 2, true, time.Now().Add(-time.Millisecond))
-	count, ordinal, ok = sh.Residency()
-	assert.False(ok, "past its expiry")
-	assert.Equal(3, count)
-	assert.Equal(0, ordinal)
+	// Every reading that restricts nothing reads alike, so a reader comparing two sees no change between them: a lone
+	// replica's dispatcher count moves from 0 to 1 as its dispatch evidence arrives, and a class lapses at its expiry.
+	for name, set := range map[string]func(){
+		"set without a class":     func() { sh.SetResidency(3, 2, false, time.Now().Add(time.Hour)) },
+		"past its expiry":         func() { sh.SetResidency(3, 2, true, time.Now().Add(-time.Millisecond)) },
+		"a single dispatcher":     func() { sh.SetResidency(1, 0, true, time.Now().Add(time.Hour)) },
+		"no dispatcher":           func() { sh.SetResidency(0, -1, false, time.Now().Add(time.Hour)) },
+		"an ordinal out of range": func() { sh.SetResidency(3, 3, true, time.Now().Add(time.Hour)) },
+	} {
+		set()
+		count, ordinal, ok = sh.Residency()
+		assert.Equal([3]any{0, 0, false}, [3]any{count, ordinal, ok}, name)
+	}
 }
 
 // TestShard_MeasuresItsServerWhenItOpens pins the two measurements Open takes of each shard's server: its

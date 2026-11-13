@@ -84,15 +84,6 @@ func refreshDay(ctx context.Context, q sequel.Executor, a *archiver.Archive, noQ
 	return nil
 }
 
-// noAttempt is archive_attempt_at's value for a live root with no archive attempt: the column's default.
-var noAttempt = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-
-// noAttemptSQL returns the SQL of archive_attempt_at's "no attempt" value on driver, holding one placeholder, and the
-// argument to bind to it.
-func noAttemptSQL(driver string) (expr string, arg string) {
-	return database.SQLTime(driver, noAttempt)
-}
-
 // publishedSQL is the condition, on a live flows row, that its tree is published to the archive: stamped with its
 // archive attempt still set, or carrying the archive time its publication copied, which Delete clearing the attempt
 // keeps. Accounting only; nothing is authorized by it. And its arguments.
@@ -100,26 +91,6 @@ func publishedSQL(driver string) (string, []any) {
 	none, noneArg := noAttemptSQL(driver)
 	sentinel, arg := database.SQLTime(driver, database.MaxSQLTime().Truncate(time.Second))
 	return "((delete_after_ms>0 AND archive_attempt_at>" + none + ") OR archived_at<" + sentinel + ")", []any{noneArg, arg}
-}
-
-// attemptsAmong returns the roots among roots that have an archive attempt: one primary-key read of the roots.
-func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int]bool, error) {
-	none, arg := noAttemptSQL(q.DriverName())
-	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+database.IntList(roots)+")"+
-		" AND archive_attempt_at>"+none, arg)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer rows.Close()
-	attempted := map[int]bool{}
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, errors.Trace(err)
-		}
-		attempted[id] = true
-	}
-	return attempted, errors.Trace(rows.Err())
 }
 
 // removal is what one transaction removed from the live tables: flow rows, and of those, the rows of trees deleted

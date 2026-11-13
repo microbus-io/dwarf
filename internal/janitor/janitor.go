@@ -17,7 +17,9 @@ limitations under the License.
 /*
 Package janitor runs one shard's background jobs on the live and archive tables, each job on a goroutine of its own.
 Its jobs are fast archiving (NewFastArchiving) - closed trees moved into the archive, or deleted at a retention of 0,
-as they come due - and fast deletion (NewFastDeletion) - the trees stamped for deletion deleted as they come due.
+as they come due - large-tree archiving (NewLargeArchiving) - trees too large for one transaction copied into the
+archive in stages, then published - and fast deletion (NewFastDeletion) - the trees stamped for deletion deleted as
+they come due.
 
 A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
 dispatches the shard - and a paused one holds no goroutine and no connection:
@@ -129,7 +131,7 @@ func (j *Janitor) AddJob(name string, job Job) {
 	j.RemoveJob(name)
 	// Attached and detached outside life: registering or unregistering a gauge waits for the meter's lock, which a
 	// collection holds while it calls the gauge's callback, which takes life to ask whether the janitor is active.
-	job.attach(j)
+	job.attach(j, name)
 	j.life.Lock()
 	if j.stopped {
 		j.life.Unlock()

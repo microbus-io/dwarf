@@ -285,6 +285,27 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 }
 
 // gaugeAt returns the data point of an int64 or float64 observable gauge whose attributes include every
+// failingAt is dwarf_archive_failing_seconds on shard: the largest of its archiving jobs' series, and whether any is
+// reported.
+func failingAt(rm metricdata.ResourceMetrics, shard string) (float64, bool) {
+	var most float64
+	found := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			g, ok := m.Data.(metricdata.Gauge[float64])
+			if m.Name != "dwarf_archive_failing_seconds" || !ok {
+				continue
+			}
+			for _, dp := range g.DataPoints {
+				if v, ok := dp.Attributes.Value("shard"); ok && v.AsString() == shard && (!found || dp.Value > most) {
+					most, found = dp.Value, true
+				}
+			}
+		}
+	}
+	return most, found
+}
+
 // key=value in attrs.
 func gaugeAt(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (float64, bool) {
 	matches := func(set attribute.Set) bool {

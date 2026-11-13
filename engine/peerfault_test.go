@@ -200,14 +200,15 @@ func TestPeerFault_BeatFailureEvictsFromTheDispatchers(t *testing.T) {
 	//
 	// Wait on the COUNT, not on ok: a worker whose readings run late (a loaded machine, two 50ms cadences)
 	// is blind for a moment, which reports ok=false with the count unchanged, and reads again a pass later.
+	// The count is the Sonar's own: the shard reports every reading that restricts nothing alike.
 	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
-		if d, _, _ := worker.partitionOn(1); d == 1 {
+		if d, _, _ := worker.sonarFor(1).Partition(); d == 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	dispatchers, _, ok := worker.partitionOn(1)
+	dispatchers, _, ok := worker.sonarFor(1).Partition()
 	assert.Equal(1, dispatchers, "a peer that stopped proving it serves must drop out of the dispatchers")
 	assert.False(ok, "a peer that stopped proving it serves must not keep a residue class")
 

@@ -46,7 +46,11 @@ separately.
   and makes the `Gate` report a stop, while the connections stay open so work under way finishes.
 - **The residue class is one value with an expiry** (`SetResidency`): its writer vouches for its reading only for
   so long, and past `until` `Residency` reports none - take every row - since a stale class leaves rows nobody
-  takes, while taking every row only overlaps the peers.
+  takes, while taking every row only overlaps the peers. **Every reading that restricts nothing is reported as the
+  same `(0, 0, false)`** - none, expired, a single dispatcher, an ordinal out of range - so a reader that starts over
+  when its class changes sees no change between them. Reported raw, a lone replica's dispatcher count, which moves
+  from 0 to 1 once its piston has proven it serves, read as a new class and started the janitor's fast walks over,
+  taking roots behind their positions that are a sweep's (`TestShard_ResidencyFailsOpen`).
 - **The server is measured as each shard opens** (`RTT`, the least of a few `SELECT 1`s with the first discarded;
   `MaxConnections`, 0 on SQLite or a failed read), before anything takes a turn on it, and held for the
   run: a latency change or a resized server is measured again at the next `Open`. The sizing policy built on them

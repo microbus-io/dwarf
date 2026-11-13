@@ -23,10 +23,10 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// Job is a job a Janitor runs: one NewFastArchiving or NewFastDeletion returns.
+// Job is a job a Janitor runs: one NewFastArchiving, NewLargeArchiving or NewFastDeletion returns.
 type Job interface {
-	// attach readies the job to run on j, creating its instruments on j's meter.
-	attach(j *Janitor)
+	// attach readies the job to run on j under name, creating its instruments on j's meter; name labels what they record.
+	attach(j *Janitor, name string)
 	// detach releases what attach registered.
 	detach()
 	// round does one round of work through batch and reports whether it made progress: work done that moved the
@@ -55,3 +55,13 @@ type handle interface {
 // stealGrace is how long past due a root waits for the dispatcher whose residue class it is before any dispatcher's job
 // takes it.
 const stealGrace = 30 * time.Second
+
+// The descriptions of the counters more than one job creates, and internal/reaper too, each word for word the same in
+// every one of them: two instruments of one name and different descriptions are exported as two streams of that name.
+const (
+	archivedDescription     = "Counts flows moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is archiving keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart."
+	moveFailuresDescription = "Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees."
+	stagedRowsDescription   = "Counts rows a staged archive copied into the archive, by shard: the flows and steps of a tree too large to archive in one transaction, written chunk by chunk before it is published. A chunk run again counts only what was not there. Read beside dwarf_archive_oldest_attempt_seconds: an age that grows while this moves is a large tree copying; one that grows while this is flat is a copy that is stuck, and the logs say why."
+	failingDescription      = "Per shard and archiving job: time since the job's archiving began failing - fast_archiving's ended by a later move that archives something, or once every root due at its last failure has left the live tables; large_archiving's by a round over every started archive that fails none. Retained trees remain live. Aggregate with max."
+	reapedDescription       = "Counts flows deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion, or a tree a retention of 0 stamped for deletion as too large for one transaction), no_retention (a retention of 0 keeps no archive), and archive_failed (an unarchived tree reached its retention cutoff). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why."
+)

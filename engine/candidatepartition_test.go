@@ -96,12 +96,15 @@ func TestPartition_AppliedFromRegistry(t *testing.T) {
 	delPeerRow(t, e, 1)
 	awaitPartition(t, e, 1, 2, 0) // with the lower id gone, this engine is now first
 
-	// Back to solo - partitioning switches off rather than leaving a stale residue class. The count must fall
-	// too: ok=false alone is also what a momentarily blind Sonar reports.
+	// Back to solo - partitioning switches off rather than leaving a stale residue class. The Sonar's count must fall
+	// too: ok=false alone is also what a momentarily blind Sonar reports. The shard reports every reading that
+	// restricts nothing alike, so the count is the Sonar's own.
 	delPeerRow(t, e, math.MaxInt64)
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for time.Now().Before(deadline) {
-		if d, _, ok := e.partitionOn(1); !ok && d == 1 {
+		if d, _, ok := e.sonarFor(1).Partition(); !ok && d == 1 {
+			_, _, partitioned := e.partitionOn(1)
+			assert.False(partitioned, "and the shard reports no class")
 			return
 		}
 		time.Sleep(time.Millisecond)

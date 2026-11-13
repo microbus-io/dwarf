@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type rig struct {
 	meter     metric.Meter
 	j         *Janitor
 	fa        *FastArchiving
+	la        *LargeArchiving
 	fd        *FastDeletion
 }
 
@@ -121,8 +123,10 @@ func (r *rig) janitor() *Janitor {
 		d.SetMeter(r.meter)
 		r.j = New(r.shard, d)
 		r.fa = NewFastArchiving(r.archive, r.retention)
+		r.la = NewLargeArchiving(r.archive, r.retention)
 		r.fd = NewFastDeletion()
 		r.j.AddJob(JobFastArchiving, r.fa)
+		r.j.AddJob(JobLargeArchiving, r.la)
 		r.j.AddJob(JobFastDeletion, r.fd)
 		r.j.SetManual(true)
 		r.j.Start(r.t.Context())
@@ -134,6 +138,8 @@ func (r *rig) janitor() *Janitor {
 	r.fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	r.fa.SetStaging(s.stageRows, s.stageBytes)
 	r.fa.SetQuietMargin(!s.noQuietMargin)
+	r.la.SetBatch(s.batchRows, s.batchBytes)
+	r.la.SetQuietMargin(!s.noQuietMargin)
 	r.fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	r.shard.SetResidency(r.count, r.ordinal, r.inClass, time.Now().Add(time.Hour))
 	return r.j
@@ -156,6 +162,41 @@ func (r *rig) restart() {
 func (r *rig) fast() *FastArchiving {
 	r.janitor()
 	return r.fa
+}
+
+// large is the rig's large-tree archiving job.
+func (r *rig) large() *LargeArchiving {
+	r.janitor()
+	return r.la
+}
+
+// roundOf runs one round of the rig's job named name, and reports whether it made progress.
+func (r *rig) roundOf(ctx context.Context, name string) bool {
+	j := r.janitor()
+	return j.round(ctx, j.jobs[slices.IndexFunc(j.jobs, func(rn *runningJob) bool { return rn.name == name })])
+}
+
+// chunk runs one round of large-tree archiving: one chunk of the next tree with an attempt. It reports progress.
+func (r *rig) chunk(ctx context.Context) bool {
+	return r.roundOf(ctx, JobLargeArchiving)
+}
+
+// copier returns the chunk round of a second large-tree archiving job on the rig's shard, in a janitor of its own - a
+// second replica - with the rig's batch.
+func (r *rig) copier() func(ctx context.Context) bool {
+	d := diagnostics.New()
+	d.SetLogger(slog.New(r.logs))
+	d.SetSeams(r.seams)
+	j := New(r.shard, d)
+	la := NewLargeArchiving(r.archive, r.retention)
+	la.SetBatch(r.settings.batchRows, r.settings.batchBytes)
+	la.SetQuietMargin(!r.settings.noQuietMargin)
+	j.AddJob(JobLargeArchiving, la)
+	j.SetManual(true)
+	j.Start(r.t.Context())
+	j.Resume()
+	r.t.Cleanup(j.Stop)
+	return func(ctx context.Context) bool { return j.round(ctx, j.jobs[0]) }
 }
 
 // del is the rig's fast deletion job.

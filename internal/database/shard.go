@@ -156,14 +156,12 @@ func (s *Shard) SetTurnLimit(limit int) {
 }
 
 // Residency is this replica's residue class among the shard's dispatchers: it takes the rows whose id modulo count
-// is ordinal. ok is false - take every row - when none was set, or the one set has expired.
+// is ordinal. Every reading that restricts nothing is reported alike, as (0, 0, false) - take every row: none set, one
+// set without a class or past its expiry, a single dispatcher, an ordinal out of range.
 func (s *Shard) Residency() (count, ordinal int, ok bool) {
 	r := s.residency.Load()
-	if r == nil {
+	if r == nil || !r.ok || r.count < 2 || r.ordinal < 0 || r.ordinal >= r.count || time.Now().After(r.until) {
 		return 0, 0, false
-	}
-	if !r.ok || time.Now().After(r.until) {
-		return r.count, 0, false
 	}
 	return r.count, r.ordinal, true
 }

@@ -112,6 +112,7 @@ func setAttempt(t *testing.T, r *rig, root int, at time.Time) {
 // BatchRows into the day of its attempt, published - every flow and step there, the root last - and then removed from
 // the live tables by the deletion kind. Every copied flow is visible once the root is in.
 func TestStage_ALargeTreeIsPublishedWhole(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ALargeTreeIsPublishedWhole")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -138,6 +139,7 @@ func TestStage_ALargeTreeIsPublishedWhole(t *testing.T) {
 // share one time per 4,096, a millisecond apart from the attempt's time on, and the root takes the next millisecond -
 // so no staged tree puts more than a group on one time, however its chunks fell.
 func TestStage_StampGroupsAreAMillisecondApart(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_StampGroupsAreAMillisecondApart")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -173,6 +175,7 @@ func TestStage_StampGroupsAreAMillisecondApart(t *testing.T) {
 // TestStage_ARestartJoinsItsAttempt pins a copy cut off part-way: a fresh Reaper, which knows nothing of it, joins the
 // same attempt and finishes the copy, rewriting what was there with the same rows - none twice, none missing.
 func TestStage_ARestartJoinsItsAttempt(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ARestartJoinsItsAttempt")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -205,6 +208,7 @@ func TestStage_ARestartJoinsItsAttempt(t *testing.T) {
 // TestStage_TwoCopiersShareAnAttempt pins two Reapers - two replicas - taking turns on one tree: each joins the one
 // attempt, they write the same rows, and the tree is published once, whole.
 func TestStage_TwoCopiersShareAnAttempt(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_TwoCopiersShareAnAttempt")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -246,6 +250,7 @@ func TestStage_TwoCopiersShareAnAttempt(t *testing.T) {
 // stops at its next chunk, the live tree is deleted, and the rows already copied stay in the day, invisible, since the
 // day has no root for them.
 func TestStage_ADeleteAbandonsTheCopy(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ADeleteAbandonsTheCopy")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -280,6 +285,7 @@ func TestStage_ADeleteAbandonsTheCopy(t *testing.T) {
 // TestStage_AnAttemptKeepsItsDay pins an attempt that started before midnight: a later visit joins it and publishes
 // into its day, the earlier one, every archive time inside that day.
 func TestStage_AnAttemptKeepsItsDay(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AnAttemptKeepsItsDay")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -305,6 +311,7 @@ func TestStage_AnAttemptKeepsItsDay(t *testing.T) {
 // table, the attempt is replaced by one into today in a transaction of its own, and the tree is copied again and
 // published there.
 func TestStage_ADroppedDayIsReplaced(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ADroppedDayIsReplaced")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -343,6 +350,7 @@ func TestStage_ADroppedDayIsReplaced(t *testing.T) {
 // archive has started, and the walk sends it to the staged path even with staging off for new trees - so a tree is
 // never archived both ways.
 func TestStage_AnAttemptedRootIsStagedWhateverItsSize(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AnAttemptedRootIsStagedWhateverItsSize")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -370,6 +378,7 @@ func TestStage_AnAttemptedRootIsStagedWhateverItsSize(t *testing.T) {
 // TestStage_APublishedTreeIsNotCopiedAgain pins a lost publication response: stamped with its attempt, the tree is
 // published, so a visit that comes back to it finds nothing to stage and copies nothing.
 func TestStage_APublishedTreeIsNotCopiedAgain(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_APublishedTreeIsNotCopiedAgain")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -391,6 +400,7 @@ func TestStage_APublishedTreeIsNotCopiedAgain(t *testing.T) {
 // TestStage_AnOpenFlowHoldsTheTree pins the guard against a tree that holds a flow that is not closed, which only a
 // bug leaves: the copier refuses it, and nothing is published.
 func TestStage_AnOpenFlowHoldsTheTree(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AnOpenFlowHoldsTheTree")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -411,6 +421,7 @@ func TestStage_AnOpenFlowHoldsTheTree(t *testing.T) {
 // TestStage_TheDirectoryNamesALateFlow pins the staged copy's directory rows: a flow a locate would not find by its
 // creation hour alone is named in the directory with its day, and found.
 func TestStage_TheDirectoryNamesALateFlow(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_TheDirectoryNamesALateFlow")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -436,6 +447,7 @@ func TestStage_TheDirectoryNamesALateFlow(t *testing.T) {
 // flows table goes first, so the publication fails on it and the attempt is replaced, rather than a root being inserted
 // beside steps that are gone.
 func TestStage_AHalfDroppedDayIsReplaced(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AHalfDroppedDayIsReplaced")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -467,6 +479,7 @@ func TestStage_AHalfDroppedDayIsReplaced(t *testing.T) {
 // walkers pass the tree, and the repair walker's next sweep comes back to it - the copy keeps its attempt, and the
 // later try goes on and publishes the tree whole.
 func TestStage_AFailedChunkIsRetried(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AFailedChunkIsRetried")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -497,6 +510,7 @@ func TestStage_AFailedChunkIsRetried(t *testing.T) {
 // TestStage_AHeldRootKeepsItsCopysPosition pins a copy whose root another transaction holds - another copier, a Fork:
 // the visit yields, and the copy's position is kept, so a later visit goes on rather than rereading what it copied.
 func TestStage_AHeldRootKeepsItsCopysPosition(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AHeldRootKeepsItsCopysPosition")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -522,6 +536,7 @@ func TestStage_AHeldRootKeepsItsCopysPosition(t *testing.T) {
 // TestStage_APublishedCopyIsForgotten pins the cursor map: a copy that publishes leaves no position behind, and past
 // the bound the least recently used position goes, not every one.
 func TestStage_APublishedCopyIsForgotten(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_APublishedCopyIsForgotten")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -546,6 +561,7 @@ func TestStage_APublishedCopyIsForgotten(t *testing.T) {
 // day goes on and publishes there; and an attempt into today copies but does not publish, since a flow is located
 // only where the day after its own is whole.
 func TestStage_AnAttemptGoesOnWhenNoneMayStart(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AnAttemptGoesOnWhenNoneMayStart")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -667,6 +683,7 @@ func TestStage_ANewAttemptNeedsRoomInItsDay(t *testing.T) {
 // TestStage_NoArchiveTimeIsClamped pins the day-end check: a tree whose archive times would run past its attempt's day
 // is held, not stamped into the day's last millisecond.
 func TestStage_NoArchiveTimeIsClamped(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_NoArchiveTimeIsClamped")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -687,6 +704,7 @@ func TestStage_NoArchiveTimeIsClamped(t *testing.T) {
 // TestStage_AStaleDirectoryRowIsMoved pins the directory row of a flow staged into a day after another named it - a
 // replaced attempt's dropped day: the row is moved to the day the flow is in, so a locate finds it there.
 func TestStage_AStaleDirectoryRowIsMoved(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AStaleDirectoryRowIsMoved")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -713,6 +731,7 @@ func TestStage_AStaleDirectoryRowIsMoved(t *testing.T) {
 // TestStage_FlowsLargerThanAChunk pins the copy of a descendant and of a root each larger than a chunk's budget: copied
 // a budget at a time, from the position, and the tree published whole.
 func TestStage_FlowsLargerThanAChunk(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_FlowsLargerThanAChunk")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -739,6 +758,7 @@ func TestStage_FlowsLargerThanAChunk(t *testing.T) {
 // TestStage_ConcurrentCopiers pins two replicas copying one tree at the same time: their chunks serialize on the root's
 // lock, and the tree is published once, whole.
 func TestStage_ConcurrentCopiers(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ConcurrentCopiers")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -776,6 +796,7 @@ func TestStage_ConcurrentCopiers(t *testing.T) {
 // may start: an attempt whose root is behind a batch of roots that have none is still found, past them, and published
 // into its day, while they stay live for the day to open.
 func TestStage_AStartedAttemptBehindABatchIsReached(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_AStartedAttemptBehindABatchIsReached")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -809,6 +830,7 @@ func TestStage_AStartedAttemptBehindABatchIsReached(t *testing.T) {
 // its own not whole, when its own day is dropped: a statement on the day proves it gone, and the attempt is replaced
 // rather than waiting for a day that is never made again.
 func TestStage_ADroppedDayIsReplacedWhileWaitingToPublish(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ADroppedDayIsReplacedWhileWaitingToPublish")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -842,6 +864,7 @@ func TestStage_ADroppedDayIsReplacedWhileWaitingToPublish(t *testing.T) {
 // responses are lost: each is a failure of the walk, the copy's position is kept from the commit, and a visit to a
 // published tree finds it stamped and copies nothing again; the archive holds the tree once, and the live tree goes.
 func TestStage_ALostPublicationResponse(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ALostPublicationResponse")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -874,6 +897,7 @@ func TestStage_ALostPublicationResponse(t *testing.T) {
 // with the copy done, after publication, mid-cleanup: a fresh Reaper after every pass of one chunk each still archives
 // the tree whole, once, and removes it from the live tables.
 func TestStage_ARestartAtEveryStep(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ARestartAtEveryStep")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -906,6 +930,7 @@ func TestStage_ARestartAtEveryStep(t *testing.T) {
 // while its live copy is still to be removed: the live cleanup goes on and removes it, and the published copy went
 // with its day.
 func TestStage_ADroppedDayDuringTheLiveCleanup(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_ADroppedDayDuringTheLiveCleanup")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -965,6 +990,7 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 // repair sweep that sees an attempt not yet published reports its age, aging since; once the tree is published and a
 // later sweep completes without one, it reads zero.
 func TestStage_TheOldestUnpublishedAttemptIsObserved(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_TheOldestUnpublishedAttemptIsObserved")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -1009,6 +1035,7 @@ func archivedByStages(t *testing.T, r *rig, day, root int) bool {
 // its root can be claimed. On MySQL the timed-out statement runs on, holding the root, so the visits in between find
 // it held, keep the preference and yield.
 func TestStage_ATreeThatMissesItsDeadlineIsStaged(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; preferences go with the attempt deadline at step 7")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -1112,6 +1139,7 @@ func TestStage_APreferenceIsHarmlessOnceItsTreeIsGone(t *testing.T) {
 // TestStage_ARestartForgetsOnlyThePreference pins a restart after a preference started its tree's attempt: the fresh
 // Reaper knows no preference, but the attempt, being in the database, is resumed and the tree published.
 func TestStage_ARestartForgetsOnlyThePreference(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; preferences go with the attempt deadline at step 7")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -1160,6 +1188,7 @@ func stagedRows(t *testing.T, reader *sdkmetric.ManualReader) int64 {
 // TestStage_TheCopiedRowsAreCounted pins dwarf_archive_staged_rows: every flow and step a staged copy writes is counted
 // as its chunk commits, and each once - the tree's whole size by its publication.
 func TestStage_TheCopiedRowsAreCounted(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_TheCopiedRowsAreCounted")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -1181,6 +1210,7 @@ func TestStage_TheCopiedRowsAreCounted(t *testing.T) {
 // TestStage_EveryTreeOverTheThresholdIsStaged pins the batch's cap at the staging threshold: trees over it are each
 // alone in their batch and staged, even below the batch's own size, rather than moved together in one.
 func TestStage_EveryTreeOverTheThresholdIsStaged(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_EveryTreeOverTheThresholdIsStaged")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -1205,6 +1235,7 @@ func TestStage_EveryTreeOverTheThresholdIsStaged(t *testing.T) {
 // start: the scan that goes on with started attempts makes progress every pass, and once the attempt has published,
 // its wrap is a complete reading without it, so the gauge reads zero rather than aging on.
 func TestStage_TheAttemptGaugeFallsOnceItPublishes(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_TheOldestUnpublishedAttemptIsObserved")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

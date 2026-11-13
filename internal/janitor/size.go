@@ -53,6 +53,20 @@ func capOf(rows, bytes int) limit {
 // over reports whether s passes l on any axis.
 func (l limit) over(s size) bool { return s.rows > l.rows || s.bytes > l.bytes || s.flows > l.flows }
 
+// minus returns what is left of l once s is spent, which may be below zero; an axis with no limit stays without one.
+func (l limit) minus(s size) limit {
+	sub := func(a, b int) int {
+		if a == math.MaxInt {
+			return a
+		}
+		return a - b
+	}
+	return limit{sub(l.rows, s.rows), sub(l.bytes, s.bytes), sub(l.flows, s.flows)}
+}
+
+// spent reports whether nothing is left of l on some axis.
+func (l limit) spent() bool { return l.rows <= 0 || l.bytes <= 0 || l.flows <= 0 }
+
 // tighter returns the limit within both l and o.
 func (l limit) tighter(o limit) limit {
 	return limit{min(l.rows, o.rows), min(l.bytes, o.bytes), min(l.flows, o.flows)}

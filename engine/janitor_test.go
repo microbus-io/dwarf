@@ -26,8 +26,10 @@ import (
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/janitor"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -175,20 +177,25 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	_, err = e.Create(t.Context(), "janitor/graph", nil, nil)
 	assert.Must(assert.NoError(err))
 	<-entered
-	// Both jobs hold their batch's connection at the breakpoint; the test takes the rest of the pool.
+	// Every job holds its batch's connection at the breakpoint; the test takes the rest of the pool.
+	jobs := len(e.janitorOn(1).JobAges(time.Now()))
+	assert.Must(assert.True(jobs > 0, "the janitor has jobs"))
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
-	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) < 2 && time.Now().Before(deadline) {
+	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) < jobs && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	assert.Must(assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) >= 2, "both jobs hold a connection"))
+	assert.Must(assert.True(e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) >= jobs, "every job holds a connection"))
 	var conns []*sql.Conn
 	defer func() {
 		for _, c := range conns {
 			c.Close()
 		}
 	}()
-	for len(conns) < db.Stats().MaxOpenConnections-2 {
-		c, err := db.DB.Conn(t.Context())
+	// Bounded, so a count that does not match the jobs holding connections fails rather than waits for good.
+	taking, cancel := context.WithTimeout(t.Context(), 10*time.Second*enginetest.TimeoutScale())
+	defer cancel()
+	for len(conns) < db.Stats().MaxOpenConnections-jobs {
+		c, err := db.DB.Conn(taking)
 		assert.Must(assert.NoError(err))
 		conns = append(conns, c)
 	}
@@ -259,7 +266,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 2, "fast archiving and fast deletion are reported")
+	assert.Len(got, 3, "fast archiving, large-tree archiving and fast deletion are reported")
 	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
 	setRole(e, 1, false)
@@ -330,4 +337,84 @@ func closedLive(t *testing.T, e *Engine) []int {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// TestJanitor_TheRepairWalkStartsWhatFastArchivingLeftBehind pins the handoff of a large tree fast archiving did not
+// start - its root held when fast archiving came to it, or closed behind fast archiving's position: the reaper's repair
+// walk starts its archive attempt, copying nothing, and the janitor's large-tree archiving copies and publishes it.
+func TestJanitor_TheRepairWalkStartsWhatFastArchivingLeftBehind(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"held", "behind"} {
+		t.Run(how, func(t *testing.T) {
+			t.Parallel()
+			assert := testarossa.For(t)
+			ctx := t.Context()
+			e := archiveEngine(t, treeMux(), 30)
+			e.reapStageRows = 1 // every tree of more than one row is staged
+			sh, err := e.db.Shard(1)
+			assert.Must(assert.NoError(err))
+			db := sh.DB()
+			if d := db.DriverName(); how == "held" && d != "pgx" && d != "mysql" && d != "mariadb" {
+				t.Skip("a held root is skipped, not waited for, on PostgreSQL, MySQL and MariaDB")
+			}
+			attempted := func(root int) bool {
+				cond, args := reaper.AttemptedSQL(db.DriverName())
+				var n int
+				assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+cond,
+					append([]any{root}, args...)...).Scan(&n)))
+				return n == 1
+			}
+			today, err := e.archiveOn(1).Today(ctx)
+			assert.Must(assert.NoError(err))
+			archived := func(root int) int {
+				var n int
+				assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+migrations.FlowsTable(today)+
+					" WHERE root_flow_id=?", root).Scan(&n)))
+				return n
+			}
+			roots := closedRoots(t, e, 2)
+			root, other := roots[0], roots[1]
+			switch how {
+			case "held":
+				locked, release, finished := make(chan error, 1), make(chan struct{}), make(chan struct{})
+				go func() {
+					defer close(finished)
+					_ = db.Transact(ctx, func(tx *sequel.Tx) error {
+						rows, err := tx.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id=? FOR UPDATE", root)
+						if err == nil {
+							rows.Close()
+						}
+						locked <- err
+						<-release
+						return err
+					})
+				}()
+				assert.Must(assert.NoError(<-locked))
+				e.drainJanitors(ctx, 0)
+				close(release)
+				<-finished
+			case "behind":
+				backdate(t, e, root, -time.Hour) // closed in the future: not due when fast archiving passes it
+				e.drainJanitors(ctx, 0)
+				backdate(t, e, root, time.Hour) // due now, closed before fast archiving's position
+				e.drainJanitors(ctx, 0)
+			}
+			if now, _ := e.archiveOn(1).Today(ctx); now != today {
+				t.Skip("midnight passed during the test")
+			}
+			assert.False(live(t, e, other), "the other tree archived")
+			assert.False(attempted(root), "fast archiving started no attempt")
+			assert.True(live(t, e, root))
+
+			e.reapPass(ctx, 0, false)
+			assert.True(attempted(root), "the repair walk started its attempt")
+			assert.Zero(archived(root), "and copied nothing")
+
+			e.drainJanitors(ctx, 0)
+			assert.Equal(2, archived(root), "large-tree archiving copied and published it")
+			// Its stamp is behind fast deletion's position, which passed the other tree's higher flow_id: a sweep's.
+			e.reapPass(ctx, 0, false)
+			assert.False(live(t, e, root), "and its live copy is removed")
+		})
+	}
 }

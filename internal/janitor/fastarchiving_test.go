@@ -260,8 +260,31 @@ func TestFast_AResidencyChangeStartsOver(t *testing.T) {
 	}
 }
 
+// TestFast_AReadingThatRestrictsNothingKeepsThePosition pins that a residue class that restricts nothing is one class
+// however the shard reports it - a solo dispatcher's reading, or the same reading lapsed - so its lapses do not start the
+// walk over and take the roots behind the position, which are a sweep's.
+func TestFast_AReadingThatRestrictsNothingKeepsThePosition(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	early := seedTrees(t, r.db, 1, callShape)[0]
+	late := seedTrees(t, r.db, 1, callShape)[0]
+	backdate(t, r, early, -time.Hour) // closed in the future: not due when the job passes it
+	r.setResidency(1, 0, true)
+	r.pass(ctx)
+	assert.Equal(late, r.fast().after.flowID)
+	backdate(t, r, early, time.Hour) // due, behind the position
+	for _, reading := range [][3]int{{1, 0, 0}, {0, 0, 0}, {1, 0, 1}} {
+		r.setResidency(reading[0], reading[1], reading[2] == 1)
+		r.pass(ctx)
+		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", early)
+		assert.Equal(2, flows, "still behind the position after reading %v", reading)
+	}
+}
+
 // TestFast_ARootWithAnAttemptIsPassed pins that a root whose staged archive has started is not fast archiving's: it
-// is passed, left to whoever copies it, and the roots around it are archived.
+// is passed, left to large-tree archiving, and the roots around it are archived.
 func TestFast_ARootWithAnAttemptIsPassed(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -272,7 +295,7 @@ func TestFast_ARootWithAnAttemptIsPassed(t *testing.T) {
 	at, arg := database.SQLTime(r.db.DriverName(), time.Now().Add(-time.Minute))
 	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id=?", arg, roots[1])
 	assert.NoError(err)
-	r.pass(ctx)
+	r.startAttempts(ctx)
 	for i, id := range roots {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
 		assert.Equal(i == 1, flows == 2, "root %d", i)
@@ -283,14 +306,15 @@ func TestFast_ARootWithAnAttemptIsPassed(t *testing.T) {
 	more := seedTrees(t, r.db, 2, callShape)
 	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id IN ("+database.IntList(more)+")", arg)
 	assert.NoError(err)
-	r.pass(ctx)
+	r.startAttempts(ctx)
 	assert.Equal(more[1], r.fast().after.flowID)
 	assert.Zero(r.failing(time.Now()))
 }
 
-// TestFast_ATreeOverTheStagingThresholdIsPassed pins that, with staging on, a tree over the staging threshold is
-// passed - alone in its batch, left to the staged archive - and the trees under it are archived.
-func TestFast_ATreeOverTheStagingThresholdIsPassed(t *testing.T) {
+// TestFast_ATreeOverTheStagingThresholdHasItsAttemptStarted pins that, with staging on, a tree over the staging
+// threshold is alone in its batch and has its archive attempt started - one small locked statement - left to large-tree
+// archiving to copy, and the trees under it are archived.
+func TestFast_ATreeOverTheStagingThresholdHasItsAttemptStarted(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -300,17 +324,14 @@ func TestFast_ATreeOverTheStagingThresholdIsPassed(t *testing.T) {
 	large := seedTrees(t, r.db, 1, chunkShape) // 9 rows
 	after := seedTrees(t, r.db, 1, callShape)
 	ascendingCloses(t, r, []int{small[0], large[0], small[1], after[0]})
-	r.pass(ctx)
+	r.startAttempts(ctx)
 	for _, id := range append(small, after...) {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
 		assert.Zero(flows, "root %d archived", id)
 	}
 	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", large[0])
-	assert.Equal(2, flows, "the large tree is passed")
-	var attempted int
-	none, arg := noAttemptSQL(r.db.DriverName())
-	assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE archive_attempt_at>"+none, arg).Scan(&attempted))
-	assert.Zero(attempted, "no attempt started")
+	assert.Equal(2, flows, "the large tree stays live")
+	assert.True(attemptAt(t, r, large[0]).After(noAttempt), "its attempt started")
 }
 
 // TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped pins a retention of 0: a tree that fits a batch is deleted
@@ -335,8 +356,8 @@ func TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped(t *testing.T) {
 }
 
 // TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace pins dwarf_archive_lag_seconds' reading: how long past the
-// grace the shard's oldest due closed root had waited at the last probe - one left behind the position by a failure
-// included, which a scan after the position never sees - and 0 once none is due. A round whose scan finds nothing
+// grace the shard's oldest due closed root has waited - one left behind the position by a failure included, which a
+// scan after the position never sees - aging between probes, and 0 once none is due. A round whose scan finds nothing
 // probes, so each pass ends on a fresh reading.
 func TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace(t *testing.T) {
 	t.Parallel()
@@ -361,6 +382,9 @@ func TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace(t *testing.T) {
 
 	lag, _ = r.fast().lagReading()
 	assert.True(lag >= 119*time.Second, "a root behind the position still counts: %v", lag)
+	time.Sleep(20 * time.Millisecond)
+	later, _ := r.fast().lagReading()
+	assert.True(later >= lag+20*time.Millisecond, "aging on between probes: %v after %v", later, lag)
 
 	r.restart() // a job that starts over archives it
 	r.pass(ctx)
@@ -451,7 +475,9 @@ func TestJanitor_NoBatchTakesASecondConnection(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
+	r.settings.stageRows = 8 // so large-tree archiving claims, copies and publishes one, and fast deletion removes it
 	closed := seedTrees(t, r.db, 3, callShape)
+	closed = append(closed, seedWideTree(t, r.db, 3, 10, 3))
 	stamped := seedTrees(t, r.db, 2, callShape)
 	for _, root := range stamped {
 		stampTree(t, r.db, root)

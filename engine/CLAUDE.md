@@ -3197,9 +3197,10 @@ The age grows between observations. A completed healthy sweep can leave a conser
 sweep samples it; collection does not query the database. Running failure counts are published between attempts,
 so a long sweep does not hide accumulated failures until completion.
 
-`dwarf_archive_failing_seconds` starts on a fast-path or day-lookup failure and clears on a successful fast move or
-a clean closed repair sweep. A day lookup failure prevents scanning and leaves the last lag/held observations;
-the failure timer covers this case. Reaper readings appear only on dispatchers and are forgotten on handoff or
+`dwarf_archive_failing_seconds` is a series per archiving job (`job`; aggregate with max), each the job's own
+episode (`internal/janitor/CLAUDE.md`): fast archiving's begins at a scan, day or move failure and ends at a later
+move that archives something or a probe finding nothing due at the failure still live; large-tree archiving's begins
+at a failed chunk and ends at a lap over the started archives that fails none. Reaper readings appear only on dispatchers and are forgotten on handoff or
 restart. Shutdown is not failure. Individual repair failures log the token-free correlation ID, never a flow key.
 `dwarf_flows_removed` counts roots at a requested stamp or archive deletion; the archive's day gauges read its
 catalog cache on all replicas. **Do not add exact live or archive counts by status, or the database's own statistics**: a
@@ -3631,15 +3632,17 @@ wiring (`janitor.go`):
   reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
-- **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving into the shard's archive, and fast
-  deletion), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
+- **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving and large-tree archiving into the shard's
+  archive, and fast deletion), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace, and the reaper's pass runs with 0.
 - **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like the reaper's
-  gauges. The archive lag and failing gauges are the fast archiving job's own; the held-root, sweep, attempt and
-  deletion gauges still come from the reaper. The jobs are fast archiving and fast deletion; the reaper's pass runs
-  the repair walks, staging, chunked deletion, retention and the periodic stages.
+  gauges. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, and each archiving job
+  reports its series of the failing gauge, labelled by job; the
+  held-root, sweep and deletion gauges still come from the reaper. The jobs are fast archiving, large-tree archiving
+  and fast deletion; the reaper's pass runs the repair walks (starting missing attempts, no longer copying), chunked
+  deletion, retention and the periodic stages.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), then the reaper's
   pass. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
   (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the

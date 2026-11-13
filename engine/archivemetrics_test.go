@@ -128,7 +128,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	assert.Zero(lag, "the last probe found nothing due")
 	passes, _ := histCount(rm, "dwarf_reap_pass_seconds", shard1)
 	assert.Equal(uint64(1), passes)
-	failing, ok := gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
+	failing, ok := failingAt(rm, "1")
 	assert.True(ok)
 	assert.Zero(failing)
 
@@ -149,7 +149,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	rm = collect(t, reader)
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 	assert.Equal(int64(4), sumAt(rm, "dwarf_flows_archived", shard1), "nothing more archived")
-	failing, _ = gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
+	failing, _ = failingAt(rm, "1")
 	assert.True(failing >= 0.02, "failing since the first pass, got %v", failing)
 }
 
@@ -280,14 +280,14 @@ func TestArchiveMetrics_AReplicaThatStopsReapingForgets(t *testing.T) {
 	e.reapDueFlows(ctx)
 	time.Sleep(20 * time.Millisecond)
 	rm := collect(t, reader)
-	failing, _ := gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
+	failing, _ := failingAt(rm, "1")
 	assert.True(failing > 0, "failing, got %v", failing)
 
 	setRole(e, 1, false)
 	e.reapDueFlows(ctx)
 	setRole(e, 1, true)
 	rm = collect(t, reader)
-	failing, _ = gaugeAt(rm, "dwarf_archive_failing_seconds", shard1)
+	failing, _ = failingAt(rm, "1")
 	assert.Zero(failing)
 	_, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
 	assert.False(ok, "no reading until a pass scans again")
@@ -331,6 +331,9 @@ func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
+	// The reaper's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
+	// and DWARF_STAGE_ROWS would stage every tree.
+	e.reapStageRows = 0
 	roots := closedRoots(t, e, 3)
 	for _, id := range roots {
 		backdate(t, e, id, 2*time.Minute)
@@ -384,14 +387,13 @@ func TestArchiveMetrics_ATransientFailureEndsWhenNothingDueAtItRemains(t *testin
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
-	shard1 := map[string]string{"shard": "1"}
 	e.diags.Seams().InjectN(diagnostics.FaultReapSelectErr, 1) // the janitor's scan, which runs first
 	e.drainJanitors(ctx, e.archiveGrace)
 	time.Sleep(20 * time.Millisecond)
-	failing, _ := gaugeAt(collect(t, reader), "dwarf_archive_failing_seconds", shard1)
+	failing, _ := failingAt(collect(t, reader), "1")
 	assert.True(failing > 0, "the failed scan began an episode")
 	e.reapDueFlows(ctx) // the janitor's round finds nothing, and probes: nothing due at the failure is live
-	failing, _ = gaugeAt(collect(t, reader), "dwarf_archive_failing_seconds", shard1)
+	failing, _ = failingAt(collect(t, reader), "1")
 	assert.Zero(failing, "the probe ended it")
 }
 
@@ -403,7 +405,6 @@ func TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure(t *testing.T) 
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
-	shard1 := map[string]string{"shard": "1"}
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
@@ -421,6 +422,6 @@ func TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure(t *testing.T) 
 	if now, _ := a.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
-	failing, _ := gaugeAt(collect(t, reader), "dwarf_archive_failing_seconds", shard1)
+	failing, _ := failingAt(collect(t, reader), "1")
 	assert.True(failing >= 0.02, "failing since the first pass, got %v", failing)
 }

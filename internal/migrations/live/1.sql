@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
     INDEX idx_dwarf_flows_surgraph (surgraph_flow_id),
     INDEX idx_dwarf_flows_surgraph_step (surgraph_step_id),
     INDEX idx_dwarf_flows_root (root_flow_id),
-    INDEX idx_dwarf_flows_delete_after (delete_after_ms)
+    INDEX idx_dwarf_flows_delete_after (delete_after_ms),
+    INDEX idx_dwarf_flows_attempt (archive_attempt_at)
 );
 
 -- DRIVER: mysql mariadb
@@ -122,6 +123,9 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;
 
 -- DRIVER: pgx
+CREATE INDEX idx_dwarf_flows_attempt ON dwarf_flows (flow_id) WHERE archive_attempt_at > '2000-01-01 00:00:00';
+
+-- DRIVER: pgx
 ALTER TABLE dwarf_flows SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_insert_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0, vacuum_truncate = false, toast.autovacuum_vacuum_scale_factor = 0.01, toast.autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_vacuum_cost_delay = 0, toast.vacuum_truncate = false);
 
 -- DRIVER: mssql
@@ -183,6 +187,9 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;
 
+-- DRIVER: mssql
+CREATE INDEX idx_dwarf_flows_attempt ON dwarf_flows (flow_id) WHERE archive_attempt_at > '2000-01-01 00:00:00';
+
 -- DRIVER: sqlite
 CREATE TABLE IF NOT EXISTS dwarf_flows (
     flow_id              INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -240,3 +247,6 @@ CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;
+
+-- DRIVER: sqlite
+CREATE INDEX idx_dwarf_flows_attempt ON dwarf_flows (flow_id) WHERE archive_attempt_at > '2000-01-01 00:00:00.000';

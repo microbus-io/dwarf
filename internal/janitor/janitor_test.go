@@ -57,7 +57,7 @@ type funcJob struct {
 	onReset func()
 }
 
-func (f *funcJob) attach(*Janitor)         {}
+func (f *funcJob) attach(*Janitor, string) {}
 func (f *funcJob) detach()                 {}
 func (f *funcJob) idleWait() time.Duration { return f.idle }
 func (f *funcJob) round(ctx context.Context, batch batchFunc) bool {

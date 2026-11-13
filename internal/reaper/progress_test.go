@@ -28,6 +28,7 @@ import (
 )
 
 func TestStage_RestartInsideLargeFlow(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_RestartInsideLargeFlow")
 	for _, shape := range []struct {
 		name                            string
 		rootSteps, children, childSteps int
@@ -59,6 +60,7 @@ func TestStage_RestartInsideLargeFlow(t *testing.T) {
 }
 
 func TestStage_OldestAttemptDuringDayOutage(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_OldestAttemptDuringDayOutage")
 	r := stageRig(t)
 	ctx := t.Context()
 	today, err := r.archive.Today(ctx)
@@ -164,6 +166,7 @@ func TestDelete_MarkedDiscoveryRespectsBudget(t *testing.T) {
 
 // Publication counts once even when cleanup is atomic, chunked, or interrupted by Delete.
 func TestStage_PublishedCleanupNotUnarchived(t *testing.T) {
+	t.Skip("janitor step 5: the staged copy runs in the janitor's large-tree archiving; see internal/janitor TestStage_PublishedCleanupNotUnarchived")
 	for _, budget := range []int{4, 100} {
 		for _, deleteAt := range []string{"never", "published", "mid-cleanup"} {
 			t.Run(strconv.Itoa(budget)+"/"+deleteAt, func(t *testing.T) {

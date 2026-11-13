@@ -1,10 +1,11 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
-> and its connection, fast archiving or fast deletion, or the janitors' metrics.
+> and its connection, fast archiving, large-tree archiving or fast deletion, or the janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
-> taken over: the sweeps, staging, deletion, retention) and `internal/archiver/CLAUDE.md` (the day tables).
+> taken over - the sweeps, chunked deletion, retention - and the staged protocol's rationale) and
+> `internal/archiver/CLAUDE.md` (the day tables).
 
 ## What a Janitor is, and what a job is
 
@@ -104,12 +105,15 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   sweep (the reaper's repair walk). A job that held its position on a failure would retry it every round and reach
   nothing behind it (`TestWalk_FastPassesTheBatchItAttempted`). A round that removed nothing - held or failed - makes no
   progress and the job waits; the batches after it are reached on the next round.
-- **Not its own, and passed:** a root with an archive attempt (the staged path's, whoever copies it); with staging on,
-  a tree over the staging threshold, alone in its batch, which the reaper's repair walk stages; at a retention of 0, a
+- **Not its own, and passed:** a root with an archive attempt (large-tree archiving's); with staging on, a tree over
+  the staging threshold, alone in its batch, whose attempt the job starts - one small transaction under the root's lock, `claimAttempt`
+  - for large-tree archiving to copy (`TestFast_ATreeOverTheStagingThresholdHasItsAttemptStarted`); at a retention of 0, a
   tree too large for a batch, which the job stamps for deletion - due at once - and the deletion of stamped trees
   removes in chunks. Passing them counts as progress. The stamp locks the root as a move does, so a root a Fork holds
   is skipped on PostgreSQL and MySQL rather than waited for (`TestFast_AHeldRootIsNotWaitedForWhenStamped`).
-- **The residue class is read every round, and a change starts the walk over.** When a peer leaves, the roots of its
+- **The residue class is read every round, and a change starts the walk over.** The shard reports every reading that
+  restricts nothing alike (`internal/database/CLAUDE.md`), so a lone replica's dispatcher count arriving, or a class
+  lapsing at its expiry, is no change here (`TestFast_AReadingThatRestrictsNothingKeepsThePosition`). When a peer leaves, the roots of its
   class are already behind the survivors' positions, which were not theirs then; started over, the job takes them at
   once rather than leaving them to a sweep (`TestFast_AResidencyChangeStartsOver`). The scan also takes another class's
   roots overdue by the steal grace, a fixed 30 s past the archive grace - but only those ahead of the position, which
@@ -118,15 +122,19 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
 - **An atomic batch holds at most `MaxBatchFlows` (4,096) flows**, whatever its rows and bytes allow: every flow of a
   batch gets one archive time, and `ListClosed` cannot page across a tie larger than its `Limit`, so the lists'
   maximum must stay above it. A tree of more goes alone (`TestMove_ABatchHoldsAtMostMaxBatchFlows`).
-- **The job reports its own gauges** - `dwarf_archive_lag_seconds` and `dwarf_archive_failing_seconds` - registered
-  on the meter when it is added, observed only while its janitor is active, and unregistered when it is removed or
-  the janitor stops. The engine reads nothing of it.
+- **The job reports its own gauges** - `dwarf_archive_lag_seconds`, and its series of `dwarf_archive_failing_seconds`
+  (labelled with the job's name, `job="fast_archiving"`) - registered on the meter when it is added, observed only
+  while its janitor is active, and unregistered when it is removed or the janitor stops. The engine reads nothing of
+  it.
 - **A probe reads the shard's oldest due closed root** - one `LIMIT 1` per terminal status on
   `idx_dwarf_flows_status`, unrestricted: every replica's class, behind the position or ahead of it. It runs at most
   once a second while the job is busy, and in every round whose scan finds nothing, which the idle wait paces. A
   probe's scan consults no fault, or it would consume one a test armed for a round's scan.
-- **The lag is the probe's**: how long past the grace the oldest due root had waited, a root a failure left behind
-  the position included, and one being staged; 0 when none is. Pinned by
+- **The lag is the probe's**: how long archiving is behind - how long past the grace the oldest due root has waited, a
+  root a failure left behind the position included, and one being staged; 0 when none is. **It goes on aging after its
+  probe** (the probe records when the root passed the grace), so between probes it reads how long that root has waited,
+  not how long it had: a reading frozen at the probe would understate the lag by up to a probe's interval, and by the
+  whole stall when the job is blocked. Pinned by
   `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
   whole, a batch that cannot take its connection, a failed scan, attempt read, sizing or move - and ends at a later
@@ -178,9 +186,70 @@ considered, and starts over when its residue class changes, as fast archiving do
   with its attempt or carrying the archive time its publication copied, is counted at the move's root locks and left
   out (`publishedSQL`, `TestDelete_APublishedLiveCopyIsNotCountedReaped`).
 
-Until large-tree archiving moves (step 5 of the plan), a staged archive is copied only by the reaper's repair walk,
-which never ends or begins an archive failure episode: a stuck staged copy shows in
-`dwarf_archive_oldest_attempt_seconds`, not in `dwarf_archive_failing_seconds`. Staging is off in production.
+## Large-tree archiving (`largearchiving.go`)
+
+The third job (`JobLargeArchiving`): every tree whose staged archive attempt has started - one too large to move in
+one transaction, its attempt started by fast archiving or by the reaper's repair walk - copied into its attempt's day
+over as many transactions as it takes, invisible there, then published in one small one: the root last, the live root
+stamped for deletion with its attempt kept. The protocol - the attempt as the copy's identity and day, the stamp groups,
+the publication's wait for the next day, a dropped day replacing the attempt, `NOT EXISTS` rewrites, the open-flow
+guard, Delete abandoning the copy - is the reaper's, carried over (`internal/reaper/CLAUDE.md`, "Staged archival of a
+large tree", holds its rationale while the reaper stands).
+
+- **It finds its trees by their attempt, through `idx_dwarf_flows_attempt`**, never by walking the due roots: one
+  `LIMIT 1` after its position in `flow_id` order, wrapping at the end, so an attempt behind any number of roots without
+  one is reached, and a closed day - which stops new attempts - stops no copy already started
+  (`TestStage_AStartedAttemptBehindABatchIsReached`, `TestStage_AnAttemptGoesOnWhenNoneMayStart`). **Its queries inline
+  the attempt predicate exactly as the index is partial on** (`attemptedSQL`); bound, PostgreSQL cannot use the index.
+- **One tree at a time**, by `flow_id`, a chunk a batch, until it publishes, fails, is found held or waits for its
+  day's next day; then the next, and the position wraps at the end (`TestStage_ATreeIsFinishedBeforeTheNext`). **Do
+  not interleave the trees' chunks**: each tree's time to publication then grows with the trees in flight, every one
+  holding its live rows and its invisible copy until it publishes, and while large trees keep arriving none finishes.
+  The cost, accepted: one huge tree holds the large trees behind it - fast archiving is not held. A tree that fails
+  gives way at once and is taken again when the position comes round to it (`TestStage_AFailedChunkIsRetried`).
+  **A round goes on to the next tree until a chunk makes progress or a lap makes none**, each tree once a round, and
+  only then does the job wait: idling after any tree without progress would let one stuck tree hold every other to a
+  chunk a second (`TestStage_AStuckTreeDoesNotHoldTheOthers`). A failed chunk counts in `dwarf_archive_move_failures`
+  and is logged.
+- **At a retention of 0 it copies nothing**, as the reaper's archive path never ran there: a tree whose attempt an earlier
+  run started is fast archiving's to delete, which it does attempt or not (its move fences on the attempt only when
+  archiving, and its stamp clears it). Copying it as well would race the deletion and could publish a tree into an
+  archive that keeps nothing (`TestStage_RetentionZeroArchivesNothing`).
+- **No residue class.** A chunk locks its root, skipping a held one on PostgreSQL and MySQL, and writes only what is
+  not there, so two replicas on one tree serialize per chunk and write the same rows (`TestStage_ConcurrentCopiers`).
+  Dividing the attempts would only leave a tree waiting for its replica.
+- **Each copy's position is in memory**, at most `maxStages` (64) of them. A position advances only when a chunk
+  commits, so it is kept on every path where one did - a copy waiting to publish, a lost response - and dropped only
+  once the tree is published or gone. A position forgotten - at the bound, a restart - is read back from what the
+  attempt's day already holds, a count over the copied descendants. **A remembered position whose chunk copied nothing
+  is stale** - another replica copied past it - and the copy is read back from the day and goes on in the same batch,
+  rather than re-read a chunk's worth of rows under the root's lock each turn (`TestStage_TheCopiedRowsAreCounted`). **Do not bound
+  the positions by recency**: the trees are visited in turn, which is the access pattern an LRU serves worst - past the
+  bound it evicts the next tree to visit, every time. The job drops an arbitrary one.
+- **`dwarf_archive_oldest_attempt_seconds` is the job's own**, a probe of the oldest unpublished attempt at most once
+  a second while busy and in every round that finds nothing, observed only while the janitor is active. It goes on
+  through a closed day (`TestStage_OldestAttemptDuringDayOutage`). **The reading goes on aging after its probe** (the
+  probe records when the attempt began, not its age): a chunk that blocks stops the probes too, and a reading frozen at
+  the last one would hide exactly the stuck copy the gauge is for (`TestStage_TheOldestUnpublishedAttemptIsObserved`). `dwarf_archive_staged_rows` counts each chunk's
+  inserted rows, so a rewrite after a forgotten position adds nothing (`TestStage_TheCopiedRowsAreCounted`).
+- **Its failures are an episode of its own** - `dwarf_archive_failing_seconds{job="large_archiving"}`, beside fast
+  archiving's series; each job owns its series, and a reader aggregates with max. It begins at a failed chunk or a
+  failed replacement of a dropped day's attempt, and ends once a lap over every started archive fails none: the
+  position wrapping is the lap's end, every tree having been taken again and copied, published, found held or gone.
+  **Only a scan that reads from the start is a wrap** - never one continuing the tree in progress, inferred from its
+  `flow_id`: with that tree at `flow_id` 1 every chunk read as a wrap, and the episode ended while another tree was
+  still failing (`TestStage_ContinuingATreeIsNoLap`).
+  **Count a lap only when it runs**: a round that meets a tree it has already taken stops without taking it, and
+  counting that wrap would credit the next round with a clean lap it never ran - ending the episode between two
+  failing passes. Fast archiving's end rule (a probe of the unattempted roots) cannot serve here, since a staged
+  tree is excluded from it by design (`TestStage_AFailingCopyIsAFailureUntilALapFailsNone`, and with
+  `DWARF_STAGE_ROWS=1` the engine's `TestArchiveMetrics_TheReaperCountsWhatItMoves`).
+- **A published tree's live copy is fast deletion's** when a batch holds it, and otherwise the reaper's chunked deletion
+  until sweep deletion moves (step 7): fast deletion passes a stamped tree larger than a batch, and its position is then
+  past it.
+
+Staging is off in production (`reapStageRows` 0): fast archiving starts no attempt, and the job copies only attempts
+already there. The engine and fixtures suites exercise it with `DWARF_STAGE_ROWS=1`.
 
 Its tests run on a rig (`rig_test.go`): an isolated shard database, an archive with today's tables made, and a Manual
 janitor whose settings a test changes between passes.

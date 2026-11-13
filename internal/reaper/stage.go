@@ -72,39 +72,45 @@ func (p *pass) stage(ctx context.Context, k kind, root int, d *filingDay, sliceS
 		return yield()
 	}
 	p.r.prefer.drop(key) // the attempt records it now
-	pos := p.r.stages.get(key)
-	if !pos.at.Equal(at) {
-		pos = stagePos{at: at}
-	}
-	for {
-		n, copied, done, err := p.stageChunk(ctx, root, d.archive, &pos)
-		p.r.metrics.rowsStaged(ctx, p.shard.Index, copied)
-		if sequel.IsUndefinedTableError(err) {
-			// The attempt's day was dropped, and its rows with it: a fresh attempt into today, in a transaction of its
-			// own, since the statement that found the day missing ended this one.
-			p.r.stages.drop(key)
-			_, replaced, err := p.claimAttempt(ctx, k, root, d, at)
-			// Replaced, the next visit copies into today; not - no room left today, or past midnight - the walk moves
-			// on rather than find the day missing again until its slice ends.
-			return 0, err == nil && !replaced, errors.Trace(err)
+	// Janitor step 5: the copy is the janitor's large-tree archiving job (internal/janitor), which finds the attempt by its
+	// index; the walk only starts or joins it. The copy is kept, commented out, as the reference.
+	_ = at
+	return 0, true, nil
+	/*
+			pos := p.r.stages.get(key)
+		if !pos.at.Equal(at) {
+			pos = stagePos{at: at}
 		}
-		if err != nil {
+		for {
+			n, copied, done, err := p.stageChunk(ctx, root, d.archive, &pos)
+			p.r.metrics.rowsStaged(ctx, p.shard.Index, copied)
+			if sequel.IsUndefinedTableError(err) {
+				// The attempt's day was dropped, and its rows with it: a fresh attempt into today, in a transaction of its
+				// own, since the statement that found the day missing ended this one.
+				p.r.stages.drop(key)
+				_, replaced, err := p.claimAttempt(ctx, k, root, d, at)
+				// Replaced, the next visit copies into today; not - no room left today, or past midnight - the walk moves
+				// on rather than find the day missing again until its slice ends.
+				return 0, err == nil && !replaced, errors.Trace(err)
+			}
+			if err != nil {
+				p.r.stages.put(key, pos)
+				return 0, false, errors.Trace(err)
+			}
+			p.r.seams.Checkpoint(ctx, CheckpointStageChunkDone)
+			if n > 0 {
+				p.r.stages.drop(key)
+				return n, true, nil
+			}
 			p.r.stages.put(key, pos)
-			return 0, false, errors.Trace(err)
+			if done {
+				return yield()
+			}
+			if ctx.Err() != nil || time.Since(sliceStart) >= p.cfg.Slice {
+				return 0, false, nil
+			}
 		}
-		p.r.seams.Checkpoint(ctx, CheckpointStageChunkDone)
-		if n > 0 {
-			p.r.stages.drop(key)
-			return n, true, nil
-		}
-		p.r.stages.put(key, pos)
-		if done {
-			return yield()
-		}
-		if ctx.Err() != nil || time.Since(sliceStart) >= p.cfg.Slice {
-			return 0, false, nil
-		}
-	}
+	*/
 }
 
 // treeGone reports whether root's tree is no longer a staged copy's to finish: its live root missing or stamped. A
