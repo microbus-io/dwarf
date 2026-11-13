@@ -3189,18 +3189,21 @@ Reasons are `deleted`, `no_retention`, and `archive_failed` (an unarchived tree 
 `dwarf_archive_move_failures` counts failed attempts, not distinct trees. `dwarf_archive_lag_seconds` is the fast
 archiving job's probe of the shard's oldest due closed root (`internal/janitor/CLAUDE.md`).
 
-Repair publishes `dwarf_archive_held_roots{shard,kind}` as the maximum of the running and last completed sweep's
+A sweep publishes `dwarf_archive_held_roots{shard,kind}` as the maximum of the running and last completed sweep's
 failed-single count, `dwarf_archive_oldest_held_seconds{shard,kind}` as the age of its last observed front (including
-not-yet-attempted roots), and `dwarf_archive_sweep_seconds{shard,kind}` as the current sweep's age. Kind is `closed`,
-`deleted` or `retention`. These are per-replica observations: aggregate with max, never sum as distinct roots.
+not-yet-attempted roots), and `dwarf_archive_sweep_seconds{shard,kind}` as the current sweep's age. Kind is `closed` -
+the janitor's sweep archiving, which registers its own series under the descriptions the engine's share
+(`janitor.HeldRootsDescription` and its siblings) - or `deleted` or `retention`, which the engine reads from the
+reaper's repair walks. These are per-replica observations: aggregate with max, never sum as distinct roots.
 The age grows between observations. A completed healthy sweep can leave a conservative front age until the next
 sweep samples it; collection does not query the database. Running failure counts are published between attempts,
 so a long sweep does not hide accumulated failures until completion.
 
 `dwarf_archive_failing_seconds` is a series per archiving job (`job`; aggregate with max), each the job's own
 episode (`internal/janitor/CLAUDE.md`): fast archiving's begins at a scan, day or move failure and ends at a later
-move that archives something or a probe finding nothing due at the failure still live; large-tree archiving's begins
-at a failed chunk and ends at a lap over the started archives that fails none. Reaper readings appear only on dispatchers and are forgotten on handoff or
+move that archives something or a probe finding nothing due at the failure still live; sweep archiving's begins at
+any of its failures and ends at a sweep that completes failing nothing; large-tree archiving's begins at a failed chunk
+and ends at a lap over the started archives that fails none. Reaper readings appear only on dispatchers and are forgotten on handoff or
 restart. Shutdown is not failure. Individual repair failures log the token-free correlation ID, never a flow key.
 `dwarf_flows_removed` counts roots at a requested stamp or archive deletion; the archive's day gauges read its
 catalog cache on all replicas. **Do not add exact live or archive counts by status, or the database's own statistics**: a
@@ -3632,24 +3635,30 @@ wiring (`janitor.go`):
   reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
-- **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving and large-tree archiving into the shard's
-  archive, and fast deletion), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
+- **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving, sweep archiving behind it and
+  large-tree archiving into the shard's archive, and fast deletion), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace, and the reaper's pass runs with 0.
 - **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like the reaper's
-  gauges. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, and each archiving job
-  reports its series of the failing gauge, labelled by job; the
-  held-root, sweep and deletion gauges still come from the reaper. The jobs are fast archiving, large-tree archiving
-  and fast deletion; the reaper's pass runs the repair walks (starting missing attempts, no longer copying), chunked
-  deletion, retention and the periodic stages.
+  gauges. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, the held-root and sweep
+  gauges of closed trees (`kind="closed"`) sweep archiving's, and each archiving job reports its series of the failing
+  gauge, labelled by job. The held-root and sweep gauges of the other kinds, and the deletion gauges, still come from
+  the reaper. Closed trees, and the attempts of large ones, are the janitor's alone; the reaper's pass runs the repair
+  walk of stamped trees, chunked deletion, retention and the periodic stages. `sweepOverdue` (30 s) is the sweep's
+  window: a test that wants the sweep to take what fast archiving passed sets it to 0 before its first drain, since a
+  change rebuilds the jobs and starts fast archiving over.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), then the reaper's
   pass. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
   (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the
   live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
   written against a reaper whose first tick came 15 s in. A test of the background running sets it false
   (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
-  idle wait. A test blocks a real batch, holding its connection, at `diagnostics.CheckpointJanitorBatchConn`.
+  idle wait. A test blocks a real batch, holding its connection, at `diagnostics.CheckpointJanitorBatchConn`. **A test
+  that holds every job there needs a pool larger than the job count** (`testConnCap`, 4 by default in test mode):
+  the held jobs otherwise take every connection, the worker's claim waits for one, and the test waits on a task that
+  never starts (`TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain` hung for its whole timeout when the fourth job
+  arrived).
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph
 descendant. The deferred path stamps only the root (whose own status is 409-guarded, so an open root is never

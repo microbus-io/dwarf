@@ -69,6 +69,9 @@ func TestChunk_ALargeTreeIsDeletedInChunksRootLast(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{KindDeleted, KindClosed, KindRetention} {
 		t.Run(kind, func(t *testing.T) {
+			if kind == KindClosed {
+				t.Skip("janitor step 6: at a retention of 0 the janitor's fast and sweep archiving stamp a closed tree too large for a batch, and its chunks are the stamped kind's; see internal/janitor TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped")
+			}
 			assert := testarossa.For(t)
 			ctx := t.Context()
 			retention := 0
@@ -112,13 +115,15 @@ func TestChunk_ALargeTreeIsDeletedInChunksRootLast(t *testing.T) {
 }
 
 // TestChunk_AFaultedChunkRollsBackWhole pins that a chunk is one transaction: a fault after its steps rolls them back
-// with it, leaving the tree stamped and whole, and the next pass deletes it.
+// with it, leaving the tree stamped and whole, and the next pass deletes it. The tree is stamped as a retention of 0
+// leaves it, by the janitor.
 func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 0)
 	root := chunkTree(t, r.db)
+	stampTree(t, r.db, root)
 	r.cfg.BatchRows = 2
 	r.seams.InjectN(FaultMidTree, 1000)
 	r.pass(ctx)
@@ -126,7 +131,7 @@ func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 	assert.Equal([2]int{2, 7}, [2]int{flows, steps}, "rolled back whole")
 	var stamp int
 	assert.NoError(r.db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
-	assert.Equal(1, stamp, "stamped before the first chunk")
+	assert.Equal(1, stamp, "still stamped")
 	r.seams.Withdraw(FaultMidTree)
 	r.pass(ctx)
 	flows, steps = treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
@@ -134,13 +139,15 @@ func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 }
 
 // TestChunk_ARestartResumesTheDeletion pins that a chunked deletion needs nothing in memory to finish: a fresh Reaper
-// - a restart, or another replica - finds the stamped tree and deletes the rest.
+// - a restart, or another replica - finds the stamped tree and deletes the rest. The tree is stamped as a retention of
+// 0 leaves it, by the janitor.
 func TestChunk_ARestartResumesTheDeletion(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 0)
 	root := seedWideTree(t, r.db, 3, 10, 4)
+	stampTree(t, r.db, root)
 	flows := treeFlows(t, r, root)
 	r.cfg.BatchRows = 6
 	r.cfg.Slice, r.cfg.Budget = 0, 0

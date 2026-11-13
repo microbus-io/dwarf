@@ -37,7 +37,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// rig is a Manual, active Janitor with its fast archiving and fast deletion jobs over one shard's own isolated,
+// rig is a Manual, active Janitor with its fast archiving, sweep archiving, large-tree archiving and fast deletion jobs
+// over one shard's own isolated,
 // migrated database and its archive. Its janitor is made at its first use, so a test sets what it needs before; the
 // settings and the residue class are set on the jobs and the shard before every pass, so a test changes them between
 // passes.
@@ -56,19 +57,21 @@ type rig struct {
 	meter     metric.Meter
 	j         *Janitor
 	fa        *FastArchiving
+	sa        *SweepArchiving
 	la        *LargeArchiving
 	fd        *FastDeletion
 }
 
 // rigSettings are the jobs' settings a test sets on the rig.
 type rigSettings struct {
-	grace                             time.Duration
+	grace, overdue                    time.Duration
 	batchRoots, batchRows, batchBytes int
 	stageRows, stageBytes             int
 	noQuietMargin                     bool
 }
 
-// newRig stands up a rig whose closed roots are due at once, with an archive of days of dayLength (24h when 0) and
+// newRig stands up a rig whose closed roots are due at once - and a sweep's once overdue by its default window - with an
+// archive of days of dayLength (24h when 0) and
 // today's tables made, and a retention of retention days.
 func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 	t.Helper()
@@ -105,6 +108,7 @@ func newRig(t *testing.T, retention int, dayLength ...time.Duration) *rig {
 		logs:      &logCounter{seen: map[string]int{}},
 		retention: retention,
 		settings: rigSettings{
+			overdue:       DefaultSweepOverdue,
 			batchRoots:    512,
 			batchRows:     4096,
 			noQuietMargin: true,
@@ -123,9 +127,11 @@ func (r *rig) janitor() *Janitor {
 		d.SetMeter(r.meter)
 		r.j = New(r.shard, d)
 		r.fa = NewFastArchiving(r.archive, r.retention)
+		r.sa = NewSweepArchiving(r.fa, r.archive, r.retention)
 		r.la = NewLargeArchiving(r.archive, r.retention)
 		r.fd = NewFastDeletion()
 		r.j.AddJob(JobFastArchiving, r.fa)
+		r.j.AddJob(JobSweepArchiving, r.sa)
 		r.j.AddJob(JobLargeArchiving, r.la)
 		r.j.AddJob(JobFastDeletion, r.fd)
 		r.j.SetManual(true)
@@ -138,6 +144,11 @@ func (r *rig) janitor() *Janitor {
 	r.fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	r.fa.SetStaging(s.stageRows, s.stageBytes)
 	r.fa.SetQuietMargin(!s.noQuietMargin)
+	r.sa.SetGrace(s.grace)
+	r.sa.SetOverdue(s.overdue)
+	r.sa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	r.sa.SetStaging(s.stageRows, s.stageBytes)
+	r.sa.SetQuietMargin(!s.noQuietMargin)
 	r.la.SetBatch(s.batchRows, s.batchBytes)
 	r.la.SetQuietMargin(!s.noQuietMargin)
 	r.fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
@@ -162,6 +173,12 @@ func (r *rig) restart() {
 func (r *rig) fast() *FastArchiving {
 	r.janitor()
 	return r.fa
+}
+
+// sweep is the rig's sweep archiving job.
+func (r *rig) sweep() *SweepArchiving {
+	r.janitor()
+	return r.sa
 }
 
 // large is the rig's large-tree archiving job.

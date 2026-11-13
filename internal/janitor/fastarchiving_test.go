@@ -126,7 +126,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(refreshDay(t.Context(), db, r.archive, true, day)))
 			}
 			start := time.Now()
-			cut, _, err := r.fast().cut(t.Context(), db, []int{root}, retention > 0)
+			cut, _, err := cutClosed(t.Context(), db, r.seams, []int{root}, retention > 0, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -159,6 +159,7 @@ func TestWalk_FastPassesTheBatchItAttempted(t *testing.T) {
 			roots := seedTrees(t, db, 4, callShape)
 			ascendingCloses(t, r, roots)
 			r.settings.batchRoots = 2
+			r.settings.overdue = 24 * time.Hour // the sweep, which takes what fast archiving passed, out of the way
 			targeted := diagnostics.Join(fault, strconv.Itoa(roots[0]))
 			r.seams.InjectN(targeted, 10000)
 			defer r.seams.Withdraw(targeted)
@@ -188,11 +189,11 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
 	r.settings.batchRows = 7
-	cut, _, err := r.fast().cut(ctx, db, roots, false)
+	cut, _, err := cutClosed(ctx, db, r.seams, roots, false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "four rows a tree: the root, its two steps and the child of none")
 	r.settings.batchRows = 8
-	cut, _, err = r.fast().cut(ctx, db, roots, false)
+	cut, _, err = cutClosed(ctx, db, r.seams, roots, false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 
@@ -270,7 +271,8 @@ func TestFast_AReadingThatRestrictsNothingKeepsThePosition(t *testing.T) {
 	r := newRig(t, 30)
 	early := seedTrees(t, r.db, 1, callShape)[0]
 	late := seedTrees(t, r.db, 1, callShape)[0]
-	backdate(t, r, early, -time.Hour) // closed in the future: not due when the job passes it
+	backdate(t, r, early, -time.Hour)   // closed in the future: not due when the job passes it
+	r.settings.overdue = 24 * time.Hour // the sweep, which takes what fast archiving passed, out of the way
 	r.setResidency(1, 0, true)
 	r.pass(ctx)
 	assert.Equal(late, r.fast().after.flowID)
@@ -366,6 +368,7 @@ func TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace(t *testing.T) {
 	r := newRig(t, 30)
 	r.settings.grace = 30 * time.Second
 	r.settings.batchRoots = 1
+	r.settings.overdue = 24 * time.Hour // the sweep, which takes what fast archiving passed, out of the way
 	_, ok := r.fast().lagReading()
 	assert.False(ok, "no reading before a probe")
 	roots := seedTrees(t, r.db, 2, callShape)

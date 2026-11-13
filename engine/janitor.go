@@ -40,7 +40,7 @@ func (e *Engine) startJanitors(ctx context.Context) {
 
 // janitorSettings are what the engine builds a janitor's jobs with, taken from its fields.
 type janitorSettings struct {
-	grace                             time.Duration
+	grace, overdue                    time.Duration
 	batchRoots, batchRows, batchBytes int
 	stageRows, stageBytes             int
 	noQuietMargin                     bool
@@ -49,15 +49,15 @@ type janitorSettings struct {
 // janitorSettingsFor returns the settings the engine's fields give, with grace for the archive grace.
 func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 	return janitorSettings{
-		grace:      grace,
+		grace: grace, overdue: e.sweepOverdue,
 		batchRoots: e.reapBatch, batchRows: e.reapBatchRows, batchBytes: e.reapBatchBytes,
 		stageRows: e.reapStageRows, stageBytes: e.reapStageBytes,
 		noQuietMargin: e.noReapQuiet,
 	}
 }
 
-// addJanitorJobs adds a shard's janitor its jobs - fast archiving and large-tree archiving into the shard's archive, and
-// fast deletion - built with s, replacing the ones it has, which start over.
+// addJanitorJobs adds a shard's janitor its jobs - fast archiving, sweep archiving behind it and large-tree archiving
+// into the shard's archive, and fast deletion - built with s, replacing the ones it has, which start over.
 func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
@@ -65,6 +65,13 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s
 	fa.SetStaging(s.stageRows, s.stageBytes)
 	fa.SetQuietMargin(!s.noQuietMargin)
 	j.AddJob(janitor.JobFastArchiving, fa)
+	sa := janitor.NewSweepArchiving(fa, archive, e.retentionDays)
+	sa.SetGrace(s.grace)
+	sa.SetOverdue(s.overdue)
+	sa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	sa.SetStaging(s.stageRows, s.stageBytes)
+	sa.SetQuietMargin(!s.noQuietMargin)
+	j.AddJob(janitor.JobSweepArchiving, sa)
 	la := janitor.NewLargeArchiving(archive, e.retentionDays)
 	la.SetBatch(s.batchRows, s.batchBytes)
 	la.SetQuietMargin(!s.noQuietMargin)

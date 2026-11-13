@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/janitor"
+	"github.com/microbus-io/dwarf/internal/reaper"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -326,9 +328,11 @@ func (e *Engine) initMetrics() error {
 	// gauges are the fast archiving job's own (internal/janitor).
 	deletesPending := gauge("dwarf_archive_deletions_pending", "Discovered archived trees marked for deletion whose storage the last cleanup pass did not release, by shard. Hidden from reads. Check dwarf_archive_deletion_days_unknown too: a zero pending count does not imply completion while some days were not examined.", "{tree}")
 	deletesUnknown := gauge("dwarf_archive_deletion_days_unknown", "Retained archive days the last cleanup pass could not examine, by shard. Zero means all retained days were examined; nonzero means the pending tree count is incomplete.", "{day}")
-	heldRoots := gauge("dwarf_archive_held_roots", "Failed singles observed by repair: max of the current and last complete sweep. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff.", "{root}")
-	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", "Age of the oldest due root at the last repair sweep's front, increasing until resampled. Includes roots not yet attempted. Per shard and kind; aggregate with max.", "s")
-	sweepAge := gaugeF("dwarf_archive_sweep_seconds", "Age of the current repair sweep, or zero between sweeps. Per shard and kind; aggregate with max.", "s")
+	// The sweep gauges of closed trees are sweep archiving's (internal/janitor); the reaper's repair walk reports the
+	// other kinds, under the same descriptions.
+	heldRoots := gauge("dwarf_archive_held_roots", janitor.HeldRootsDescription, "{root}")
+	heldOldest := gaugeF("dwarf_archive_oldest_held_seconds", janitor.OldestHeldDescription, "s")
+	sweepAge := gaugeF("dwarf_archive_sweep_seconds", janitor.SweepAgeDescription, "s")
 	archiveDays := gauge("dwarf_archive_days", "Per-shard: the archive days whose tables exist on that shard, by each replica's last reading of them (every archive pass, 24 times a day): the retained days, today, and the two days ahead made early - the retention plus 3 once the shard has kept a full retention. More means expired days are not being dropped (dwarf_archive_maintain_failed). Aggregate with max.", "")
 	janitorProgress := gaugeF("dwarf_janitor_progress_age_seconds", "Per shard and job: how long since the job last made progress - work done that moved it forward - or since its janitor started, on each replica dispatching the shard. A job with work makes progress batch after batch, so this stays near zero while there is work and grows while there is none; growing while the job's work waits means the job is blocked or failing, and the logs say why. Aggregate with max.", "s")
 	archiveOldest := gaugeF("dwarf_archive_oldest_day_age_seconds", "Per-shard: how long ago the oldest archive day on that shard began, by each replica's last reading of the days. About the retention plus a day once maintenance keeps up, and up to two hours more, since days drop on hourly passes; beyond that, expired days are not being dropped. Aggregate with max.", "s")
@@ -467,6 +471,9 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		if dispatching == 1 {
 			obs := e.reaper.Load().Observe(idx, now)
 			for _, k := range obs.Kinds {
+				if k.Kind == reaper.KindClosed {
+					continue // sweep archiving's
+				}
 				opts := metric.WithAttributes(shardAttr(idx), attribute.String("kind", k.Kind))
 				o.ObserveInt64(g.heldRoots, int64(k.Held), opts)
 				o.ObserveFloat64(g.heldOldest, k.OldestHeld.Seconds(), opts)

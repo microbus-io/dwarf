@@ -36,6 +36,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/graphcache"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/piston"
 	"github.com/microbus-io/dwarf/internal/planner"
 	"github.com/microbus-io/dwarf/internal/reaper"
@@ -348,6 +349,7 @@ type Engine struct {
 	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
+	sweepOverdue        time.Duration // how long past due a root waits before a sweep takes it (30s)
 	reapBatch           int           // due roots one reaper batch considers (512)
 	reapBatchRows       int           // about how many rows one reaper batch moves, at least one tree (4096)
 	reapBatchBytes      int           // about how many payload bytes one reaper batch moves, at least one tree (16 MiB)
@@ -426,6 +428,7 @@ func NewEngine() *Engine {
 	e.orphanFlowThreshold = 5 * time.Minute
 	e.deletionGrace = 1 * time.Minute
 	e.archiveGrace = 1 * time.Minute
+	e.sweepOverdue = janitor.DefaultSweepOverdue
 	e.reapAttempt = 30 * time.Second
 	e.reapSlice = 5 * time.Second
 	e.reapBudget = 30 * time.Second

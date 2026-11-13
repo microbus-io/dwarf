@@ -38,6 +38,7 @@ import (
 // subgraph descendant and every step - leaves the live tables for today's archive tables in one pass, with its ids
 // and its outcome as they were.
 func TestMove_ClosedTreeMovesToTodaysTables(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_ClosedTreeMovesToTodaysTables")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -74,6 +75,7 @@ func TestMove_ClosedTreeMovesToTodaysTables(t *testing.T) {
 
 // TestMove_RetentionZeroDeletes pins that a retention of 0 deletes a closed tree rather than archiving it.
 func TestMove_RetentionZeroDeletes(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_RetentionZeroDeletes")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -246,6 +248,7 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 // a row budget that cuts them further, one pass still moves every closed tree, consuming one scan's candidates
 // across batches and scanning again when they run out.
 func TestMove_APassDrainsInSeveralBatches(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_APassDrainsInSeveralBatches")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -272,6 +275,7 @@ func TestMove_APassDrainsInSeveralBatches(t *testing.T) {
 // TestMove_ABatchThatMeetsContentionWaitsForTheNextPass pins that lock contention past Transact's retries is an
 // archive failure like any other: the tree stays whole, and repair archives it once contention clears.
 func TestMove_ABatchThatMeetsContentionWaitsForTheNextPass(t *testing.T) {
+	t.Skip("janitor step 6: the closed trees fast archiving passed are the janitor's sweep archiving's; see internal/janitor TestSweep_ABatchThatMeetsContentionIsSwept")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -352,6 +356,7 @@ func TestMove_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
 // TestMove_AFailedDeletionScanDoesNotHoldBackArchiving pins that the stamped kind failing does not keep the
 // closed kind from its pass.
 func TestMove_AFailedDeletionScanDoesNotHoldBackArchiving(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's jobs, each on a goroutine of its own, apart from the deletion walk")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -376,6 +381,7 @@ func TestMove_AFailedDeletionScanDoesNotHoldBackArchiving(t *testing.T) {
 
 // A poison tree stays whole while both its batch-mates and later roots make progress.
 func TestMove_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
+	t.Skip("janitor step 6: the closed trees fast archiving passed are the janitor's sweep archiving's; see internal/janitor TestSweep_APoisonTreeDoesNotLoseItsBatchMates")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -416,6 +422,7 @@ func TestMove_APoisonTreeDoesNotLoseItsBatchMates(t *testing.T) {
 }
 
 func TestMove_AFatalArchiveFaultNeverAuthorizesDeletion(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_AFatalArchiveFaultNeverAuthorizesDeletion")
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
@@ -506,6 +513,7 @@ func TestMove_NamesEveryFlowsColumn(t *testing.T) {
 // TestMove_EveryArchivedFlowIsStampedWhenItWasArchived pins archived_at: a live flow holds the not-archived value,
 // and every flow of an archived tree - the root and its subgraph child - the database's time of the move.
 func TestMove_EveryArchivedFlowIsStampedWhenItWasArchived(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_EveryArchivedFlowIsStampedWhenItWasArchived")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -572,6 +580,7 @@ func TestMove_AMoveAfterItsDayEndedIsStampedWithinTheDay(t *testing.T) {
 // in today archives nothing, and the trees go into the next day's tables at its first pass. Days of 16 seconds, so the
 // margin is two, and the pass runs with one to two left: before the margin it would archive.
 func TestMove_NoTreeMovesInTheDaysLastMoments(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestMove_NoTreeMovesInTheDaysLastMoments")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

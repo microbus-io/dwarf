@@ -1121,14 +1121,16 @@ func TestArchivedReads_ForkReadsTheArchivedGraph(t *testing.T) {
 }
 
 // TestArchivedReads_ForkHoldsTheReaperOffItsSource pins the lock Fork's clone rests on: while the transaction holds
-// the source root, a reaper pass waits rather than moving the tree, so the clone reads it whole; the tree is archived
-// once the fork commits. The fork is at a step inside the subgraph, whose own flow is not the root: the lock must be
-// the root's, which is what the reaper locks.
+// the source root, archiving skips it (PostgreSQL, MySQL) or waits (elsewhere) rather than moving the tree, so the
+// clone reads it whole; the tree is archived once the fork commits - by sweep archiving, where fast archiving skipped
+// and passed it. The fork is at a step inside the subgraph, whose own flow is not the root: the lock must be the
+// root's, which is what archiving locks.
 func TestArchivedReads_ForkHoldsTheReaperOffItsSource(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := refEngine(t)
+	e.sweepOverdue = 0 // the root fast archiving skipped is the sweep's at once
 	fk, err := e.Create(ctx, "refs/parent", nil, nil)
 	assert.NoError(err)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)

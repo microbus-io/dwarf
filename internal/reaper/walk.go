@@ -47,14 +47,14 @@ func (p *pass) run(ctx context.Context) {
 	// Retention cleanup is independent of archive table health and runs once per pass.
 	p.retained(ctx)
 	for {
-		// Closed trees first, then the stamped: a tree published in a round - by a staged copy's last chunk - is a
-		// stamped tree, and the deletion walk after it removes its live copy in the same round.
-		moreClosed := p.closed(ctx)
+		// Janitor step 6: the repair walk of closed trees is the janitor's sweep archiving job (internal/janitor), so
+		// only the stamped trees are walked here. Kept, commented out, as the reference.
+		// moreClosed := p.closed(ctx)
 		// Janitor step 3: the fast walk of stamped trees is the janitor's fast deletion job (internal/janitor), so only
 		// the repair walk runs here. The fast walk is kept, commented out, as the reference.
 		// moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
 		moreDeleted := p.walk(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted, true)
-		if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || (!moreDeleted && !moreClosed) {
+		if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || !moreDeleted {
 			return
 		}
 	}

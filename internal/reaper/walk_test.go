@@ -108,6 +108,9 @@ func TestWalk_PassesFailedTrees(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"closed", "deleted", "retention", "sizing"} {
 		t.Run(kind, func(t *testing.T) {
+			if kind == "closed" || kind == "sizing" {
+				t.Skip("janitor step 6: the closed trees fast archiving passed are the janitor's sweep archiving's; see internal/janitor TestSweep_PassesFailedTrees")
+			}
 			assert := testarossa.For(t)
 			r := newRig(t, 30)
 			db := r.db
@@ -228,6 +231,7 @@ func TestWalk_RetentionBoundaryAndHugeRetention(t *testing.T) {
 // TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic pins that a tree to archive larger than a batch is still one atomic
 // move, every descendant included: a fault mid-move leaves it whole and unstamped, and the next pass moves it.
 func TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic(t *testing.T) {
+	t.Skip("janitor step 6: closed trees are archived by the janitor's fast and sweep archiving; see internal/janitor TestWalk_AnArchiveMoveAboveTheBatchBudgetIsAtomic")
 	t.Parallel()
 	assert := testarossa.For(t)
 	r := newRig(t, 30)
@@ -578,13 +582,16 @@ func TestWalk_AStopIsNotAFailure(t *testing.T) {
 }
 
 // TestWalk_TheResidencyCallbackRestrictsAPass pins that a pass reads the shard's Residency: with two dispatchers, a
-// pass takes only its own residue class of the fresh roots, and the other class's once nothing restricts it.
+// pass takes only its own residue class of the freshly stamped roots, and the other class's once nothing restricts it.
 func TestWalk_TheResidencyCallbackRestrictsAPass(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := newRig(t, 0)
 	roots := seedTrees(t, r.db, 4, soloShape)
+	for _, id := range roots {
+		stampTree(t, r.db, id)
+	}
 	calls := 0
 	shard := r.shard()
 	shard.Residency = func() (count, ordinal int, ok bool) {

@@ -1,10 +1,10 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
-> and its connection, fast archiving, large-tree archiving or fast deletion, or the janitors' metrics.
+> and its connection, fast archiving, sweep archiving, large-tree archiving or fast deletion, or the janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
-> taken over - the sweeps, chunked deletion, retention - and the staged protocol's rationale) and
+> taken over - sweep deletion, chunked deletion, retention - and the staged protocol's rationale) and
 > `internal/archiver/CLAUDE.md` (the day tables).
 
 ## What a Janitor is, and what a job is
@@ -102,7 +102,7 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
 - **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
   moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
   A root behind the position - one it failed on, one held, one that committed late with an older close - is left to a
-  sweep (the reaper's repair walk). A job that held its position on a failure would retry it every round and reach
+  sweep (sweep archiving, below). A job that held its position on a failure would retry it every round and reach
   nothing behind it (`TestWalk_FastPassesTheBatchItAttempted`). A round that removed nothing - held or failed - makes no
   progress and the job waits; the batches after it are reached on the next round.
 - **Not its own, and passed:** a root with an archive attempt (large-tree archiving's); with staging on, a tree over
@@ -118,7 +118,7 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   once rather than leaving them to a sweep (`TestFast_AResidencyChangeStartsOver`). The scan also takes another class's
   roots overdue by the steal grace, a fixed 30 s past the archive grace - but only those ahead of the position, which
   happens when this job is behind. By the time a slow peer's roots are overdue, a job keeping up has passed them: they
-  are a sweep's (the reaper's repair walk).
+  are a sweep's.
 - **An atomic batch holds at most `MaxBatchFlows` (4,096) flows**, whatever its rows and bytes allow: every flow of a
   batch gets one archive time, and `ListClosed` cannot page across a tie larger than its `Limit`, so the lists'
   maximum must stay above it. A tree of more goes alone (`TestMove_ABatchHoldsAtMostMaxBatchFlows`).
@@ -186,10 +186,64 @@ considered, and starts over when its residue class changes, as fast archiving do
   with its attempt or carrying the archive time its publication copied, is counted at the move's root locks and left
   out (`publishedSQL`, `TestDelete_APublishedLiveCopyIsNotCountedReaped`).
 
+## Sweep archiving (`sweeparchiving.go`)
+
+The job behind fast archiving (`JobSweepArchiving`): the closed roots fast archiving left - one it failed on, found held
+or could not start an attempt for, one whose close committed late with a time behind its position, one of a slow
+peer's class it passed. Routed as fast archiving routes them, through the same functions (`closed.go`): moved, a tree
+over the staging threshold given its attempt, and at a retention of 0 deleted or stamped. **When archiving, a root with
+an attempt is not in its scan**: it is large-tree archiving's, its copy can run for a day before it publishes, and
+every sweep would pass it again, a batch at a time.
+
+- **The boundary is fast archiving's position**, published at the end of every round with the residue class its scan
+  was restricted to (`boundary`, read lock-free). A sweep captures it as it begins and takes the roots at or behind it
+  in close order: the root fast archiving was last done with is the sweep's, failed or not
+  (`TestSweep_TheLastRootFastFailedOnIsTheSweeps`). **The end is fixed for the sweep**, so roots that close while it
+  runs are ahead of it and a sweep completes however fast they arrive (`TestSweep_CompletesUnderContinuousArrivals`).
+  Before fast archiving's first round there is no boundary and no sweep begins; a position at the start has nothing
+  behind it, and a sweep completes at once, empty.
+- **A root waits out the window** (`SetOverdue`, `DefaultSweepOverdue`, 30 s) past the archive grace before a sweep
+  takes it. Fast archiving never comes back for a root behind its position - a starting-over after a class change or a
+  restart leaves the sweep nothing behind it - so the window only gives what failed a root (a Fork holding it,
+  contention, a connection lost) time to clear before it is tried again. It is the steal grace, so a slow peer's roots
+  behind the position are taken about a minute past due. Overdue is not "since fast archiving tried it": an old root
+  fast archiving just failed on can be retried at once (`TestSweep_ARootWaitsOutTheWindow`). The failed root is the
+  shard's oldest due root until the sweep takes it, so a single failure shows in `dwarf_archive_lag_seconds` for the
+  window and the sweep's idle wait.
+- **The residue class is the boundary's, not read from the shard.** A sweep sweeps the class fast archiving's position
+  was taken in, plus the roots overdue by the steal grace past its window, and is dropped when fast archiving's class
+  changes: fast archiving then starts over, and the next sweep has the new class's position to sweep behind
+  (`TestSweep_FollowsFastArchivingsResidueClass`). Read from the shard, a sweep could pair one class with a position
+  taken in another. A dropped sweep's held roots still count, and, not having completed, it ends no failure episode.
+- **A failed batch is taken again a root at a time**, from the same position; a root that fails alone is held -
+  counted and passed - and the next sweep comes back to it. Only the first `heldLogLimit` (8) a sweep holds are logged,
+  by correlation id: through an archive outage the sweep holds every root it takes, up to 8 a second. A batch that
+  fails nothing doubles the next, up to the batch. A round takes batches until one makes progress or
+  `sweepFailureLimit` (8) have failed, then gives way to the idle wait (`TestSweep_APoisonTreeDoesNotLoseItsBatchMates`,
+  `TestSweep_PassesFailedTrees`). **Passing a root is no progress** - one another transaction holds, or whose attempt
+  started under it - though the round goes on past it: a root that stays behind the position is passed by every
+  sweep, and counting it would keep the job from ever idling and a test's drain from ever returning
+  (`TestSweep_PassingAStuckAttemptIsNoProgress`).
+- **Its gauges are its own**, observed only while its janitor is active: `dwarf_archive_held_roots`,
+  `dwarf_archive_oldest_held_seconds` and `dwarf_archive_sweep_seconds` under `kind="closed"` - the engine reports the
+  other kinds from the reaper's walks, under the same descriptions (`HeldRootsDescription` and its siblings, which the
+  engine imports) - and its series of `dwarf_archive_failing_seconds`. The held count is the larger of the current
+  sweep's and the last complete one's, published as each root is held
+  (`TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes`); the front's age is the oldest due root at a sweep's first
+  scan, aging until the next sweep's.
+- **Its failure episode** begins at a failure - the day, a scan, a sizing, a move, a connection - and ends at a sweep
+  that completes having failed nothing, in a batch whose day was read and open: a sweep starting after the failure and
+  finding every root behind fast archiving's position taken (`TestSweep_HeldRootsAndTheFailureEpisode`). At a retention
+  of 0 nothing is archived and nothing starts one: a connection it could not take is logged
+  (`TestSweep_AtRetentionZeroAConnectionErrorIsNoArchiveFailure`).
+- **It moves nothing while the day is closed** - tomorrow not whole, or the quiet margin - as fast archiving: the roots
+  stay live and the sweep is failing (`TestSweep_NothingMovesWhileTomorrowIsNotWhole`). Ending its episode there is
+  barred by the open-day condition above, or every round would end it and the next begin it again.
+
 ## Large-tree archiving (`largearchiving.go`)
 
 The third job (`JobLargeArchiving`): every tree whose staged archive attempt has started - one too large to move in
-one transaction, its attempt started by fast archiving or by the reaper's repair walk - copied into its attempt's day
+one transaction, its attempt started by fast archiving or by sweep archiving - copied into its attempt's day
 over as many transactions as it takes, invisible there, then published in one small one: the root last, the live root
 stamped for deletion with its attempt kept. The protocol - the attempt as the copy's identity and day, the stamp groups,
 the publication's wait for the next day, a dropped day replacing the attempt, `NOT EXISTS` rewrites, the open-flow

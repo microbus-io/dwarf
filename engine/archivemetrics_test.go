@@ -327,41 +327,42 @@ func TestArchiveMetrics_AnUnreadableDayIsAnArchiveFailure(t *testing.T) {
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonNoRetention}))
 }
 
-func TestArchiveMetrics_HeldWorkIsVisibleBeforeASweepCompletes(t *testing.T) {
+// TestArchiveMetrics_TheSweepReportsHeldWork pins the sweep gauges of closed trees, which sweep archiving reports:
+// every root it failed on alone is held, the front's oldest due root is reported, nothing is deleted for it, and a sweep
+// that archives them clears the count. That the counts are visible before a sweep completes is pinned by
+// internal/janitor's TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes.
+func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
-	// The reaper's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
+	// The sweep's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
 	// and DWARF_STAGE_ROWS would stage every tree.
 	e.reapStageRows = 0
+	e.sweepOverdue = 0
 	roots := closedRoots(t, e, 3)
 	for _, id := range roots {
 		backdate(t, e, id, 2*time.Minute)
 	}
-	e.reapSlice = 0
-	e.reapBatch = 1
 	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
-	e.reapDueFlows(t.Context())
+	e.reapDueFlows(t.Context()) // fast archiving fails the batch of three and passes it; the sweep takes each alone
 	rm := collect(t, reader)
 	attrs := map[string]string{"shard": "1", "kind": "closed"}
 	n, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
 	assert.True(ok)
-	assert.Equal(float64(1), n)
+	assert.Equal(float64(3), n, "each root failed alone")
 	age, ok := gaugeAt(rm, "dwarf_archive_oldest_held_seconds", attrs)
 	assert.True(ok)
 	assert.True(age >= 119)
-	assert.True(e.reaper.Load().Observe(1, time.Now()).Kinds[0].Sweep > 0, "sweep is incomplete")
-	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 2)
+	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 4, "fast archiving's batch and the sweep's three")
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
 	e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
-	for range 4 {
-		e.reapDueFlows(t.Context())
-	}
+	e.reapDueFlows(t.Context())
 	rm = collect(t, reader)
 	n, _ = gaugeAt(rm, "dwarf_archive_held_roots", attrs)
 	assert.Zero(n)
-	e.forgetReaping(1)
-	assert.Equal(reaper.KindObservation{Kind: reaper.KindClosed}, e.reaper.Load().Observe(1, time.Now()).Kinds[0])
+	for _, id := range roots {
+		assert.False(live(t, e, id), "root %d swept", id)
+	}
 }
 
 func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) {

@@ -33,11 +33,12 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 
 ## A pass
 
-**The fast walks are the janitor's** (`internal/janitor`): of closed trees, fast archiving; of stamped trees, fast
-deletion. **So is the staged copy**: the janitor's large-tree archiving copies and publishes every tree with an
-attempt, which it finds by its index; the repair walk here only starts or joins an attempt (`stage`), and the scan of
-started attempts (`resumeStarted`) does not run. A pass runs only the repair walks, and the moved code stays here,
-commented out where the pass ran it, as the reference. The tests that need it are skipped with a note naming their janitor copies. Everything below
+**Closed trees are the janitor's** (`internal/janitor`): fast archiving and sweep archiving, both walks of them; of
+stamped trees, the fast walk is the janitor's fast deletion. **So is the staged copy**: the janitor's large-tree
+archiving copies and publishes every tree with an attempt, which it finds by its index, and its attempts are started by
+the janitor's archiving jobs; neither `stage` nor the scan of started attempts (`resumeStarted`) runs. A pass runs the
+retention cleanup and the repair walk of stamped trees, and the moved code stays here, commented out where the pass ran
+it, as the reference. The tests that need it are skipped with a note naming their janitor copies. Everything below
 describes the reaper as a whole, both walkers included.
 
 On one shard the stages share the caller's turn and run serially: retention cleanup, then closed and stamped trees

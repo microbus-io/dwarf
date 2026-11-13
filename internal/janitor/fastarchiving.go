@@ -17,19 +17,17 @@ limitations under the License.
 package janitor
 
 import (
-	"cmp"
 	"context"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
-	"github.com/microbus-io/sequel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -91,6 +89,9 @@ type FastArchiving struct {
 	probedAt    time.Time
 
 	mu sync.Mutex
+	// boundary is the position as the last round left it, with the residue class it was taken in, for sweep archiving,
+	// which reads it from its own goroutine; nil before a round and after a reset.
+	boundary atomic.Pointer[boundary]
 	// lagSince is when the shard's oldest due closed root at the last probe passed the grace, on this process's clock,
 	// zero for none; lagOK is false before the first probe.
 	lagSince time.Time
@@ -137,14 +138,6 @@ func (f *FastArchiving) SetQuietMargin(on bool) {
 }
 
 // The ways a round takes its cut.
-type route int
-
-const (
-	routeMove  route = iota // moved, or deleted at a retention of 0, in one transaction
-	routePass               // left where it is: every candidate has an archive attempt, large-tree archiving's
-	routeStart              // its archive attempt started, for large-tree archiving: a tree over the staging threshold
-	routeStamp              // stamped for deletion in chunks: at a retention of 0, a tree too large for a batch
-)
 
 // attach creates the job's instruments on j's meter, and registers its gauges.
 func (f *FastArchiving) attach(j *Janitor, name string) {
@@ -199,6 +192,7 @@ func (f *FastArchiving) round(ctx context.Context, batch batchFunc) (progress bo
 	}
 	err := batch(ctx, func(ctx context.Context, h handle) error {
 		progress = f.batch(ctx, h)
+		f.boundary.Store(&boundary{f.after, f.count, f.ordinal, f.partitioned})
 		return nil
 	})
 	if err != nil {
@@ -238,7 +232,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 		probed = true
 	}
 	where, whereArgs := f.restriction(h.DriverName())
-	candidates, _, err := f.scanClosed(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
+	candidates, _, err := scanClosed(ctx, h, seams, f.grace, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting closed trees", "error", err)
 		if archiving {
@@ -257,7 +251,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	}
 
 	start := time.Now()
-	cut, via, err := f.cut(ctx, h, rootIDs(candidates), archiving)
+	cut, via, err := cutClosed(ctx, h, seams, rootIDs(candidates), archiving, f.batchRows, f.batchBytes, f.stageRows, f.stageBytes)
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
 		last = slices.IndexFunc(candidates, func(c dueRoot) bool { return c.flowID == cut[len(cut)-1] })
@@ -272,7 +266,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 			due, dueArgs := closedDueSQL(f.grace)
 			_, _, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
 		case routeStamp:
-			_, err = f.stampClosed(ctx, h, cut[0])
+			_, err = stampClosed(ctx, h, cut[0], f.grace)
 		}
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
@@ -309,7 +303,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 // on the database's clock and the failure's on this process's, so neither clock's offset matters.
 func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	f.probedAt = time.Now()
-	due, oldest, err := f.scanClosed(ctx, h, noSeams, "", nil, 1)
+	due, oldest, err := scanClosed(ctx, h, noSeams, f.grace, "", nil, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -325,7 +319,7 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 		return
 	}
 	none, noneArg := noAttemptSQL(h.DriverName())
-	unattempted, oldestUnattempted, err := f.scanClosed(ctx, h, noSeams, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
+	unattempted, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -343,53 +337,6 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 // is still live. A root due within the margin is the job's to archive next, and that move ends the episode.
 const endMargin = time.Second
 
-// cut returns the roots among candidates, in order, that one batch takes, and what it does with them. A root with an
-// archive attempt is left out, and passed. Of the rest it takes a leading run whose trees fit a batch (cutWithin) -
-// rows, bytes and flows - and always the first: the first sized up to what decides its path - over a batch, and over
-// the staging threshold when staging - and each later one up to what is left of the batch. Sizing is a batching hint;
-// the move locks only the roots it takes. A cut empty of roots means every candidate had an attempt.
-func (f *FastArchiving) cut(ctx context.Context, h handle, candidates []int, archiving bool) (cut []int, via route, err error) {
-	eligible := candidates
-	if archiving {
-		attempted, err := attemptsAmong(ctx, h, candidates)
-		if err != nil {
-			return nil, routeMove, err
-		}
-		eligible = slices.DeleteFunc(slices.Clone(candidates), func(root int) bool { return attempted[root] })
-		if len(eligible) == 0 {
-			return nil, routePass, nil
-		}
-	}
-	batch := capOf(f.batchRows, f.batchBytes)
-	cutLimit := batch
-	cutLimit.flows = MaxBatchFlows
-	firstRows := batch.rows + 1
-	stage, staging := capOf(f.stageRows, f.stageBytes), archiving && f.stageRows > 0
-	if staging {
-		// A batch holds no more than the threshold, so a tree over it is alone in its batch, whatever the batch's own
-		// size.
-		cutLimit = cutLimit.tighter(stage)
-		firstRows = max(firstRows, stage.rows+1)
-	}
-	cut, first, err := cutWithin(eligible, cutLimit, firstRows, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(f.j.diags.Seams(), diagnostics.FaultReapSizeErr, group...); err != nil {
-			return nil, err
-		}
-		return treesSizesUpTo(ctx, h, group, limits)
-	})
-	switch {
-	case err != nil:
-		return nil, routeMove, err
-	case len(cut) > 1:
-		return cut, routeMove, nil
-	case staging && stage.over(first):
-		return cut, routeStart, nil
-	case !archiving && batch.over(first):
-		return cut, routeStamp, nil
-	}
-	return cut, routeMove, nil
-}
-
 // restriction is a round's restriction of its scan: this replica's residue class of the roots, as the shard reports
 // it, and every root overdue by the steal grace; and the range after the position. A residue class other than the one
 // the position was walked in starts the walk over from the beginning.
@@ -406,132 +353,6 @@ func (f *FastArchiving) restriction(driver string) (where string, args []any) {
 		args = append(args, arg, arg, f.after.flowID)
 	}
 	return where, args
-}
-
-// scanClosed selects up to limit closed roots due the job's grace after their close, restricted by where (a SQL
-// fragment and its arguments; empty for none), in close order - (updated_at, flow_id) - and returns the age of the
-// oldest it read, 0 for none. It returns fewer than limit only when it saw every due root.
-//
-// One branch per terminal status, each a range of idx_dwarf_flows_status (status, updated_at) that stops at the limit:
-// one scan over all four statuses has no index order, so it would read and sort every due root on every batch,
-// O(backlog) per batch. The status is inlined, never bound: a bound status defeats the filtered indexes and the
-// estimates. Each root's age comes with it, from the row the scan reads anyway: the first of each branch is that
-// status's oldest due root. flow_id breaks ties of updated_at, so the order is total: the index carries the primary key
-// after updated_at on MySQL, SQL Server and SQLite, and PostgreSQL sorts only each tie group (an incremental sort). The
-// branches are merged here: their first limit are exactly the order's first, since each branch holds its own first
-// limit.
-func (f *FastArchiving) scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
-	var stmt string
-	var args []any
-	for i, status := range database.TerminalStatuses {
-		if i > 0 {
-			stmt += " UNION ALL "
-		}
-		stmt += "SELECT flow_id, updated_at, age_ms, created_hour FROM (SELECT flow_id, updated_at, created_hour," +
-			" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
-			" FROM dwarf_flows WHERE status='" + status + "'" +
-			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
-			where + " ORDER BY updated_at, flow_id LIMIT_OFFSET(?, 0)) due_" + status
-		args = append(args, -f.grace.Milliseconds())
-		args = append(args, whereArgs...)
-		args = append(args, limit)
-	}
-	rows, err := q.QueryContext(ctx, stmt, args...)
-	// diagnostics.FaultReapSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
-	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
-		rows.Close()
-		err = errors.New("injected fault: " + diagnostics.FaultReapSelectErr)
-	}
-	if err != nil {
-		return nil, 0, errors.Trace(err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var r dueRoot
-		// float64: DATE_DIFF_MILLIS is fractional on SQLite, where an int64 scan fails.
-		var ageMs float64
-		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs, &r.createdHour); err != nil {
-			return nil, 0, errors.Trace(err)
-		}
-		// The position is bound back as this instant (restriction): a MySQL driver with a DSN loc other than UTC places
-		// the stored wall clock in that location, and binding it as found would seek hours off.
-		r.updatedAt = database.StoredTime(r.updatedAt)
-		roots = append(roots, r)
-		oldest = max(oldest, time.Duration(ageMs*float64(time.Millisecond)))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, errors.Trace(err)
-	}
-	slices.SortFunc(roots, func(a, b dueRoot) int {
-		if c := a.updatedAt.Compare(b.updatedAt); c != 0 {
-			return c
-		}
-		return cmp.Compare(a.flowID, b.flowID)
-	})
-	return roots[:min(limit, len(roots))], oldest, nil
-}
-
-// stampClosed marks a closed root for deletion, due at once, if it is still a closed root due the job's grace after its close:
-// what a retention of 0 does with a tree too large to delete in one batch, leaving it to the deletion of stamped trees
-// in chunks. The stamp clears any archive attempt, as every stamp but a publication does. The root is locked first as a
-// move locks it, so a root another transaction holds - a Fork cloning the tree - is skipped on PostgreSQL and MySQL
-// rather than waited for. It reports whether it stamped it.
-func (f *FastArchiving) stampClosed(ctx context.Context, h handle, root int) (stamped bool, err error) {
-	id := strconv.Itoa(root)
-	err = h.Transact(ctx, func(tx *sequel.Tx) error {
-		stamped = false
-		due, dueArgs := closedDueSQL(f.grace)
-		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
-		if err != nil || len(locked) == 0 {
-			return errors.Trace(err)
-		}
-		none, noneArg := noAttemptSQL(tx.DriverName())
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id="+id, noneArg); err != nil {
-			return errors.Trace(err)
-		}
-		stamped = true
-		return nil
-	})
-	if err != nil {
-		return false, errors.Trace(err)
-	}
-	return stamped, nil
-}
-
-// dueRoot is a due root a scan returned, by its key in the scan's order.
-type dueRoot struct {
-	updatedAt   time.Time
-	flowID      int
-	createdHour int
-}
-
-// rootIDs returns the flow ids of roots, in their order.
-func rootIDs(roots []dueRoot) []int {
-	ids := make([]int, len(roots))
-	for i, r := range roots {
-		ids[i] = r.flowID
-	}
-	return ids
-}
-
-// closedDueSQL is the condition, on a live flows row, that it is a closed root due grace after its close and not
-// stamped for deletion, and its argument. A batch rechecks it under the root's lock.
-func closedDueSQL(grace time.Duration) (cond string, args []any) {
-	return "status IN (" + database.TerminalStatusesSQL + ") AND surgraph_flow_id=0 AND delete_after_ms=0" +
-		" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)", []any{-grace.Milliseconds()}
-}
-
-// closedResidency restricts a closed scan to this replica's share of the shard's dispatchers, flow_id % count =
-// ordinal, plus every root overdue by the steal grace past the archive grace. Two janitors then take disjoint roots
-// while both keep up. A position-ordered scan steals only the overdue roots ahead of its position - when its job is
-// behind - so a slow peer's roots, once behind it, are a sweep's. It fails open, as the piston's partition does: an
-// unknown or invalid pair, or a solo dispatcher, restricts nothing.
-func closedResidency(count, ordinal int, ok bool, grace, steal time.Duration) (clause string, args []any) {
-	if !ok || count < 2 || ordinal < 0 || ordinal >= count {
-		return "", nil
-	}
-	return " AND (flow_id % ? = ? OR updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
-		[]any{count, ordinal, -(grace + steal).Milliseconds()}
 }
 
 // failed records an archive failure, unless ctx ended: a stop is no failure. Only the first failure of an episode is
@@ -576,10 +397,28 @@ func (f *FastArchiving) logError(ctx context.Context, msg string, args ...any) {
 // reset forgets where the job stood, and what it observed: the janitor resumes as one that knows nothing.
 func (f *FastArchiving) reset() {
 	f.after, f.count, f.ordinal, f.partitioned, f.probedAt = dueRoot{}, 0, 0, false, time.Time{}
+	f.boundary.Store(nil)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lagSince, f.lagOK = time.Time{}, false
 	f.failSince, f.failLast = time.Time{}, time.Time{}
+}
+
+// boundary is where fast archiving stood at the end of a round - its position, the last root it was done with - and the
+// residue class its scan was restricted to. The roots at or behind it in close order are sweep archiving's.
+type boundary struct {
+	after          dueRoot
+	count, ordinal int
+	partitioned    bool
+}
+
+// position returns where fast archiving stood at the end of its last round; ok is false before a round and after a
+// reset.
+func (f *FastArchiving) position() (b boundary, ok bool) {
+	if p := f.boundary.Load(); p != nil {
+		return *p, true
+	}
+	return boundary{}, false
 }
 
 // lagReading returns the lag now - how long archiving is behind - and false before the first probe. It goes on aging

@@ -168,18 +168,23 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	})
 	assert.NoError(e.SetHost(mux))
 	e.janitorManual = false
+	// A connection for every job held at the breakpoint, and more for the worker's claim: held, the jobs would take
+	// every connection of the test-mode cap, and the task would never start.
+	e.testConnCap = 2 * defaultTestConnCap
 	e.diags.Seams().Break(diagnostics.CheckpointJanitorBatchConn)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
+	jobs := len(e.janitorOn(1).JobAges(time.Now()))
+	assert.Must(assert.True(jobs > 0, "the janitor has jobs"))
+	assert.Must(assert.True(db.Stats().MaxOpenConnections > jobs, "a pool of %d holds the %d jobs and the worker",
+		db.Stats().MaxOpenConnections, jobs))
 
 	_, err = e.Create(t.Context(), "janitor/graph", nil, nil)
 	assert.Must(assert.NoError(err))
 	<-entered
 	// Every job holds its batch's connection at the breakpoint; the test takes the rest of the pool.
-	jobs := len(e.janitorOn(1).JobAges(time.Now()))
-	assert.Must(assert.True(jobs > 0, "the janitor has jobs"))
 	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
 	for e.diags.Seams().Visits(diagnostics.CheckpointJanitorBatchConn) < jobs && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -266,7 +271,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 3, "fast archiving, large-tree archiving and fast deletion are reported")
+	assert.Len(got, 4, "fast archiving, sweep archiving, large-tree archiving and fast deletion are reported")
 	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
 	setRole(e, 1, false)
@@ -339,10 +344,10 @@ func closedLive(t *testing.T, e *Engine) []int {
 	return ids
 }
 
-// TestJanitor_TheRepairWalkStartsWhatFastArchivingLeftBehind pins the handoff of a large tree fast archiving did not
-// start - its root held when fast archiving came to it, or closed behind fast archiving's position: the reaper's repair
-// walk starts its archive attempt, copying nothing, and the janitor's large-tree archiving copies and publishes it.
-func TestJanitor_TheRepairWalkStartsWhatFastArchivingLeftBehind(t *testing.T) {
+// TestJanitor_TheSweepStartsWhatFastArchivingLeftBehind pins the handoff of a large tree fast archiving did not start -
+// its root held when fast archiving came to it, or closed behind fast archiving's position: once it is overdue by the
+// sweep's window, sweep archiving starts its archive attempt, and large-tree archiving copies and publishes it.
+func TestJanitor_TheSweepStartsWhatFastArchivingLeftBehind(t *testing.T) {
 	t.Parallel()
 	for _, how := range []string{"held", "behind"} {
 		t.Run(how, func(t *testing.T) {
@@ -396,22 +401,19 @@ func TestJanitor_TheRepairWalkStartsWhatFastArchivingLeftBehind(t *testing.T) {
 			case "behind":
 				backdate(t, e, root, -time.Hour) // closed in the future: not due when fast archiving passes it
 				e.drainJanitors(ctx, 0)
-				backdate(t, e, root, time.Hour) // due now, closed before fast archiving's position
-				e.drainJanitors(ctx, 0)
+				backdate(t, e, root, 10*time.Second) // due now, closed before fast archiving's position, within the window
 			}
+			e.drainJanitors(ctx, 0)
 			if now, _ := e.archiveOn(1).Today(ctx); now != today {
 				t.Skip("midnight passed during the test")
 			}
 			assert.False(live(t, e, other), "the other tree archived")
-			assert.False(attempted(root), "fast archiving started no attempt")
+			assert.False(attempted(root), "neither fast archiving nor, within its window, the sweep started an attempt")
 			assert.True(live(t, e, root))
 
-			e.reapPass(ctx, 0, false)
-			assert.True(attempted(root), "the repair walk started its attempt")
-			assert.Zero(archived(root), "and copied nothing")
-
+			backdate(t, e, root, janitor.DefaultSweepOverdue+time.Minute) // overdue by the sweep's window
 			e.drainJanitors(ctx, 0)
-			assert.Equal(2, archived(root), "large-tree archiving copied and published it")
+			assert.Equal(2, archived(root), "the sweep started its attempt, and large-tree archiving copied and published it")
 			// Its stamp is behind fast deletion's position, which passed the other tree's higher flow_id: a sweep's.
 			e.reapPass(ctx, 0, false)
 			assert.False(live(t, e, root), "and its live copy is removed")

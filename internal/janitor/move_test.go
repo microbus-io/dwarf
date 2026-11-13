@@ -189,7 +189,7 @@ func TestMove_ResidencySplitsTheDueRoots(t *testing.T) {
 	roots := seedTrees(t, db, 4, soloShape)
 	selectWith := func(steal time.Duration, ordinal int) []int {
 		residency, residencyArgs := closedResidency(2, ordinal, true, r.settings.grace, steal)
-		roots, _, err := r.fast().scanClosed(ctx, db, r.seams, residency, residencyArgs, r.settings.batchRoots)
+		roots, _, err := scanClosed(ctx, db, r.seams, r.settings.grace, residency, residencyArgs, r.settings.batchRoots)
 		assert.NoError(err)
 		return rootIDs(roots)
 	}
@@ -236,16 +236,16 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 		b, -(3 * time.Minute).Milliseconds(), b, d)
 	assert.NoError(err)
 
-	roots, _, err := r.fast().scanClosed(ctx, db, r.seams, "", nil, 10)
+	roots, _, err := scanClosed(ctx, db, r.seams, r.settings.grace, "", nil, 10)
 	assert.NoError(err)
 	assert.Equal([]int{c, a, b, d}, rootIDs(roots), "closed first first, a tie by flow_id")
 	assert.True(len(roots) == 4 && roots[2].updatedAt.Equal(roots[3].updatedAt), "b and d tie")
-	roots, _, err = r.fast().scanClosed(ctx, db, r.seams, "", nil, 2)
+	roots, _, err = scanClosed(ctx, db, r.seams, r.settings.grace, "", nil, 2)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
 	r.settings.batchRows = 4 // two trees of a flow and a step each
-	cut, via, err := r.fast().cut(ctx, db, rootIDs(roots), true)
+	cut, via, err := cutClosed(ctx, db, r.seams, rootIDs(roots), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 	assert.Equal(routeMove, via)
@@ -755,7 +755,7 @@ func TestMove_TheLockRechecksEveryRoot(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 4, callShape)
 	ascendingCloses(t, r, roots)
-	cut, via, err := r.fast().cut(ctx, db, roots, true)
+	cut, via, err := cutClosed(ctx, db, r.seams, roots, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.Must(assert.NoError(err))
 	assert.Equal(roots, cut, "the batch takes all four")
 	assert.Equal(routeMove, via)
