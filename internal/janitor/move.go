@@ -123,26 +123,26 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 	}
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		removed = removal{}
-		locked, err := lockRoots(ctx, tx, "", true, "flow_id IN ("+database.IntList(roots)+") AND "+due, dueArgs...)
+		rootsPh, rootsArgs := database.IDList(roots)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id IN ("+rootsPh+") AND "+due, append(rootsArgs, dueArgs...)...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
 		seams.Checkpoint(ctx, diagnostics.CheckpointReapBatchLocked)
-		// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
-		ids := database.IntList(locked)
+		ids, idArgs := database.IDList(locked)
 		trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
 		published := 0
 		if d == nil {
 			// Counted under the root locks: a published tree's live copy is deleted, not reaped.
 			cond, args := publishedSQL(tx.DriverName())
 			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id IN (SELECT flow_id FROM"+
-				" dwarf_flows WHERE flow_id IN ("+ids+") AND "+cond+")", args...).Scan(&published); err != nil {
+				" dwarf_flows WHERE flow_id IN ("+ids+") AND "+cond+")", append(slices.Clone(idArgs), args...)...).Scan(&published); err != nil {
 				return errors.Trace(err)
 			}
 		}
 		steps := "DELETE FROM dwarf_steps WHERE flow_id IN (" + trees + ")"
 		flows := "DELETE FROM dwarf_flows WHERE root_flow_id IN (" + ids + ")"
-		var flowsArgs []any
+		stepsArgs, flowsArgs := idArgs, idArgs
 		if d != nil {
 			// diagnostics.FaultReapContention fails every attempt of an archive move on lock contention.
 			if seams.IsFault(diagnostics.FaultReapContention) {
@@ -152,10 +152,10 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 			if seams.IsFault(diagnostics.FaultReapArchiveErr) {
 				return errors.New("injected fault: " + diagnostics.FaultReapArchiveErr)
 			}
-			steps, flows, flowsArgs = archiveStatements(ctx, tx, d, ids, trees, steps, flows)
+			steps, stepsArgs, flows, flowsArgs = archiveStatements(ctx, tx, d, ids, idArgs, trees, steps, flows)
 		}
 		// Steps before flows: the subquery reads the flow rows.
-		if _, err := tx.ExecContext(ctx, steps); err != nil {
+		if _, err := tx.ExecContext(ctx, steps, stepsArgs...); err != nil {
 			return errors.Trace(err)
 		}
 		// diagnostics.FaultReapMidTree aborts after the steps go but before the flows do, so the whole batch rolls back: a failure mid
@@ -190,8 +190,9 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 	return removed, nil
 }
 
-// archiveStatements returns the statements that move the trees whose flow ids trees selects, the roots ids, into d:
-// the steps' and the flows', and the flows' arguments. A flow a locate would not find by its creation hour alone -
+// archiveStatements returns the statements that move the trees whose flow ids trees selects, the roots the bound list
+// ids holds (idArgs), into d: the steps' and the flows', with their arguments. The directory's day and hours are written
+// into the statement: they change once a day, so a day's statements take one text. A flow a locate would not find by its creation hour alone -
 // archived two or more days after its creation day, or on a day before it (a straggler created while a batch begun
 // before midnight ran) - is named in the directory, in the same transaction, from the same rows the move takes.
 //
@@ -200,7 +201,7 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 // carry the live columns in the same order; the flows name theirs, to stamp archived_at. Elsewhere the rows are copied
 // here, then deleted by the plain statements: a descendant that changes between the copy and the delete - only a
 // fan-out straggler settling, or an orphan a bug left - is archived as it was at the copy.
-func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids, trees, steps, flows string) (stepsStmt, flowsStmt string, flowsArgs []any) {
+func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids string, idArgs []any, trees, steps, flows string) (stepsStmt string, stepsArgs []any, flowsStmt string, flowsArgs []any) {
 	archivedAt, archivedAtArgs := archivedAtSQL(tx.DriverName(), d.archive.DayEnds(d.day))
 	before, from := d.archive.DirectoryHours(d.day)
 	directory := "INSERT INTO " + archiver.DirectoryTable + " (flow_id, day) SELECT flow_id, " + strconv.Itoa(d.day) +
@@ -211,15 +212,16 @@ func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids, tr
 			" named AS (" + fmt.Sprintf(directory, "moved") + ")" +
 			" INSERT INTO " + migrations.FlowsTable(d.day) + " (" + archivedFlowColumns + ", archived_at)" +
 			" SELECT " + archivedFlowColumns + ", " + archivedAt + " FROM moved"
-		return stepsStmt, flowsStmt, archivedAtArgs
+		return stepsStmt, idArgs, flowsStmt, append(slices.Clone(idArgs), archivedAtArgs...)
 	}
 	// An error here surfaces from the statements that follow, which a failed statement aborts on every dialect that
 	// gets here, or from the commit.
 	tx.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(d.day)+" ("+archivedFlowColumns+", archived_at)"+
-		" SELECT "+archivedFlowColumns+", "+archivedAt+" FROM dwarf_flows WHERE root_flow_id IN ("+ids+")", archivedAtArgs...)
-	tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(d.day)+" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")")
-	tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")")
-	return steps, flows, nil
+		" SELECT "+archivedFlowColumns+", "+archivedAt+" FROM dwarf_flows WHERE root_flow_id IN ("+ids+")",
+		append(slices.Clone(archivedAtArgs), idArgs...)...)
+	tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(d.day)+" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")", idArgs...)
+	tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")", idArgs...)
+	return steps, idArgs, flows, idArgs
 }
 
 // liveOnlyColumn is the one column of dwarf_flows the day tables do not have: a live root's archive attempt, which

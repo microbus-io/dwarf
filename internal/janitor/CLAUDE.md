@@ -452,15 +452,19 @@ transaction, and then never finishes: the delete wall.
   counts) with the children's own bytes, halving the run of children until it fits; a child larger than what is left
   has a budget's worth of its steps deleted. **Do not size the children with a full `COUNT ... GROUP BY`**: it recounts
   a large child's remaining steps on every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at
-  4,000 steps a child). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a literal
-  list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's own steps
+  4,000 steps a child). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by bound
+  lists (`database.IDList`, two at the default budget of 4,000): a range or an ordered `DELETE` with a limit is not
+  portable, a range is not contiguous in a flow's steps anyway, and the read stays bounded by the flow's own steps
   only with that index keyed on `(flow_id, step_id)`. **On PostgreSQL every chunk transaction turns bitmap scans off
   first** (`boundReads`, deleting and copying alike): with no statistics on a large flow - written since the last
   ANALYZE - the planner reads its steps by a bitmap scan of the flow index and sorts them, every remaining step of the
   flow on every chunk; without the bitmap scan it walks the index in order and stops at the limit. The 1% ANALYZE
   trigger on `dwarf_steps` narrows that window and cannot close it, so do not rely on statistics for the bound
   (`TestChunk_APopulatedStepReadStopsAtItsBudget`, a populated table with none; `TestChunk_TheStepBoundaryWalksTheFlowsIndex`,
-  the plan at the production budget on every dialect but SQL Server).
+  the plan at the production budget on every dialect but SQL Server). **The same statement forces a custom plan**
+  (`plan_cache_mode`): every chunk statement is bound and prepared once per connection, and PostgreSQL may move a
+  prepared statement to a generic plan after five runs, planned without the values and not replanned when the
+  transaction turns bitmap scans off.
 - **A budget is rows and bytes, and a chunk stops at whichever it reaches first** (`limit`, `size.go`), the byte counts
   read from the `*_bytes` columns, so no payload is read to size it. **A chunk takes at least one step only while it
   has taken nothing** (`stepsWithin`'s `fresh`): a step over the whole budget then goes alone, and a chunk that already

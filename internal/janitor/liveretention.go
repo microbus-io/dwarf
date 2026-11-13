@@ -84,9 +84,9 @@ func (l *LiveRetention) SetGrace(d time.Duration) {
 	l.grace = d
 }
 
-// SetBatch sets how many roots one transaction stamps at most (512).
+// SetBatch sets how many roots one transaction stamps at most (500, at most database.MaxListIDs).
 func (l *LiveRetention) SetBatch(roots int) {
-	l.batchRoots = roots
+	l.batchRoots = min(roots, database.MaxListIDs)
 }
 
 // attach creates the job's instruments on j's meter, and registers its gauges.
@@ -212,7 +212,8 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 	}
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped, flows = 0, 0
-		locked, err := lockRoots(ctx, tx, "", true, "flow_id IN ("+database.IntList(roots)+") AND "+due, dueArgs...)
+		ph, args := database.IDList(roots)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id IN ("+ph+") AND "+due, append(args, dueArgs...)...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
@@ -220,8 +221,9 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 			return err
 		}
 		none, noneArg := NoAttemptSQL(tx.DriverName())
+		ph, args = database.IDList(locked)
 		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+
-			", updated_at=NOW_UTC() WHERE flow_id IN ("+database.IntList(locked)+")", noneArg); err != nil {
+			", updated_at=NOW_UTC() WHERE flow_id IN ("+ph+")", append([]any{noneArg}, args...)...); err != nil {
 			return errors.Trace(err)
 		}
 		stamped = len(locked)
@@ -238,8 +240,9 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 
 // flowsOf returns how many live flows the tree of each of roots holds.
 func flowsOf(ctx context.Context, q sequel.Executor, roots []int) (map[int]int, error) {
+	ph, args := database.IDList(roots)
 	rows, err := q.QueryContext(ctx, "SELECT root_flow_id, COUNT(*) FROM dwarf_flows WHERE root_flow_id IN ("+
-		database.IntList(roots)+") GROUP BY root_flow_id")
+		ph+") GROUP BY root_flow_id", args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}

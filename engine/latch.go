@@ -20,9 +20,9 @@ import (
 	"context"
 	"maps"
 	"slices"
-	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/latch"
 	"github.com/microbus-io/dwarf/workflow"
@@ -30,10 +30,9 @@ import (
 )
 
 const (
-	// latchResolveChunk caps how many flow ids ride in one IN list. SQL Server's 2,100-parameter ceiling is
-	// the tightest of the four dialects and sets this; a chunk well under it also keeps one slow shard's
-	// statement from carrying every awaiter on the replica.
-	latchResolveChunk = 512
+	// latchResolveChunk caps how many flow ids ride in one IN list: a length database.IDList pads to, well under
+	// its MaxListIDs, so one slow shard's statement does not carry every awaiter on the replica.
+	latchResolveChunk = 500
 	// flowUnresolved releases a caller parked on a key that names no row. It is NOT a flow status and never
 	// reaches one: the woken caller reads the flow and reports the not-found it finds. It only has to be a
 	// value no real status collides with, since a release is what carries meaning here, not its content.
@@ -200,11 +199,11 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, shard int, flowKeys []
 		for i, flowKey := range chunk {
 			_, _, ids[i], _, _ = keys.ParseFlowKey(flowKey) // parsed once already, so it cannot fail here
 		}
-		binds := latchPadBinds(ids)
+		// Padded to one of a few lengths: the statement runs several times a second for as long as anyone awaits.
+		ph, binds := database.IDList(ids)
 		// Deliberately UNFILTERED on status - the filter is applied in Go, see above.
 		rows, err := db.QueryContext(ctx,
-			"SELECT flow_id, flow_token, created_hour, status FROM dwarf_flows WHERE flow_id IN ("+
-				strings.Repeat("?,", len(binds)-1)+"?)", binds...)
+			"SELECT flow_id, flow_token, created_hour, status FROM dwarf_flows WHERE flow_id IN ("+ph+")", binds...)
 		if err != nil {
 			fail(err)
 			continue
@@ -239,31 +238,6 @@ func (e *Engine) resolveStoppedFlows(ctx context.Context, shard int, flowKeys []
 		}
 	}
 	return settled, errors.Join(failures...)
-}
-
-// latchPadBinds turns one chunk of flow ids into bind arguments, padded up to the next bucket size by
-// repeating the last id.
-//
-// Arity is part of the statement TEXT, so an unbucketed list produces a distinct prepared statement for
-// every awaiter count the replica happens to hold - one hard parse each, on a statement that runs several
-// times a second forever. Rounding to these ten sizes bounds the query-text set at ten per shard.
-// Repeating an id is free: IN is a set test, so a duplicate matches the same row and returns it once.
-func latchPadBinds(ids []int) []any {
-	size := len(ids)
-	for _, bucket := range []int{1, 2, 4, 8, 16, 32, 64, 128, 256, latchResolveChunk} {
-		if bucket >= len(ids) {
-			size = bucket
-			break
-		}
-	}
-	binds := make([]any, 0, size)
-	for _, id := range ids {
-		binds = append(binds, id)
-	}
-	for len(binds) < size {
-		binds = append(binds, ids[len(ids)-1])
-	}
-	return binds
 }
 
 // isStoppedStatus reports whether a flow has reached a status Await returns on. `interrupted` counts: it

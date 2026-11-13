@@ -714,14 +714,14 @@ func TestMove_TheSizingSeeksEachFlowsSteps(t *testing.T) {
 	if r.db.DriverName() != "pgx" {
 		t.Skip("the plan pinned here is PostgreSQL's")
 	}
-	stmt := treesSizesUpToSQL(r.db.DriverName(), "", []int{1, 2}, []int{1001, 4097})
+	stmt, args := treesSizesUpToSQL(r.db.DriverName(), "", []int{1, 2}, []int{1001, 4097})
 	var plan strings.Builder
 	errRollback := errors.New("rollback")
 	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_nestloop = off"); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, "EXPLAIN "+stmt)
+		rows, err := tx.QueryContext(ctx, "EXPLAIN "+stmt, args...)
 		if err != nil {
 			return err
 		}

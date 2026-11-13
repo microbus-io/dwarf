@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
-	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
@@ -63,7 +62,7 @@ func archiveTree(t *testing.T, r *rig, root, day int) []int {
 func markArchived(t *testing.T, r *rig, day int, roots ...int) {
 	t.Helper()
 	if _, err := r.db.ExecContext(t.Context(), "UPDATE "+migrations.FlowsTable(day)+" SET delete_after_ms=1 WHERE flow_id IN ("+
-		database.IntList(roots)+")"); err != nil {
+		idsSQL(roots)+")"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -71,7 +70,7 @@ func markArchived(t *testing.T, r *rig, day int, roots ...int) {
 // archivedRows counts the flows and steps of flows in day's tables, and the directory's rows for them.
 func archivedRows(t *testing.T, r *rig, day int, flows []int) (f, s, named int) {
 	t.Helper()
-	list := database.IntList(flows)
+	list := idsSQL(flows)
 	for _, q := range []struct {
 		sql string
 		n   *int

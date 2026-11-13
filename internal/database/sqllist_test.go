@@ -40,11 +40,35 @@ func TestSQLList_TerminalStatusesAreTheClosedOnes(t *testing.T) {
 	}
 }
 
-// TestSQLList_IntList pins IntList's spelling: the ids in order, comma-separated, nothing for none.
-func TestSQLList_IntList(t *testing.T) {
+// TestSQLList_IDList pins IDList's lengths: a list padded up to the first of 4, 20, 100, 500 and MaxListIDs that holds
+// it, by repeating its last id, so a statement takes one of five texts; and a list of none or of more than MaxListIDs
+// refused.
+func TestSQLList_IDList(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	assert.Equal("", IntList(nil))
-	assert.Equal("7", IntList([]int{7}))
-	assert.Equal("3,1,2", IntList([]int{3, 1, 2}))
+	ph, args := IDList([]int{7})
+	assert.Equal("?,?,?,?", ph)
+	assert.Equal([]any{7, 7, 7, 7}, args)
+	ph, args = IDList([]int{3, 1, 2, 9, 5})
+	assert.Equal(20, strings.Count(ph, "?"))
+	assert.Equal([]any{3, 1, 2, 9, 5}, args[:5])
+	for _, a := range args[5:] {
+		assert.Equal(5, a)
+	}
+	for n, arity := range map[int]int{4: 4, 21: 100, 100: 100, 101: 500, 501: MaxListIDs, MaxListIDs: MaxListIDs} {
+		ids := make([]int, n)
+		for i := range ids {
+			ids[i] = i + 1
+		}
+		ph, args := IDList(ids)
+		assert.Equal(arity, strings.Count(ph, "?"), "%d ids", n)
+		assert.Len(args, arity, "%d ids", n)
+	}
+	panics := func(ids []int) (p bool) {
+		defer func() { p = recover() != nil }()
+		IDList(ids)
+		return false
+	}
+	assert.True(panics([]int{}), "no ids")
+	assert.True(panics(make([]int, MaxListIDs+1)), "more than MaxListIDs")
 }

@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -100,7 +101,7 @@ func NewLargeArchiving(archive *archiver.Archive, retentionDays int) *LargeArchi
 	return &LargeArchiving{archive: archive, retentionDays: retentionDays, batchRows: defaultBatchRows, batchBytes: defaultBatchBytes}
 }
 
-// SetBatch sets one chunk of a copy: about how many rows (4,096) and payload bytes (16 MiB; 0 sets no byte limit) one
+// SetBatch sets one chunk of a copy: about how many rows (4,000) and payload bytes (16 MiB; 0 sets no byte limit) one
 // transaction copies - at least one row.
 func (l *LargeArchiving) SetBatch(rows, bytes int) {
 	l.batchRows, l.batchBytes = rows, bytes
@@ -445,7 +446,6 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 	a := l.archive
 	seams := l.j.diags.Seams()
 	driver := h.DriverName()
-	id := strconv.Itoa(root)
 	day := archiver.DayOf(pos.at, a.DayLength())
 	c := &stageCopy{
 		driver: driver, at: pos.at, dayEnds: a.DayEnds(day), day: day,
@@ -460,8 +460,8 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 		if err := boundReads(ctx, tx); err != nil {
 			return err
 		}
-		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND status IN ("+database.TerminalStatusesSQL+")"+
-			" AND surgraph_flow_id=0 AND delete_after_ms=0 AND archive_attempt_at="+atExpr, atArg)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id=? AND status IN ("+database.TerminalStatusesSQL+")"+
+			" AND surgraph_flow_id=0 AND delete_after_ms=0 AND archive_attempt_at="+atExpr, root, atArg)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -481,7 +481,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 			// holds of this attempt: descendants are copied in flow_id order and each flow row after its steps, so every
 			// descendant up to the largest there is whole, and their count numbers the next one's stamp group.
 			if err := tx.QueryRowContext(ctx, "SELECT COUNT(*), COALESCE(MAX(flow_id), 0) FROM "+c.flows+
-				" WHERE root_flow_id="+id+" AND flow_id<>"+id).Scan(&at.seen, &at.after); err != nil {
+				" WHERE root_flow_id=? AND flow_id<>?", root, root).Scan(&at.seen, &at.after); err != nil {
 				return errors.Trace(err)
 			}
 			children, _, open, err := descendantsAfter(ctx, tx, root, at.after)
@@ -495,7 +495,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 			if len(children) > 0 {
 				at.flow = children[0]
 			}
-			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(step_id), 0) FROM "+c.steps+" WHERE flow_id="+strconv.Itoa(at.flow)).Scan(&at.stepAfter); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(step_id), 0) FROM "+c.steps+" WHERE flow_id=?", at.flow).Scan(&at.stepAfter); err != nil {
 				return errors.Trace(err)
 			}
 			// No partial child: keep the ordinary batched descendant path.
@@ -555,9 +555,9 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 				at.flow, at.stepAfter = children[0], last
 				return nil
 			}
-			list := database.IntList(children[:run])
+			list, args := database.IDList(children[:run])
 			res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.flow_id IN ("+list+")"+
-				" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)")
+				" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)", args...)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -597,7 +597,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 			// own day is gone, which a statement on it proves (the archive's record may be stale) and which replaces the
 			// attempt rather than waiting for a day that is never made again.
 			var one int
-			err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+c.flows+" WHERE flow_id="+id).Scan(&one)
+			err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+c.flows+" WHERE flow_id=?", root).Scan(&one)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -608,7 +608,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 		if err := c.flowRows(ctx, tx, []int{root}, groups*stageGroup); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archived_at=(SELECT archived_at FROM "+c.flows+" WHERE flow_id="+id+") WHERE flow_id="+id); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archived_at=(SELECT archived_at FROM "+c.flows+" WHERE flow_id=?) WHERE flow_id=?", root, root); err != nil {
 			return errors.Trace(err)
 		}
 		published = at.seen + 1
@@ -618,7 +618,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 		return 0, 0, false, errors.Trace(err)
 	}
 	*pos = at
-	if seams.Enabled() && seams.IsFault(diagnostics.Join(diagnostics.FaultReapStageLost, id)) {
+	if seams.Enabled() && seams.IsFault(diagnostics.Join(diagnostics.FaultReapStageLost, strconv.Itoa(root))) {
 		return 0, c.copied, false, errors.New("injected fault: " + diagnostics.FaultReapStageLost)
 	}
 	return published, c.copied, done, nil
@@ -644,18 +644,21 @@ func (c *stageCopy) inserted(res sql.Result) {
 
 // stepsFrom copies steps of flow after the step after, in step_id order, up to budget - at least one, whatever its
 // bytes, when fresh - and returns their size, the last one's id, and more when the budget, not the flow, ended them.
-// The ids are read first and copied by a literal list.
+// The ids are read first and copied by bound lists of at most database.MaxListIDs.
 func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after int, budget limit, fresh bool) (sz size, last int, more bool, err error) {
 	ids, sz, more, err := stepsWithin(ctx, tx, "", flow, after, budget, fresh)
 	if err != nil || len(ids) == 0 {
 		return size{}, after, more, errors.Trace(err)
 	}
-	res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+database.IntList(ids)+")"+
-		" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)")
-	if err != nil {
-		return size{}, after, false, errors.Trace(err)
+	for chunk := range slices.Chunk(ids, database.MaxListIDs) {
+		ph, args := database.IDList(chunk)
+		res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+ph+")"+
+			" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)", args...)
+		if err != nil {
+			return size{}, after, false, errors.Trace(err)
+		}
+		c.inserted(res)
 	}
-	c.inserted(res)
 	return sz, ids[len(ids)-1], more, nil
 }
 
@@ -672,23 +675,23 @@ func (c *stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, fi
 			return errors.New("the tree's archive times run past the end of day %d", c.day)
 		}
 		expr, arg := database.SQLTime(c.driver, stamp)
-		list := database.IntList(flows[i:j])
+		list, args := database.IDList(flows[i:j])
 		res, err := tx.ExecContext(ctx, "INSERT INTO "+c.flows+" ("+archivedFlowColumns+", archived_at)"+
 			" SELECT "+archivedFlowColumns+", "+expr+" FROM dwarf_flows f WHERE f.flow_id IN ("+list+")"+
-			" AND NOT EXISTS (SELECT 1 FROM "+c.flows+" a WHERE a.flow_id=f.flow_id)", arg)
+			" AND NOT EXISTS (SELECT 1 FROM "+c.flows+" a WHERE a.flow_id=f.flow_id)", append([]any{arg}, args...)...)
 		if err != nil {
 			return errors.Trace(err)
 		}
 		c.inserted(res)
 		// A replaced attempt moves a flow's directory row from the dropped day to this one.
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+list+")"+
-			" AND day<>"+strconv.Itoa(c.day)); err != nil {
+			" AND day<>"+strconv.Itoa(c.day), args...); err != nil {
 			return errors.Trace(err)
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO "+archiver.DirectoryTable+" (flow_id, day) SELECT flow_id, "+
 			strconv.Itoa(c.day)+" FROM dwarf_flows f WHERE f.flow_id IN ("+list+")"+
 			" AND (f.created_hour<"+strconv.Itoa(c.dirBefore)+" OR f.created_hour>="+strconv.Itoa(c.dirFrom)+")"+
-			" AND NOT EXISTS (SELECT 1 FROM "+archiver.DirectoryTable+" x WHERE x.flow_id=f.flow_id)"); err != nil {
+			" AND NOT EXISTS (SELECT 1 FROM "+archiver.DirectoryTable+" x WHERE x.flow_id=f.flow_id)", args...); err != nil {
 			return errors.Trace(err)
 		}
 		i = j

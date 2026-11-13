@@ -18,7 +18,6 @@ package janitor
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -50,8 +49,9 @@ func AttemptedSQL(driver string) string {
 // attemptsAmong returns the roots among roots that have an archive attempt: one primary-key read of the roots.
 func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int]bool, error) {
 	none, arg := NoAttemptSQL(q.DriverName())
-	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+database.IntList(roots)+")"+
-		" AND archive_attempt_at>"+none, arg)
+	ph, args := database.IDList(roots)
+	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+ph+")"+
+		" AND archive_attempt_at>"+none, append(args, arg)...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -78,10 +78,9 @@ var errNotToday = errors.New("the attempt's time is not in today's archive day")
 // attempt holds: root not due, held, or no room to start one. The attempt is the tree's identity and its day
 // (archiver.DayOf), so every copier of one attempt writes the same rows.
 func claimAttempt(ctx context.Context, h handle, root int, due string, dueArgs []any, d *filingDay, stale time.Time) (at time.Time, ok bool, err error) {
-	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		at, ok = time.Time{}, false
-		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id=? AND "+due, append([]any{root}, dueArgs...)...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
@@ -95,7 +94,7 @@ func claimAttempt(ctx context.Context, h handle, root int, due string, dueArgs [
 		if !d.startable() {
 			return nil // no room left in the day, or tomorrow not whole: a later round starts it
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at=NOW_UTC() WHERE flow_id="+id); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at=NOW_UTC() WHERE flow_id=?", root); err != nil {
 			return errors.Trace(err)
 		}
 		if at, err = attemptOf(ctx, tx, root); err != nil {

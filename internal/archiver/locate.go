@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -42,8 +43,8 @@ func VisibleSQL(f, r string) string {
 	return "((" + f + ".root_flow_id=" + f + ".flow_id AND " + f + ".delete_after_ms=0) OR " + r + ".delete_after_ms=0)"
 }
 
-// forgetBatch is how many of the directory's expired rows one statement deletes.
-const forgetBatch = 4096
+// forgetBatch is how many of the directory's expired rows one statement deletes: one bound list.
+const forgetBatch = database.MaxListIDs
 
 // LocateFlow returns the day whose archive tables hold the flow with the given id and creation hour, if it is
 // archived, and a 404 if no day does. It does not check the flow's token: the caller's read of the day's tables, with
@@ -180,14 +181,14 @@ func (a *Archive) forgetDaysBefore(ctx context.Context, day int) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		var ids []string
+		var ids []int
 		for rows.Next() {
-			var id int64
+			var id int
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
 				return errors.Trace(err)
 			}
-			ids = append(ids, strconv.FormatInt(id, 10))
+			ids = append(ids, id)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -199,10 +200,10 @@ func (a *Archive) forgetDaysBefore(ctx context.Context, day int) error {
 		if a.forgetSelected != nil {
 			a.forgetSelected()
 		}
-		// The ids are integers read back from the table, embedded as literals to stay under every driver's bind limit.
 		// The day bound is repeated: a flow's row can move to a later day between the select and the delete (an
 		// archive attempt replaced after its day dropped), and deleting by flow_id alone would take the new row.
-		_, err = a.db.ExecContext(ctx, "DELETE FROM "+DirectoryTable+" WHERE flow_id IN ("+strings.Join(ids, ",")+") AND day<?", day)
+		ph, args := database.IDList(ids)
+		_, err = a.db.ExecContext(ctx, "DELETE FROM "+DirectoryTable+" WHERE flow_id IN ("+ph+") AND day<?", append(args, day)...)
 		if err != nil {
 			return errors.Trace(err)
 		}

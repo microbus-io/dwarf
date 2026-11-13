@@ -342,20 +342,19 @@ type Engine struct {
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
 	sweepOverdue        time.Duration // how long past due a root waits before a sweep takes it (30s)
-	reapBatch           int           // due roots one janitor batch considers (512)
-	reapBatchRows       int           // about how many rows one janitor batch moves, at least one tree (8192)
+	reapBatch           int           // due roots one janitor batch considers (500)
+	reapBatchRows       int           // about how many rows one janitor batch moves, at least one tree (4000)
 	reapBatchBytes      int           // about how many payload bytes one janitor batch moves, at least one tree (16 MiB)
 	reapStageRows       int           // the tree size above which archival is staged (256k); 0, never
 	reapStageBytes      int           // the tree payload above which archival is staged (128 MiB); 0, no byte threshold
-	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
-	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
-	// keeps an order of magnitude under it.
+	// purgeChunk is how many roots one Purge statement marks, at most database.MaxListIDs, the most one bound list
+	// holds; a field so a test can drive several chunks.
 	purgeChunk int
 	// The expiration pass (expiration.go), which the janitor's expiration job runs: how long one pass may keep reading
 	// and starting terminations (30s), and how many rows one page of its walk reads (256).
 	expireBudget       time.Duration
 	expirePage         int
-	leaseRecoveryBatch int // ids per lease-recovery reset, embedded as a literal IN list (1024)
+	leaseRecoveryBatch int // ids per lease-recovery reset, at most database.MaxListIDs (2000)
 	maxPayloadBytes    int // largest JSON value written into one payload column (maxPayloadBytes)
 	// persistBackoff is the outcome-write retry schedule (1s doubling to 32s, a minute in all), exponential
 	// because the errors it exists for - a dropped connection, a failover - clear in seconds to tens of seconds. A
@@ -411,20 +410,22 @@ func NewEngine() *Engine {
 	e.deletionGrace = 1 * time.Minute
 	e.archiveGrace = 1 * time.Minute
 	e.sweepOverdue = janitor.DefaultSweepOverdue
-	// A batch about 0.25 s at most on a 32 vCPU PostgreSQL under a saturated bench, where a transaction moved about
-	// 13 us a small row and 7.8 ms a MB of payload: 8,192 rows and 16 MiB together take ~0.24 s. A tree past the
-	// staging threshold is copied a batch at a time; one below it moves whole, alone in its batch if it must - up to
-	// ~3.4 s at 256k small rows, ~1 s at 128 MB, neither of which moved the bench's commit latency.
-	e.reapBatch = 512
-	e.reapBatchRows = 8192
+	// A batch under about 0.25 s on a 32 vCPU PostgreSQL under a saturated bench, where a transaction moved about
+	// 13 us a small row and 7.8 ms a MB of payload: 4,000 rows and 16 MiB together take ~0.18 s. The roots are one
+	// bound list of a length database.IDList pads to (500), and a large tree's chunk deletes or copies its step ids in
+	// two lists of database.MaxListIDs. A tree past the staging threshold is copied a batch at a time; one below it
+	// moves whole, alone in its batch if it must - up to ~3.4 s at 256k small rows, ~1 s at 128 MB, neither of which
+	// moved the bench's commit latency.
+	e.reapBatch = 500
+	e.reapBatchRows = 4000
 	e.reapBatchBytes = 16 << 20
 	e.reapStageRows = 256 << 10
 	e.reapStageBytes = 128 << 20
-	e.purgeChunk = 4096
+	e.purgeChunk = database.MaxListIDs
 	e.expireBudget = 30 * time.Second
 	e.expirePage = 256
 	e.retentionDays = defaultRetentionDays
-	e.leaseRecoveryBatch = 1024
+	e.leaseRecoveryBatch = database.MaxListIDs
 	e.maxPayloadBytes = maxPayloadBytes
 	// Test-only instrumentation seams (see engineundertest.go), enabled under testing.Testing(). Every consult is a
 	// lock-free bool read in production. The per-flow flow-row-write counter is a counting checkpoint on these same

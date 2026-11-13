@@ -189,6 +189,10 @@ matching one before working there:**
   generation returned by the claim CAS) and treat a zero-row match as a benign no-op (`return nil`, never an
   error) - otherwise a slow or DB-clock-skewed "zombie" worker corrupts or terminalizes a peer's healthy
   re-execution. Execution is at-least-once; the fence protects *state*, not side effects. (`engine/CLAUDE.md`)
+- **Ids are bound, never written into SQL:** every distinct statement text is prepared and cached per connection,
+  so an id in the text grows every connection's cache without bound (measured ~3 MB of PostgreSQL backend memory per
+  cached statement carrying 8,192 ids). Bind ids; bind a list with `database.IDList` (padded to one of five lengths,
+  at most `database.MaxListIDs` = 2,000 a statement). (`internal/migrations/CLAUDE.md`)
 - **Status literals, not binds:** in a `WHERE` clause, inline the status constant
   (`"...WHERE status='"+workflow.StatusRunning+"'..."`), never bind it (`status=?`) - a bound status defeats the
   SQL Server / SQLite filtered index (and, for the lists' `ORDER BY ... LIMIT`, the cardinality estimate). A

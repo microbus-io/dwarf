@@ -215,7 +215,7 @@ it for every archived read.
   writes only into a day `ensure` saw whole, and a drop is of an expired day). With its flows table gone it reads as
   dropped; with its steps table gone its flows table answers, empty.
 - **Retention deletes a day's directory rows** (`forgetDaysBefore`, every `Maintain` pass and `DropBefore`), by a bound
-  rather than per day dropped, so rows a failed pass left behind go with the next, `forgetBatch` (4,096) rows at a time -
+  rather than per day dropped, so rows a failed pass left behind go with the next, `forgetBatch` (2,000, one bound list) rows at a time -
   a select of their ids by the day index, then a delete by those ids - so a day of long-running flows is not one long
   delete. **The delete repeats the day bound** (`AND day<?`): an archive attempt replaced after its day dropped moves a
   flow's row to a later day, and a delete by `flow_id` alone between the select and it would take the new row, leaving

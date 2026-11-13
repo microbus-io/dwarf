@@ -35,15 +35,30 @@ var TerminalStatuses = []string{
 const TerminalStatusesSQL = "'" + workflow.StatusCompleted + "', '" + workflow.StatusFailed + "', '" +
 	workflow.StatusTerminated + "', '" + workflow.StatusCancelled + "'"
 
-// IntList renders ids as a comma-separated list of literals, to inline into an IN (...) clause. Inlined rather than
-// bound, so it is for ids the caller holds as ints - read from the database - and never for text.
-func IntList(ids []int) string {
-	var b strings.Builder
-	for i, id := range ids {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.Itoa(id))
+// MaxListIDs is the most ids one bound list holds (IDList): a longer list goes out in chunks of at most this many. A
+// statement that binds more than about 100 values beside its list chunks smaller, at one of IDList's lengths, since
+// SQL Server takes at most 2,100 parameters a statement.
+const MaxListIDs = 2000
+
+// listArities are the lengths a bound list takes, shortest first: a list is padded up to the first that holds it.
+var listArities = [...]int{4, 20, 100, 500, MaxListIDs}
+
+// IDList returns the placeholders and the arguments of a bound IN (...) or NOT IN (...) list over 1 to MaxListIDs ids,
+// padded to one of a few lengths by repeating the last id. Bind every id through it; never write one into a statement.
+func IDList[T any](ids []T) (placeholders string, args []any) {
+	if len(ids) == 0 || len(ids) > MaxListIDs {
+		panic("database.IDList: " + strconv.Itoa(len(ids)) + " ids, not 1 to " + strconv.Itoa(MaxListIDs))
 	}
-	return b.String()
+	arity := MaxListIDs
+	for _, a := range listArities {
+		if len(ids) <= a {
+			arity = a
+			break
+		}
+	}
+	args = make([]any, arity)
+	for i := range args {
+		args[i] = ids[min(i, len(ids)-1)]
+	}
+	return strings.Repeat("?,", arity-1) + "?", args
 }

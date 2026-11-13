@@ -19,7 +19,6 @@ package engine
 import (
 	"context"
 	"maps"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -32,33 +31,6 @@ import (
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/testarossa"
 )
-
-func TestLatchPadBinds_RoundsUpToABucket(t *testing.T) {
-	assert := testarossa.For(t)
-
-	// The arity is part of the statement text, so what matters is that many different chunk sizes collapse
-	// onto few distinct lengths - and that the ids themselves all survive the padding.
-	sizes := map[int]bool{}
-	for n := 1; n <= latchResolveChunk; n++ {
-		ids := make([]int, n)
-		for i := range ids {
-			ids[i] = i + 1
-		}
-		binds := latchPadBinds(ids)
-		sizes[len(binds)] = true
-		assert.True(len(binds) >= n, "padding must never drop an id")
-		for i := range ids {
-			assert.Equal(any(ids[i]), binds[i], "the real ids stay in place, ahead of the padding")
-		}
-		// Padding repeats an id already in the chunk, so it can never widen what the query matches.
-		for _, b := range binds[n:] {
-			assert.Equal(any(ids[n-1]), b)
-		}
-	}
-	// Every chunk size from 1 to the cap collapses onto this handful of arities, which is the whole point:
-	// the set of query texts a shard ever sees stays small.
-	assert.Equal([]int{1, 2, 4, 8, 16, 32, 64, 128, 256, latchResolveChunk}, slices.Sorted(maps.Keys(sizes)))
-}
 
 // TestLatchResolve_ReportsStoppedFlowsOnly drives the resolver directly across the four cases it has to
 // tell apart: a stopped flow resolves to its status, a running one stays silent (its caller keeps waiting),

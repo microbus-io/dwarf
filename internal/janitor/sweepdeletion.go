@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
@@ -79,10 +80,10 @@ func (s *SweepDeletion) SetOverdue(d time.Duration) {
 	s.overdue = d
 }
 
-// SetBatch sets one batch at most: how many roots (512), and about how many rows (4,096) and payload bytes (16 MiB; 0
+// SetBatch sets one batch at most: how many roots (500, at most database.MaxListIDs), and about how many rows (4,000) and payload bytes (16 MiB; 0
 // sets no byte limit) one transaction deletes - at least one tree, and one chunk of a larger one.
 func (s *SweepDeletion) SetBatch(roots, rows, bytes int) {
-	s.batchRoots, s.batchRows, s.batchBytes = roots, rows, bytes
+	s.batchRoots, s.batchRows, s.batchBytes = min(roots, database.MaxListIDs), rows, bytes
 }
 
 // attach creates the job's instruments on j's meter, and registers its gauges.

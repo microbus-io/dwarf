@@ -19,28 +19,20 @@ package engine
 import (
 	"cmp"
 	"slices"
-	"strings"
+
+	"github.com/microbus-io/dwarf/internal/database"
 )
 
-// inListChunk is the most ids one bound IN (...) list carries. SQL Server rejects a statement with more than
-// 2,100 parameters, the tightest ceiling of the four dialects, so an id list whose length the workload sets - a
-// cohort's members, a subgraph tree's flows - goes out in chunks of this many, with room left for the
-// statement's other binds and for a statement that binds the list twice.
-const inListChunk = 512
+// inListChunk is the most ids one bound IN (...) list carries in the engine: an id list whose length the workload
+// sets - a cohort's members, a subgraph tree's flows - goes out in chunks of this many. It is one of database.IDList's
+// lengths, below database.MaxListIDs, because some statements bind more beside the list - a CASE arm of two binds per
+// id, about 1,500 binds a chunk - and SQL Server takes at most 2,100 parameters a statement.
+const inListChunk = 500
 
-// inList returns the placeholders and arguments of an IN (...) list over one chunk of at most inListChunk ids.
-// The list is padded up to a power of two by repeating the last id, which leaves the set unchanged, so the
-// statement text takes one of a few arities rather than one per length.
+// inList returns the placeholders and arguments of an IN (...) list over one chunk of at most inListChunk ids, padded
+// to one of database.IDList's few lengths.
 func inList[T any](ids []T) (placeholders string, args []any) {
-	arity := 1
-	for arity < len(ids) {
-		arity *= 2
-	}
-	args = make([]any, arity)
-	for i := range args {
-		args[i] = ids[min(i, len(ids)-1)]
-	}
-	return strings.Repeat("?,", arity-1) + "?", args
+	return database.IDList(ids)
 }
 
 // lockOrder returns flow ids ascending, as a copy, for statements that take row locks chunk by chunk. One

@@ -198,14 +198,14 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context) {
 		if len(stepIDs) > 0 {
 			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointLeaseRecoverySelected)
 		}
-		// e.leaseRecoveryBatch caps each UPDATE's literal `IN (...)` list. One batch covers any realistic pass.
+		// e.leaseRecoveryBatch caps each UPDATE's bound IN (...) list. One batch covers any realistic pass.
 		for len(stepIDs) > 0 {
-			batch := stepIDs[:min(len(stepIDs), e.leaseRecoveryBatch)]
+			batch := stepIDs[:min(len(stepIDs), e.leaseRecoveryBatch, database.MaxListIDs)]
 			stepIDs = stepIDs[len(batch):]
-			// ids are trusted integers embedded as literals to dodge the per-driver bind-param ceiling.
+			ph, args := database.IDList(batch)
 			res, err := db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+database.IntList(batch)+") AND "+expired,
-				workflow.StatusPending,
+				"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND "+expired,
+				append([]any{workflow.StatusPending}, args...)...,
 			)
 			if err != nil {
 				e.logSweepError(ctx, "Lease recovery sweep", "shard", shard, "error", err)

@@ -1349,7 +1349,7 @@ func treeSize(t *testing.T, r *rig, flows, steps string, ids []int) size {
 	t.Helper()
 	var f, s size
 	ctx := t.Context()
-	list := database.IntList(ids)
+	list := idsSQL(ids)
 	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*), COALESCE(SUM("+flowBytesSQL+"), 0) FROM "+flows+
 		" WHERE flow_id IN ("+list+")").Scan(&f.rows, &f.bytes); err != nil {
 		t.Fatal(err)

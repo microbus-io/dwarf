@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"database/sql"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -38,8 +39,8 @@ const treeChunk = 256
 // payload bytes, and whether any of them is not closed.
 func descendantsAfter(ctx context.Context, tx *sequel.Tx, root, after int) (children, bytes []int, open bool, err error) {
 	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL+", CASE WHEN status IN ("+database.TerminalStatusesSQL+") THEN 0 ELSE 1 END"+
-		" FROM dwarf_flows WHERE root_flow_id="+strconv.Itoa(root)+" AND flow_id<>"+strconv.Itoa(root)+
-		" AND flow_id>"+strconv.Itoa(after)+" ORDER BY flow_id LIMIT_OFFSET(?, 0)", treeChunk)
+		" FROM dwarf_flows WHERE root_flow_id=? AND flow_id<>? AND flow_id>? ORDER BY flow_id LIMIT_OFFSET(?, 0)",
+		root, root, after, treeChunk)
 	if err != nil {
 		return nil, nil, false, errors.Trace(err)
 	}
@@ -86,15 +87,17 @@ func stepsSizeUpTo(ctx context.Context, q sequel.Executor, sfx string, flows []i
 	if driver == "mssql" {
 		sum = "COALESCE(SUM(CAST(b AS BIGINT)), 0)"
 	}
-	inner := capped(driver, stepBytesSQL+" AS b FROM dwarf_steps"+sfx+" s WHERE s.flow_id IN ("+database.IntList(flows)+")", limit)
-	err = q.QueryRowContext(ctx, "SELECT COUNT(*), "+sum+" FROM ("+inner+") c").Scan(&sz.rows, &sz.bytes)
+	ph, args := database.IDList(flows)
+	inner, args := capped(driver, stepBytesSQL+" AS b FROM dwarf_steps"+sfx+" s WHERE s.flow_id IN ("+ph+")", args, limit)
+	err = q.QueryRowContext(ctx, "SELECT COUNT(*), "+sum+" FROM ("+inner+") c", args...).Scan(&sz.rows, &sz.bytes)
 	return sz, errors.Trace(err)
 }
 
-// stepsWithinSQL is stepsWithin's read, its limit bound: the steps of flow after the step after, in step_id order.
-func stepsWithinSQL(sfx string, flow, after int) string {
-	return "SELECT s.step_id, " + stepBytesSQL + " FROM dwarf_steps" + sfx + " s WHERE s.flow_id=" + strconv.Itoa(flow) +
-		" AND s.step_id>" + strconv.Itoa(after) + " ORDER BY s.step_id LIMIT_OFFSET(?, 0)"
+// stepsWithinSQL is stepsWithin's read, bound to the flow, the step after and the limit, in that order: the steps of
+// the flow after the step, in step_id order.
+func stepsWithinSQL(sfx string) string {
+	return "SELECT s.step_id, " + stepBytesSQL + " FROM dwarf_steps" + sfx + " s WHERE s.flow_id=? AND s.step_id>?" +
+		" ORDER BY s.step_id LIMIT_OFFSET(?, 0)"
 }
 
 // boundReads keeps a chunk's reads bounded by its budget on PostgreSQL, whatever the planner's statistics: it turns
@@ -102,12 +105,16 @@ func stepsWithinSQL(sfx string, flow, after int) string {
 // statistics on a large flow - a flow written since the last ANALYZE - the planner reads its steps by a bitmap scan
 // of the flow index and sorts them, every remaining step of the flow on every chunk (measured: 40,000 steps scattered
 // at 4% density, about a second a chunk cold); without the bitmap scan it walks the index in order and stops at the
-// limit. The ANALYZE trigger at 1% narrows the window and cannot close it. Elsewhere it does nothing.
+// limit. The ANALYZE trigger at 1% narrows the window and cannot close it.
+//
+// It also plans every statement of the chunk for its own values: the driver keeps each statement prepared, and
+// PostgreSQL may switch a prepared statement to a generic plan after five runs, made without the values - and without
+// this transaction's setting, since a cached plan is not replanned when a setting changes. Elsewhere it does nothing.
 func boundReads(ctx context.Context, tx *sequel.Tx) error {
 	if tx.DriverName() != "pgx" {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off")
+	_, err := tx.ExecContext(ctx, "SELECT set_config('enable_bitmapscan', 'off', true), set_config('plan_cache_mode', 'force_custom_plan', true)")
 	return errors.Trace(err)
 }
 
@@ -116,7 +123,7 @@ func boundReads(ctx context.Context, tx *sequel.Tx) error {
 // least one, so a step over the whole budget goes alone; otherwise it may take none, and the chunk ends there. It reads
 // up to budget's rows, a seek into (flow_id, step_id) whatever else the table holds.
 func stepsWithin(ctx context.Context, tx *sequel.Tx, sfx string, flow, after int, budget limit, fresh bool) (ids []int, sz size, more bool, err error) {
-	rows, err := tx.QueryContext(ctx, stepsWithinSQL(sfx, flow, after), max(budget.rows, 1))
+	rows, err := tx.QueryContext(ctx, stepsWithinSQL(sfx), flow, after, max(budget.rows, 1))
 	if err != nil {
 		return nil, size{}, false, errors.Trace(err)
 	}
@@ -152,7 +159,7 @@ func rowFits(left limit, fresh bool, taken size, rowBytes int) bool {
 // flowBytes reads the payload bytes of the live flow row of flow.
 func flowBytes(ctx context.Context, tx *sequel.Tx, sfx string, flow int) (int, error) {
 	var n int
-	err := tx.QueryRowContext(ctx, "SELECT "+flowBytesSQL+" FROM dwarf_flows"+sfx+" WHERE flow_id="+strconv.Itoa(flow)).Scan(&n)
+	err := tx.QueryRowContext(ctx, "SELECT "+flowBytesSQL+" FROM dwarf_flows"+sfx+" WHERE flow_id=?", flow).Scan(&n)
 	return n, errors.Trace(err)
 }
 
@@ -187,7 +194,6 @@ func (c chunkPos) stepsFrom(flow int) int {
 // more than one of a thousand. A chunk always takes at least one row, so one row over the byte budget still goes,
 // alone.
 func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx string, root int, budget limit, pos *chunkPos) (deleted removal, done bool, err error) {
-	id := strconv.Itoa(root)
 	// midTree fails a chunk after it deleted steps and before their flows, so a test proves the chunk rolls back whole.
 	midTree := func() error {
 		if seams.IsFault(diagnostics.FaultReapMidTree) {
@@ -200,13 +206,14 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 	if archived {
 		marked = markedSQL
 	}
-	dropFlows := func(tx *sequel.Tx, list string) (int, error) {
+	dropFlows := func(tx *sequel.Tx, flows ...int) (int, error) {
+		list, args := database.IDList(flows)
 		if archived {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+list+")"); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+list+")", args...); err != nil {
 				return 0, errors.Trace(err)
 			}
 		}
-		res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" WHERE flow_id IN ("+list+")")
+		res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" WHERE flow_id IN ("+list+")", args...)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -220,7 +227,7 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 		if err := boundReads(ctx, tx); err != nil {
 			return err
 		}
-		locked, err := lockRoots(ctx, tx, sfx, true, "flow_id="+id+" AND "+marked)
+		locked, err := lockRoots(ctx, tx, sfx, true, "flow_id=? AND "+marked, root)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -231,7 +238,7 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 		if !archived {
 			// Counted under the root lock: a published tree's live copy is deleted, not reaped.
 			cond, args := publishedSQL(tx.DriverName())
-			if err := tx.QueryRowContext(ctx, "SELECT CASE WHEN "+cond+" THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id="+id, args...).Scan(&published); err != nil {
+			if err := tx.QueryRowContext(ctx, "SELECT CASE WHEN "+cond+" THEN 1 ELSE 0 END FROM dwarf_flows WHERE flow_id=?", append(args, root)...).Scan(&published); err != nil {
 				return errors.Trace(err)
 			}
 		}
@@ -259,7 +266,7 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 				if err := midTree(); err != nil {
 					return errors.Trace(err)
 				}
-				flows, err := dropFlows(tx, strconv.Itoa(children[0]))
+				flows, err := dropFlows(tx, children[0])
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -282,14 +289,14 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 				at.stepFlow, at.stepAfter = children[0], last
 				return errors.Trace(midTree())
 			}
-			list := database.IntList(children[:run])
-			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE flow_id IN ("+list+")"); err != nil {
+			list, args := database.IDList(children[:run])
+			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE flow_id IN ("+list+")", args...); err != nil {
 				return errors.Trace(err)
 			}
 			if err := midTree(); err != nil {
 				return errors.Trace(err)
 			}
-			flows, err := dropFlows(tx, list)
+			flows, err := dropFlows(tx, children[:run]...)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -335,19 +342,19 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 			locking = " FOR UPDATE"
 		}
 		var rest []int
-		if rest, err = firstID(ctx, tx, "SELECT flow_id FROM dwarf_flows"+sfx+" WHERE root_flow_id="+id+" AND flow_id>"+
-			strconv.Itoa(max(at.top, root))+" ORDER BY flow_id LIMIT_OFFSET(1, 0)"+locking); err != nil || len(rest) > 0 {
+		if rest, err = firstID(ctx, tx, "SELECT flow_id FROM dwarf_flows"+sfx+" WHERE root_flow_id=? AND flow_id>?"+
+			" ORDER BY flow_id LIMIT_OFFSET(1, 0)"+locking, root, max(at.top, root)); err != nil || len(rest) > 0 {
 			// A descendant newer than any the chunks read keeps the root, and the descendant read starts over from the
 			// newest: kept, the position reads only below what it walked, so it would never see this one, and every
 			// chunk after would end here.
 			at.top, at.below = 0, 0
 			return errors.Trace(err)
 		}
-		if rest, err = firstID(ctx, tx, "SELECT step_id FROM dwarf_steps"+sfx+" WHERE flow_id="+id+" AND step_id>"+
-			strconv.Itoa(from)+" ORDER BY step_id LIMIT_OFFSET(1, 0)"+locking); err != nil || len(rest) > 0 {
+		if rest, err = firstID(ctx, tx, "SELECT step_id FROM dwarf_steps"+sfx+" WHERE flow_id=? AND step_id>?"+
+			" ORDER BY step_id LIMIT_OFFSET(1, 0)"+locking, root, from); err != nil || len(rest) > 0 {
 			return errors.Trace(err)
 		}
-		rows, err := dropFlows(tx, id)
+		rows, err := dropFlows(tx, root)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -371,12 +378,12 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 // descendantsBelow returns up to treeChunk of root's live descendants below the flow below - all of them, when below is
 // 0 - newest first, with their payload bytes.
 func descendantsBelow(ctx context.Context, tx *sequel.Tx, sfx string, root, below int) (children, bytes []int, err error) {
-	cond := ""
+	cond, args := "", []any{root, root}
 	if below > 0 {
-		cond = " AND flow_id<" + strconv.Itoa(below)
+		cond, args = " AND flow_id<?", append(args, below)
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL+" FROM dwarf_flows"+sfx+" WHERE root_flow_id="+strconv.Itoa(root)+
-		" AND flow_id<>"+strconv.Itoa(root)+cond+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", treeChunk)
+	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL+" FROM dwarf_flows"+sfx+" WHERE root_flow_id=?"+
+		" AND flow_id<>?"+cond+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", append(args, treeChunk)...)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -393,15 +400,19 @@ func descendantsBelow(ctx context.Context, tx *sequel.Tx, sfx string, root, belo
 
 // deleteStepsFrom deletes live steps of flow after the step after, in step_id order, up to budget - at least one,
 // whatever its bytes, when fresh - and returns their size, the last one's id, and more when the budget, not the flow,
-// ended them. The ids are read first and deleted by a literal list: a range or an ORDER BY with a limit on the DELETE
-// is not portable, and the read is a seek into (flow_id, step_id) whatever else the table holds.
+// ended them. The ids are read first and deleted by bound lists of at most database.MaxListIDs: a range or an ORDER BY
+// with a limit on the DELETE is not portable, and the read is a seek into (flow_id, step_id) whatever else the table
+// holds.
 func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, sfx string, flow, after int, budget limit, fresh bool) (sz size, last int, more bool, err error) {
 	ids, sz, more, err := stepsWithin(ctx, tx, sfx, flow, after, budget, fresh)
 	if err != nil || len(ids) == 0 {
 		return size{}, after, more, errors.Trace(err)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE step_id IN ("+database.IntList(ids)+")"); err != nil {
-		return size{}, after, false, errors.Trace(err)
+	for chunk := range slices.Chunk(ids, database.MaxListIDs) {
+		ph, args := database.IDList(chunk)
+		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE step_id IN ("+ph+")", args...); err != nil {
+			return size{}, after, false, errors.Trace(err)
+		}
 	}
 	return sz, ids[len(ids)-1], more, nil
 }
@@ -416,9 +427,9 @@ func daySuffix(day int) string {
 }
 
 // firstID returns the id the statement reads first, none when it reads nothing.
-func firstID(ctx context.Context, tx *sequel.Tx, stmt string) ([]int, error) {
+func firstID(ctx context.Context, tx *sequel.Tx, stmt string, args ...any) ([]int, error) {
 	var id int
-	err := tx.QueryRowContext(ctx, stmt).Scan(&id)
+	err := tx.QueryRowContext(ctx, stmt, args...).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

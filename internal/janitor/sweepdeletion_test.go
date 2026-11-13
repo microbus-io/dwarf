@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -41,7 +40,7 @@ import (
 func stepsOf(t *testing.T, r *rig, flows []int) int {
 	t.Helper()
 	var n int
-	if err := r.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id IN ("+database.IntList(flows)+")").Scan(&n); err != nil {
+	if err := r.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id IN ("+idsSQL(flows)+")").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -731,7 +730,7 @@ func TestChunk_TheStepBoundaryWalksTheFlowsIndex(t *testing.T) {
 					return err
 				}
 			}
-			rows, err := tx.QueryContext(ctx, explain+stepsWithinSQL(sfx, 7, 0), defaultBatchRows)
+			rows, err := tx.QueryContext(ctx, explain+stepsWithinSQL(sfx), 7, 0, defaultBatchRows)
 			if err != nil {
 				return err
 			}
@@ -806,7 +805,7 @@ func TestChunk_APopulatedStepReadStopsAtItsBudget(t *testing.T) {
 					return err
 				}
 			}
-			rows, err := tx.QueryContext(ctx, "EXPLAIN (ANALYZE) "+stepsWithinSQL("", flow, 0), defaultBatchRows)
+			rows, err := tx.QueryContext(ctx, "EXPLAIN (ANALYZE) "+stepsWithinSQL(""), flow, 0, defaultBatchRows)
 			if err != nil {
 				return err
 			}

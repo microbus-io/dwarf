@@ -1268,7 +1268,7 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
   that cohort completed. Only its own writes need it to have completed. Gating the part on completion lost a
   converged cohort whole when the fan-in task itself failed, or when a `Terminate` landed before it ran.
 - **The cost is one extra query per resolving fan-in that HAS inner fan-in members** (`cohortParts`, by primary
-  key, padded to power-of-two arities so the statement text takes few forms), and it never reads a row below an
+  key, padded to one of a few lengths so the statement text takes few forms), and it never reads a row below an
   inner fan-in, at any depth: each fan-in's state already holds its whole subtree. Each row is projected as it
   is read and then dropped, so memory holds the parts. The bytes READ are the inner fan-ins' whole rows, which
   hold the accumulated value from their base for an `append`/`union`/`concat` field, not just the cohort's part:
@@ -2445,9 +2445,9 @@ detector).
 - **A chunk error is not a failed pass.** Whatever the other chunks and the pre-scan resolved is returned
   *alongside* the error, and the unresolved keys are simply asked about again next tick.
 
-Two smaller rules at the same site: the `IN` list is **chunked at 512** (SQL Server's 2,100-parameter ceiling is
-the tightest bound) and **padded up to one of ten bucket arities** by repeating an id, because arity is part of
-the statement text and an unbucketed list mints a distinct prepared statement per awaiter count. The status
+Two smaller rules at the same site: the `IN` list is **chunked at 500** and bound through `database.IDList`, so
+however many awaiters a replica holds the lookup takes one of four texts - it runs several times a second for as
+long as anyone awaits (`internal/migrations/CLAUDE.md`). The status
 filter is applied **in Go**, not in the `WHERE` clause - the rows are already in hand, and binding a status is
 the filtered-index landmine.
 
@@ -3599,8 +3599,8 @@ terminate inside a delete, and nothing either operation does can then race a `Re
 - **`Purge(Query)`** (`purge.go`) needs `Limit` (at most `maxListLimit`) and both window bounds, and removes what
   `ListClosed` lists for the query, oldest archived first, at most `Limit` roots: the internal ascending
   `listArchived` (so its window is on `archived_at`, cut and capped as there), each root marked in the day its branch
-  read it from, at most `purgeChunk` (4,096) roots a statement: a literal `IN` list in the tens of thousands of terms
-  can fail to plan outright on SQL Server (errors 8623 / 8632). **It reads only the archive**, as `ListClosed` does: a root closed in the last minute
+  read it from, at most `purgeChunk` (2,000, `database.MaxListIDs`) roots a statement, one bound list.
+  **It reads only the archive**, as `ListClosed` does: a root closed in the last minute
   is left for a later call, and `Delete` removes one by key. It returns `(removed, done)`: `done` when the archive
   had fewer than `Limit` and every root taken was removed - one a racing `Delete` took first was not. A
   `Query.Status` that is not closed, and `IncludeSubgraphs`, are a 400. Its turns record `op=purge` once per stage
@@ -3709,8 +3709,10 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
 - **Staged archival is on past 256k rows or 128 MiB of payload** (`reapStageRows`, `reapStageBytes`, no setter;
   user): such a tree is copied into the archive a batch at a time (the protocol is `internal/janitor/CLAUDE.md`'s),
-  and a smaller one moves whole. **A batch is 8,192 rows or 16 MiB** (`reapBatchRows`, `reapBatchBytes`), sized to
-  stay under about 0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the aim); a tree past a batch but
+  and a smaller one moves whole. **A batch is 500 roots, 4,000 rows or 16 MiB** (`reapBatch`, `reapBatchRows`,
+  `reapBatchBytes`), sized to stay under about 0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the
+  aim), with its roots one bound list of a length `database.IDList` pads to, and a large tree's chunk two lists of step
+  ids (user); a tree past a batch but
   under the staging threshold moves alone, in one longer transaction. `DWARF_STAGE_ROWS`/`DWARF_STAGE_BYTES` replace
   the thresholds for the rig and the staging-on suites. The reads around a copy need nothing of their own: it is
   invisible until published, and a published tree is read from the archive
@@ -4473,7 +4475,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   database's, so a tree archived in the skew at the window's newer edge can be missed. **A tie is a janitor batch**
   (`archived_at` is the move's transaction start), which is why `maxListLimit` must stay above `reapBatchRows`
   (`TestList_TheLimitIsAboveAJanitorBatch`): a caller paging by window cannot page across a tie larger than its
-  `Limit`. That bounds a roots-only list (`reapBatch`, 512 roots); with `IncludeSubgraphs` a batch's one tree, which it
+  `Limit`. That bounds a roots-only list (`reapBatch`, 500 roots); with `IncludeSubgraphs` a batch's one tree, which it
   takes however large, can be a tie of more flows than any `Limit`. On the dialects storing milliseconds (all but PostgreSQL) batches on different shards can share one, so a
   tie can reach shards x a batch's flow cap (`janitor.MaxBatchFlows`, 4,096): at 16 shards, the whole maximum. And **commit order is not stamp order** - a
   long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few

@@ -69,11 +69,11 @@ func NewFastDeletion() *FastDeletion {
 	return &FastDeletion{batchRoots: defaultBatchRoots, batchRows: defaultBatchRows, batchBytes: defaultBatchBytes}
 }
 
-// SetBatch sets one batch: how many due roots it considers (512), and about how many rows (4,096) and payload bytes
+// SetBatch sets one batch: how many due roots it considers (500, at most database.MaxListIDs), and about how many rows (4,000) and payload bytes
 // (16 MiB; 0 sets no byte limit) one transaction deletes - at least one tree. A tree over a batch is passed, left to the
 // deletion in chunks.
 func (f *FastDeletion) SetBatch(roots, rows, bytes int) {
-	f.batchRoots, f.batchRows, f.batchBytes = roots, rows, bytes
+	f.batchRoots, f.batchRows, f.batchBytes = min(roots, database.MaxListIDs), rows, bytes
 }
 
 // attach creates the job's counter on j's meter.

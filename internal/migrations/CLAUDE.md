@@ -475,20 +475,38 @@ existence probe** (`SELECT 1 … LIMIT_OFFSET(1, 0)`) where the ordering is sema
 suffices). An `ORDER BY` on such a probe looks removable and is not: stripping it passes on four dialects
 and fails only on mssql. Do not strip an `ORDER BY` from a `LIMIT_OFFSET` query. (If a cheap order is wanted, `step_id` - the PK - is the natural choice.)
 
-### A bound `IN (...)` list whose length the workload sets is chunked
+### Ids are bound, never written into a statement; a list is bound through `database.IDList`
 
-SQL Server rejects a statement with more than **2,100 parameters**, the tightest ceiling of the four dialects (SQLite's
-is 32,766, Postgres's 65,535), and the failure is a hard error that fails the operation every time. Any list sized by a
-cohort, a subgraph tree, a subgraph chain or a fan-out goes out with `slices.Chunk(ids, inListChunk)` and `inList`
-(`engine/inlist.go`): 512 ids per statement, padded to a power of two so the statement text takes few arities, in
-ascending order when the statements lock (`lockOrder`). **A surgraph chain is not bounded**: it is as deep as the
-subgraph nesting, which nothing limits, so the interrupt's and Resume's chain writes are chunked too; unchunked, an
-interrupt 700 flows deep rolled back on SQL Server every time. Count every bind: a `CASE WHEN id=? THEN ?` per row
-binds two per id, so an unchunked one overruns at ~700, and a chunk of 512 carrying one (the interrupt's
-`stopped_step_id`) binds ~1,537. Only SQL Server shows the overrun, so `fixtures/wideflow_test.go` (wide trees) and
-`engine/deepchain_test.go` (a 2,101-flow chain) are the pins there. A list bounded by construction (a step's DAG
-neighbours) needs no chunking; `database.IntList` inlines trusted integers and binds nothing, for a list already capped
-(`purgeChunk`, the janitor's batches).
+**Every distinct statement text is a new statement to the database**, and an id written into the text makes a new
+text every time. The PostgreSQL driver keeps every statement prepared on each connection (up to 512 per connection by
+default), and each holds backend memory for its plan - measured at about 3 MB for a statement carrying 8,192 literal
+ids, where one bound statement run any number of times holds one. A statement that runs on whichever pooled
+connection it takes (a janitor batch) fills every connection's cache, until the database runs out of memory. SQL
+Server compiles and caches a plan per text, and MySQL prepares and closes one.
+So bind every id, and a list through **`database.IDList`**: its placeholders and arguments, padded by repeating the
+last id up to the first of **4, 20, 100, 500 and 2,000** (`database.MaxListIDs`) that holds it, so a statement takes
+one of five texts. Repeating an id leaves `IN` and `NOT IN` matching the same rows - padding with `0` would not do on
+a column where `0` is a value (`surgraph_flow_id`, `lineage_id`). A list longer than `MaxListIDs` goes out in chunks
+(`slices.Chunk`); `IDList` panics past it.
+
+**What stays in the text:** a status (inlined for the filtered indexes, "Status literals, not binds" in the root
+doc); a day's table name and its day number and hours (one text per day, which the cache rotates out); the piston's
+priority bands (bounded by `SetMaxPriority`) and its capacity (changing only with the pools); the shard index in the
+lists' flow-key expression (one per shard); and the positional keys of a statement whose branch count is fixed (the
+janitor's sizing statement, padded to 1, 4, 16 or 64 trees).
+
+**The chunk is sized to every bind of the statement.** SQL Server rejects a statement with more than **2,100
+parameters**, the tightest ceiling of the dialects (SQLite's is 32,766, PostgreSQL's and MySQL's 65,535), and the
+failure is a hard error that fails the operation every time. `MaxListIDs` leaves 100 for a statement's other binds.
+Any list the engine sizes by a cohort, a subgraph tree, a subgraph chain or a fan-out goes out with
+`slices.Chunk(ids, inListChunk)` and `inList` (`engine/inlist.go`): 500 ids, a rung of the same lengths, in ascending
+order when the statements lock (`lockOrder`), because some of those statements bind more per id: a
+`CASE WHEN id=? THEN ?` binds two per id, so a chunk carrying one (the interrupt's `stopped_step_id`) binds ~1,500.
+**A surgraph chain is not bounded**: it is as deep as the subgraph nesting, which nothing limits, so the interrupt's
+and Resume's chain writes are chunked too; unchunked, an interrupt 700 flows deep rolled back on SQL Server every time.
+Only SQL Server shows the overrun, so `fixtures/wideflow_test.go` (wide trees) and `engine/deepchain_test.go` (a
+2,101-flow chain) are the pins there. The janitor's lists are capped by its settings (roots per batch at most
+`MaxListIDs`, a tree read 256 descendants at a time) and a chunk's step ids are chunked at `MaxListIDs`.
 
 ### MySQL Column Defaults
 

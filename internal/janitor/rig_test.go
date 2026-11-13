@@ -391,6 +391,15 @@ var (
 	soloShape = treeShape{rootSteps: 1, childSteps: -1}
 )
 
+// idsSQL is ids as a literal list, for a test's own statements: the janitor's are bound.
+func idsSQL(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return strings.Join(parts, ",")
+}
+
 // seedTrees inserts n closed trees of shape on db, one after another, and returns their roots in that order. Every flow
 // is completed now by the database clock and every step completed, as a tree the engine ran to its end would be;
 // created_hour takes its column default, the database clock's hour.

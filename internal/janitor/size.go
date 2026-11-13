@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -82,7 +83,8 @@ const (
 // read up to its own limit of rows, in one statement (treesSizesUpToSQL), so a group of trees costs one round trip and
 // no tree is read past its limit. A tree read up to its limit reports at least that many rows.
 func treesSizesUpTo(ctx context.Context, q sequel.Executor, sfx string, roots, limits []int) ([]size, error) {
-	rows, err := q.QueryContext(ctx, treesSizesUpToSQL(q.DriverName(), sfx, roots, limits))
+	stmt, args := treesSizesUpToSQL(q.DriverName(), sfx, roots, limits)
+	rows, err := q.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -92,6 +94,9 @@ func treesSizesUpTo(ctx context.Context, q sequel.Executor, sfx string, roots, l
 		var k, n, b int
 		if err := rows.Scan(&k, &n, &b); err != nil {
 			return nil, errors.Trace(err)
+		}
+		if k/2 >= len(sizes) {
+			continue // a padding branch
 		}
 		sizes[k/2] = sizes[k/2].plus(size{rows: n, bytes: b})
 		if k%2 == 0 {
@@ -107,40 +112,57 @@ func treesSizesUpTo(ctx context.Context, q sequel.Executor, sfx string, roots, l
 // hash join over a scan of every step in the table, which the LIMIT stops early only for a tree larger than it, so a
 // small tree costs the whole table. MySQL, MariaDB and SQLite join an indexed equality by nested loops. Each read is
 // capped on its own, since a LIMIT over a UNION ALL is applied after MySQL materializes it whole.
-func treesSizesUpToSQL(driver, sfx string, roots, limits []int) string {
+//
+// Every root and limit is bound, and the trees are padded to 1, 4, 16 or 64 (sizeGroup) of them with branches limited
+// to no rows, so the statement takes one of four texts, and a lone tree - a sweep's retry of a root - is one branch
+// pair, not sixteen.
+func treesSizesUpToSQL(driver, sfx string, roots, limits []int) (stmt string, args []any) {
 	// SQL Server sums an INT as an INT, which a tree's bytes can overflow, so it sums a BIGINT there.
 	sum := "COALESCE(SUM(b), 0)"
 	if driver == "mssql" {
 		sum = "COALESCE(SUM(CAST(b AS BIGINT)), 0)"
 	}
-	branches := make([]string, 0, 2*len(roots))
-	for k, root := range roots {
-		n, id := strconv.Itoa(limits[k]), strconv.Itoa(root)
-		steps := stepBytesSQL + " AS b FROM dwarf_flows" + sfx + " f JOIN dwarf_steps" + sfx + " s ON s.flow_id=f.flow_id"
+	if len(roots) > sizeGroup {
+		panic("treesSizesUpTo: " + strconv.Itoa(len(roots)) + " trees, more than " + strconv.Itoa(sizeGroup))
+	}
+	arity := 1
+	for arity < len(roots) {
+		arity *= 4
+	}
+	branches := make([]string, 0, 2*arity)
+	for k := range arity {
+		root, n := 0, 0 // a padding branch reads no rows
+		if k < len(roots) {
+			root, n = roots[k], limits[k]
+		}
+		// The step read's own limit is bound first on PostgreSQL and SQL Server, where it is inside the join.
+		steps, stepsArgs := stepBytesSQL+" AS b FROM dwarf_flows"+sfx+" f JOIN dwarf_steps"+sfx+" s ON s.flow_id=f.flow_id", []any(nil)
 		switch driver {
 		case "pgx":
-			steps = "s.b FROM dwarf_flows" + sfx + " f CROSS JOIN LATERAL (SELECT " + stepBytesSQL + " AS b FROM dwarf_steps" + sfx +
-				" s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s"
+			steps, stepsArgs = "s.b FROM dwarf_flows"+sfx+" f CROSS JOIN LATERAL (SELECT "+stepBytesSQL+" AS b FROM dwarf_steps"+sfx+
+				" s WHERE s.flow_id=f.flow_id LIMIT ?) s", []any{n}
 		case "mssql":
-			steps = "s.b FROM dwarf_flows" + sfx + " f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL + " AS b FROM dwarf_steps" + sfx +
-				" s WHERE s.flow_id=f.flow_id) s"
+			steps, stepsArgs = "s.b FROM dwarf_flows"+sfx+" f CROSS APPLY (SELECT TOP (?) "+stepBytesSQL+" AS b FROM dwarf_steps"+sfx+
+				" s WHERE s.flow_id=f.flow_id) s", []any{n}
 		}
-		flows := capped(driver, flowBytesSQL+" AS b FROM dwarf_flows"+sfx+" WHERE root_flow_id="+id, limits[k])
-		stepRows := capped(driver, steps+" WHERE f.root_flow_id="+id, limits[k])
+		flows, flowsArgs := capped(driver, flowBytesSQL+" AS b FROM dwarf_flows"+sfx+" WHERE root_flow_id=?", []any{root}, n)
+		stepRows, stepRowsArgs := capped(driver, steps+" WHERE f.root_flow_id=?", append(stepsArgs, root), n)
 		agg := func(key int) string {
 			return "SELECT " + strconv.Itoa(key) + " AS k, COUNT(*) AS n, " + sum + " AS b FROM ("
 		}
 		branches = append(branches, agg(2*k)+flows+") cf"+strconv.Itoa(k), agg(2*k+1)+stepRows+") cs"+strconv.Itoa(k))
+		args = append(append(args, flowsArgs...), stepRowsArgs...)
 	}
-	return strings.Join(branches, " UNION ALL ")
+	return strings.Join(branches, " UNION ALL "), args
 }
 
-// capped is "SELECT "+selectFrom reading at most limit rows: a LIMIT, or a TOP on SQL Server.
-func capped(driver, selectFrom string, limit int) string {
+// capped is "SELECT "+selectFrom reading at most limit rows, a bound LIMIT, or a TOP on SQL Server, with its arguments:
+// selectFrom's, args, and the limit, in the order the statement binds them.
+func capped(driver, selectFrom string, args []any, limit int) (stmt string, cappedArgs []any) {
 	if driver == "mssql" {
-		return "SELECT TOP (" + strconv.Itoa(limit) + ") " + selectFrom
+		return "SELECT TOP (?) " + selectFrom, append([]any{limit}, args...)
 	}
-	return "SELECT " + selectFrom + " LIMIT " + strconv.Itoa(limit)
+	return "SELECT " + selectFrom + " LIMIT ?", append(slices.Clone(args), limit)
 }
 
 // cutWithin returns the leading roots whose trees fit in batch, and at least the first, with the first's size. It sizes

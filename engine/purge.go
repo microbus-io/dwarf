@@ -126,7 +126,7 @@ func (e *Engine) onShardsOf(ctx context.Context, rows []listRow, fn func(ctx con
 // its trees went with it. Each statement locks the roots it marks, as a deletion's lock does, so a Fork holding one
 // is waited for.
 func (e *Engine) markArchived(ctx context.Context, db *sequel.DB, day int, roots []int, chunk int) (marked int, err error) {
-	chunk = max(chunk, 1)
+	chunk = min(max(chunk, 1), database.MaxListIDs)
 	flows := migrations.FlowsTable(day)
 	for ids := slices.Sorted(slices.Values(roots)); len(ids) > 0; {
 		n := min(chunk, len(ids))
@@ -141,9 +141,10 @@ func (e *Engine) markArchived(ctx context.Context, db *sequel.DB, day int, roots
 		// A transaction of one statement, for Transact's retry of a deadlock or a lock wait; the mark is idempotent, a root
 		// marked already matching nothing.
 		var k int64
+		ph, args := database.IDList(ids[:n])
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
-			res, err := tx.ExecContext(ctx, "UPDATE "+flows+" SET delete_after_ms=1 WHERE flow_id IN ("+database.IntList(ids[:n])+
-				") AND surgraph_flow_id=0 AND delete_after_ms=0")
+			res, err := tx.ExecContext(ctx, "UPDATE "+flows+" SET delete_after_ms=1 WHERE flow_id IN ("+ph+
+				") AND surgraph_flow_id=0 AND delete_after_ms=0", args...)
 			if err != nil {
 				return err
 			}

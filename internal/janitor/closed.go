@@ -20,7 +20,6 @@ import (
 	"cmp"
 	"context"
 	"slices"
-	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
@@ -191,15 +190,14 @@ func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidat
 // but a publication does. The root is locked first as a move locks it, so a root another transaction holds - a Fork
 // cloning the tree - is skipped on PostgreSQL and MySQL rather than waited for. It reports whether it stamped it.
 func stampClosed(ctx context.Context, h handle, root int, due string, dueArgs []any) (stamped bool, err error) {
-	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped = false
-		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id=? AND "+due, append([]any{root}, dueArgs...)...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
 		none, noneArg := NoAttemptSQL(tx.DriverName())
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id="+id, noneArg); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+" WHERE flow_id=?", noneArg, root); err != nil {
 			return errors.Trace(err)
 		}
 		stamped = true

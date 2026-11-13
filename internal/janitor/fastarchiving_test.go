@@ -306,7 +306,7 @@ func TestFast_ARootWithAnAttemptIsPassed(t *testing.T) {
 
 	// Every candidate with an attempt: passed, and no failure.
 	more := seedTrees(t, r.db, 2, callShape)
-	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id IN ("+database.IntList(more)+")", arg)
+	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at="+at+" WHERE flow_id IN ("+idsSQL(more)+")", arg)
 	assert.NoError(err)
 	r.startAttempts(ctx)
 	assert.Equal(more[1], r.fast().after.flowID)
@@ -445,7 +445,7 @@ func TestSize_SmallTreesMoveTogether(t *testing.T) {
 			}
 			var flows, stamps int
 			err = r.db.QueryRowContext(ctx, "SELECT COUNT(*), COUNT(DISTINCT archived_at) FROM "+migrations.FlowsTable(today)+
-				" WHERE root_flow_id IN ("+database.IntList(roots)+")").Scan(&flows, &stamps)
+				" WHERE root_flow_id IN ("+idsSQL(roots)+")").Scan(&flows, &stamps)
 			assert.Must(assert.NoError(err))
 			assert.Equal(100, flows, "every flow of every tree")
 			assert.Equal(1, stamps, "one transaction: one archive time")

@@ -101,10 +101,10 @@ func (s *SweepArchiving) SetOverdue(d time.Duration) {
 	s.overdue = d
 }
 
-// SetBatch sets one batch at most: how many roots (512), and about how many rows (4,096) and payload bytes (16 MiB; 0
+// SetBatch sets one batch at most: how many roots (500, at most database.MaxListIDs), and about how many rows (4,000) and payload bytes (16 MiB; 0
 // sets no byte limit) one transaction moves - at least one tree.
 func (s *SweepArchiving) SetBatch(roots, rows, bytes int) {
-	s.batchRoots, s.batchRows, s.batchBytes = roots, rows, bytes
+	s.batchRoots, s.batchRows, s.batchBytes = min(roots, database.MaxListIDs), rows, bytes
 }
 
 // SetStaging sets the staging threshold: a tree over rows rows or bytes payload bytes is given an archive attempt for

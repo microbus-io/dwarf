@@ -307,7 +307,7 @@ the per-anchor SUM test in `Mint` price something the reader does not do. Pinned
 **Each `Read` names the columns it needs.** A list's entries mostly read a contribution from `changes`, and that
 step's `state` holds its own list, so reading `state` too makes a cold read of a long list cost the square of its
 length. The engine's loader therefore makes up to two queries (anchors needing `state`, anchors needing only
-`changes`), each chunked at `inListChunk` (512) ids for SQL Server's 2,100-parameter ceiling. Pinned by
+`changes`), each chunked at `inListChunk` (500) ids for SQL Server's 2,100-parameter ceiling. Pinned by
 `TestLinker_ResolveList`. A `ResolveShared` that waited on another read makes no call when
 that read delivered, and a second call only when it failed.
 

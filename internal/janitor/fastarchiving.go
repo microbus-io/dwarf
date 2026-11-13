@@ -41,8 +41,8 @@ const ReasonNoRetention = "no_retention"
 // The default settings, the engine's.
 const (
 	defaultGrace      = time.Minute
-	defaultBatchRoots = 512
-	defaultBatchRows  = 8192
+	defaultBatchRoots = 500
+	defaultBatchRows  = 4000
 	defaultBatchBytes = 16 << 20
 )
 
@@ -118,10 +118,10 @@ func (f *FastArchiving) SetGrace(d time.Duration) {
 	f.grace = d
 }
 
-// SetBatch sets one batch: how many due roots it considers (512), and about how many rows, flows and steps alike
-// (4,096), and payload bytes (16 MiB; 0 sets no byte limit) one transaction moves - at least one tree.
+// SetBatch sets one batch: how many due roots it considers (500, at most database.MaxListIDs), and about how many rows, flows and steps alike
+// (4,000), and payload bytes (16 MiB; 0 sets no byte limit) one transaction moves - at least one tree.
 func (f *FastArchiving) SetBatch(roots, rows, bytes int) {
-	f.batchRoots, f.batchRows, f.batchBytes = roots, rows, bytes
+	f.batchRoots, f.batchRows, f.batchBytes = min(roots, database.MaxListIDs), rows, bytes
 }
 
 // SetStaging sets the size above which a closed tree is archived in stages rather than in one transaction, and passed

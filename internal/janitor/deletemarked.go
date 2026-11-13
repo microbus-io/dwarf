@@ -88,10 +88,10 @@ func NewDeleteMarked(archive *archiver.Archive, retentionDays int) *DeleteMarked
 	}
 }
 
-// SetBatch sets one batch at most: how many roots (512), and about how many rows (4,096) and payload bytes (16 MiB; 0
+// SetBatch sets one batch at most: how many roots (500, at most database.MaxListIDs), and about how many rows (4,000) and payload bytes (16 MiB; 0
 // sets no byte limit) one transaction deletes - at least one tree, and one chunk of a larger one.
 func (d *DeleteMarked) SetBatch(roots, rows, bytes int) {
-	d.batchRoots, d.batchRows, d.batchBytes = roots, rows, bytes
+	d.batchRoots, d.batchRows, d.batchBytes = min(roots, database.MaxListIDs), rows, bytes
 }
 
 // attach registers the job's gauges on j's meter.
@@ -338,20 +338,21 @@ func deleteMarkedTrees(ctx context.Context, h handle, seams *seamster.Seamster, 
 	roots = slices.Sorted(slices.Values(roots))
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		deleted = 0
-		locked, err := lockRoots(ctx, tx, sfx, true, "flow_id IN ("+database.IntList(roots)+") AND "+markedSQL)
+		rootsPh, rootsArgs := database.IDList(roots)
+		locked, err := lockRoots(ctx, tx, sfx, true, "flow_id IN ("+rootsPh+") AND "+markedSQL, rootsArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}
-		ids := database.IntList(locked)
+		ids, idArgs := database.IDList(locked)
 		trees := "SELECT flow_id FROM dwarf_flows" + sfx + " WHERE root_flow_id IN (" + ids + ")"
 		// The directory and the steps before the flows: their subqueries read the flow rows.
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+trees+")"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+trees+")", idArgs...); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE flow_id IN ("+trees+")"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE flow_id IN ("+trees+")", idArgs...); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" WHERE root_flow_id IN ("+ids+")"); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" WHERE root_flow_id IN ("+ids+")", idArgs...); err != nil {
 			return errors.Trace(err)
 		}
 		// FaultArchiveDelete, targeted at a root, fails the transaction that would delete it, after its statements ran.
@@ -372,7 +373,8 @@ func deleteMarkedTrees(ctx context.Context, h handle, seams *seamster.Seamster, 
 // than gone. A read that fails counts them all.
 func stillMarked(ctx context.Context, q sequel.Executor, sfx string, roots []int) int {
 	var n int
-	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows"+sfx+" WHERE flow_id IN ("+database.IntList(roots)+") AND "+markedSQL).Scan(&n)
+	ph, args := database.IDList(roots)
+	err := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows"+sfx+" WHERE flow_id IN ("+ph+") AND "+markedSQL, args...).Scan(&n)
 	if sequel.IsUndefinedTableError(err) {
 		return 0
 	}
