@@ -214,7 +214,7 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 	}
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped, flows = 0, 0
-		locked, err := lockRoots(ctx, tx, true, "flow_id IN ("+database.IntList(roots)+") AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id IN ("+database.IntList(roots)+") AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}

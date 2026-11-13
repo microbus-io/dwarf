@@ -219,7 +219,7 @@ func TestPublished_AStampClearsAnAttempt(t *testing.T) {
 
 // TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater pins Purge and Delete of an archived tree larger than a
 // batch: the call marks it and returns, the tree gone from every read and list at once and counted removed; the
-// reaper's periodic stage deletes its rows; dwarf_archive_deletions_pending reports none left once it has.
+// archive deletion sweep deletes its rows; dwarf_archive_deletions_pending reports none left once it has.
 func TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -238,8 +238,7 @@ func TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater(t *testing.T) {
 	if now, _ := e.archiveOn(1).Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
-	e.reapBatchRows = 1 // every tree is larger than a batch
-	e.archiveDeleteInCall = 0
+	e.reapBatchRows = 1 // every tree is larger than a batch: the archive deletion sweep deletes them in chunks
 
 	assert.NoError(e.Delete(ctx, deleted))
 	_, err = e.Snapshot(ctx, deleted)
@@ -252,10 +251,10 @@ func TestArchiveDeletion_ALargeTreeIsGoneAtOnceAndDeletedLater(t *testing.T) {
 	assert.Zero(closedListed(t, e))
 	for _, id := range ids {
 		flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
-		assert.Equal(2, flows, "the rows of tree %d stay until the periodic stage", id)
+		assert.Equal(2, flows, "the rows of tree %d stay until the archive deletion sweep", id)
 	}
 
-	e.reapPass(ctx, e.archiveGrace, true)
+	e.reapDueFlows(ctx)
 	for _, id := range ids {
 		flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), id)
 		assert.Zero(flows+steps, "tree %d deleted", id)

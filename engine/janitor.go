@@ -57,8 +57,8 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 }
 
 // addJanitorJobs adds a shard's janitor its jobs - fast archiving, sweep archiving behind it and large-tree archiving
-// into the shard's archive; fast deletion and sweep deletion behind it; live retention - built with s, replacing the
-// ones it has, which start over.
+// into the shard's archive; fast deletion and sweep deletion behind it; live retention; the archive deletion sweep -
+// built with s, replacing the ones it has, which start over.
 func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s janitorSettings) {
 	fa := janitor.NewFastArchiving(archive, e.retentionDays)
 	fa.SetGrace(s.grace)
@@ -88,6 +88,9 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, archive *archiver.Archive, s
 	lr.SetGrace(s.grace)
 	lr.SetBatch(s.batchRoots)
 	j.AddJob(janitor.JobLiveRetention, lr)
+	dm := janitor.NewDeleteMarked(archive, e.retentionDays)
+	dm.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	j.AddJob(janitor.JobArchiveDeletionSweep, dm)
 }
 
 // stopJanitors stops every shard's janitor and returns once they all have. A stopped janitor releases what its jobs

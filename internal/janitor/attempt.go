@@ -80,7 +80,7 @@ func claimAttempt(ctx context.Context, h handle, root int, due string, dueArgs [
 	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		at, ok = time.Time{}, false
-		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}

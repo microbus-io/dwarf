@@ -170,7 +170,7 @@ func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidat
 		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
 		}
-		return treesSizesUpTo(ctx, h, group, limits)
+		return treesSizesUpTo(ctx, h, "", group, limits)
 	})
 	switch {
 	case err != nil:
@@ -194,7 +194,7 @@ func stampClosed(ctx context.Context, h handle, root int, due string, dueArgs []
 	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped = false
-		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)
 		}

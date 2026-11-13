@@ -131,7 +131,7 @@ func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 	stampTree(t, r.db, root)
 	r.seams.InjectN(diagnostics.FaultReapMidTree, 1000)
 	var pos chunkPos
-	_, _, err := deleteChunk(ctx, r.db, r.seams, root, capOf(2, 0), &pos)
+	_, _, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(2, 0), &pos)
 	assert.Error(err)
 	flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", root)
 	assert.Equal([2]int{2, 7}, [2]int{flows, steps}, "rolled back whole")
@@ -139,7 +139,7 @@ func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 	assert.Equal(chunkPos{}, pos, "the position moves only when a chunk commits")
 	r.seams.Withdraw(diagnostics.FaultReapMidTree)
 	for range 20 {
-		if _, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(2, 0), &pos); err != nil || done {
+		if _, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(2, 0), &pos); err != nil || done {
 			assert.NoError(err)
 			break
 		}
@@ -189,7 +189,7 @@ func TestChunk_TwoJanitorsShareATree(t *testing.T) {
 		wg.Go(func() {
 			var pos chunkPos // each its own, as each replica's job keeps its own
 			for range 200 {
-				_, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(8, 0), &pos)
+				_, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(8, 0), &pos)
 				if err == nil && done {
 					return
 				}
@@ -210,13 +210,13 @@ func TestChunk_StaleWorkIsANoOp(t *testing.T) {
 	ctx := t.Context()
 	r := newRig(t, 30)
 	root := seedWideTree(t, r.db, 1, 2, 2)
-	n, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 0), &chunkPos{})
+	n, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 0), &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
 	assert.Zero(n.flows)
 	f, s, _ := rowsOf(t, r, root)
 	assert.Equal([2]int{3, 5}, [2]int{f, s}, "an unstamped tree is left whole")
-	n, done, err = deleteChunk(ctx, r.db, r.seams, root+1000, capOf(4096, 0), &chunkPos{})
+	n, done, err = deleteChunk(ctx, r.db, r.seams, "", root+1000, capOf(4096, 0), &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
 	assert.Zero(n.flows)
@@ -243,7 +243,7 @@ func TestChunk_ALateDescendantKeepsTheRoot(t *testing.T) {
 	}
 	got := make(chan result, 1)
 	go func() {
-		n, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 0), &chunkPos{})
+		n, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 0), &chunkPos{})
 		got <- result{n.flows, done, err}
 	}()
 	assert.Must(assert.True(r.seams.WaitTimeout(ctx, diagnostics.CheckpointReapBeforeRootDelete, 10*time.Second*timeoutScale)))
@@ -258,7 +258,7 @@ func TestChunk_ALateDescendantKeepsTheRoot(t *testing.T) {
 	_, _, rootThere := rowsOf(t, r, root)
 	assert.True(rootThere)
 
-	n, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 0), &chunkPos{})
+	n, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 0), &chunkPos{})
 	assert.NoError(err)
 	assert.True(done)
 	assert.Equal(2, n.flows, "the late descendant and the root")
@@ -278,7 +278,7 @@ func TestChunk_ALateDescendantWithAKeptPosition(t *testing.T) {
 	root := seedWideTree(t, r.db, 1, 3, 1)
 	stampTree(t, r.db, root)
 	var pos chunkPos
-	_, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(2, 0), &pos)
+	_, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(2, 0), &pos)
 	assert.Must(assert.NoError(err))
 	assert.Must(assert.False(done))
 	assert.Must(assert.True(pos.top > 0, "the chunks have a position: %+v", pos))
@@ -287,7 +287,7 @@ func TestChunk_ALateDescendantWithAKeptPosition(t *testing.T) {
 		workflow.StatusCompleted+"',?,0,?)", "0123456789abcdef", "seed/late", "Late", []byte("{}"), "", root, root)
 	assert.Must(assert.NoError(err))
 	for range 20 {
-		if _, done, err = deleteChunk(ctx, r.db, r.seams, root, capOf(2, 0), &pos); err != nil || done {
+		if _, done, err = deleteChunk(ctx, r.db, r.seams, "", root, capOf(2, 0), &pos); err != nil || done {
 			break
 		}
 	}
@@ -374,16 +374,16 @@ func TestChunk_AChunkKeepsToItsBytes(t *testing.T) {
 		return n
 	}
 	var pos chunkPos
-	_, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 7000), &pos)
+	_, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 7000), &pos)
 	assert.Must(assert.NoError(err))
 	assert.False(done)
 	assert.Equal(4, steps(), "two steps of 3,000 bytes fit 7,000")
-	_, done, err = deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 1000), &pos)
+	_, done, err = deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 1000), &pos)
 	assert.Must(assert.NoError(err))
 	assert.False(done)
 	assert.Equal(3, steps(), "one step over the budget goes alone")
 	for range 10 {
-		if _, done, err = deleteChunk(ctx, r.db, r.seams, root, capOf(4096, 7000), &pos); err != nil || done {
+		if _, done, err = deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, 7000), &pos); err != nil || done {
 			break
 		}
 	}
@@ -419,7 +419,7 @@ func TestChunk_AFlowRowIsChargedItsBytes(t *testing.T) {
 			before := left()
 			var pos chunkPos
 			for range 20 {
-				_, done, err := deleteChunk(ctx, r.db, r.seams, root, capOf(4096, budget), &pos)
+				_, done, err := deleteChunk(ctx, r.db, r.seams, "", root, capOf(4096, budget), &pos)
 				assert.Must(assert.NoError(err))
 				now := left()
 				took := size{rows: before.rows - now.rows, bytes: before.bytes - now.bytes}

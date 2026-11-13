@@ -175,7 +175,7 @@ func (s *SweepDeletion) batch(ctx context.Context, h handle) outcome {
 		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
 			return nil, err
 		}
-		return treesSizesUpTo(ctx, h, group, limits)
+		return treesSizesUpTo(ctx, h, "", group, limits)
 	})
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
@@ -217,7 +217,7 @@ func (s *SweepDeletion) batch(ctx context.Context, h handle) outcome {
 // chunk deletes a chunk of the large tree in progress. The sweep moves past the tree once it is gone, no longer
 // stamped and due, held by another transaction, or a chunk failed - held, as a root that fails alone is.
 func (s *SweepDeletion) chunk(ctx context.Context, h handle, budget limit) outcome {
-	deleted, done, err := deleteChunk(ctx, h, s.j.diags.Seams(), s.current.flowID, budget, &s.pos)
+	deleted, done, err := deleteChunk(ctx, h, s.j.diags.Seams(), "", s.current.flowID, budget, &s.pos)
 	if err == nil {
 		s.addReaped(ctx, deleted.unarchived)
 		s.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointReapChunkDone)

@@ -116,11 +116,13 @@ const (
 	FaultReapStageChunk     = "reapStageChunk"     // by root flow_id: a staging chunk fails under its root's lock, before it writes
 	FaultReapStageLost      = "reapStageLost"      // by root flow_id: a staging chunk commits, then reports an error, as a lost response
 	FaultArchiveDelete      = "archiveDeleteErr"   // by root flow_id: an archived tree's deletion fails before it commits
+	FaultArchiveMark        = "archiveMarkErr"     // by root flow_id: a Delete's or Purge's mark of an archived root fails
 	FaultArchiveMaintainErr = "archiveMaintainErr" // an archive maintenance pass fails after its work
 
 	// The janitors, beside the reaper's names above, which their jobs consult too:
 	FaultJanitorConnErr        = "janitorConnErr"        // a janitor's batch cannot take its connection
 	FaultJanitorRetentionStamp = "janitorRetentionStamp" // by root flow_id: live retention's stamp fails under its roots' locks
+	FaultJanitorMarkedProbe    = "janitorMarkedProbe"    // the archive deletion sweep's probe of a day's marked roots fails
 )
 
 // --- Execution checkpoints ---

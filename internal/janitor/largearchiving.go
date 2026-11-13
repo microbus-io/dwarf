@@ -465,7 +465,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		published, done, at = 0, false, *pos
 		c.copied = 0
-		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND status IN ("+database.TerminalStatusesSQL+")"+
+		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND status IN ("+database.TerminalStatusesSQL+")"+
 			" AND surgraph_flow_id=0 AND delete_after_ms=0 AND archive_attempt_at="+atExpr, atArg)
 		if err != nil {
 			return errors.Trace(err)
@@ -519,7 +519,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 				if err != nil {
 					return errors.Trace(err)
 				}
-				own, err := flowBytes(ctx, tx, at.flow)
+				own, err := flowBytes(ctx, tx, "", at.flow)
 				if err != nil {
 					return errors.Trace(err)
 				}
@@ -546,7 +546,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 				break
 			}
 			// The budget is charged what the run reads, whether or not a row is there already.
-			run, sz, err := fitRun(ctx, tx, children, childBytes, left)
+			run, sz, err := fitRun(ctx, tx, "", children, childBytes, left)
 			if err != nil {
 				return errors.Trace(err)
 			}
@@ -590,7 +590,7 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 		if sz.rows > 0 {
 			at.stepAfter = last
 		}
-		rootBytes, err := flowBytes(ctx, tx, root)
+		rootBytes, err := flowBytes(ctx, tx, "", root)
 		if err != nil {
 			return errors.Trace(err)
 		}
@@ -651,7 +651,7 @@ func (c *stageCopy) inserted(res sql.Result) {
 // bytes, when fresh - and returns their size, the last one's id, and more when the budget, not the flow, ended them.
 // The ids are read first and copied by a literal list.
 func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after int, budget limit, fresh bool) (sz size, last int, more bool, err error) {
-	ids, sz, more, err := stepsWithin(ctx, tx, flow, after, budget, fresh)
+	ids, sz, more, err := stepsWithin(ctx, tx, "", flow, after, budget, fresh)
 	if err != nil || len(ids) == 0 {
 		return size{}, after, more, errors.Trace(err)
 	}

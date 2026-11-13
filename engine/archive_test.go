@@ -260,7 +260,6 @@ func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
 	t.Setenv(stageRowsEnv, "131072")
 	t.Setenv(stageBytesEnv, "67108864")
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	cfg := e.reaperConfig(t.Context(), 0)
-	assert.Equal(131072, cfg.StageRows)
-	assert.Equal(67108864, cfg.StageBytes)
+	assert.Equal(131072, e.reapStageRows)
+	assert.Equal(67108864, e.reapStageBytes)
 }

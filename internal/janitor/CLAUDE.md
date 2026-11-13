@@ -1,12 +1,11 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn
-> and its connection, any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention -
-> chunked deletion, the shared sweep machinery, or the janitors' metrics.
+> and its connection, any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
+> the archive deletion sweep - chunked deletion, the shared sweep machinery, or the janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/reaper/CLAUDE.md` (the work the janitor has not
-> taken over - the archive deletion sweep, Delete's and Purge's archive deletions - and the rationale of the staged
-> protocol and of chunked deletion) and
+> taken over - `DeleteLive` - and the rationale of the staged protocol and of chunked deletion) and
 > `internal/archiver/CLAUDE.md` (the day tables).
 
 ## What a Janitor is, and what a job is
@@ -313,10 +312,51 @@ from the archive's day tables' retention, a job of its own.
   `TestLiveRetention_StampsAndTheDeletionJobsDelete`). At a retention of 0 the job does nothing: closed trees are
   deleted as they come due, not retained.
 
+## The archive deletion sweep (`deletemarked.go`)
+
+The job that deletes the archived trees marked for deletion (`JobArchiveDeletionSweep`; the type keeps the reaper's
+name, `DeleteMarked`): **every** archived tree a Delete or a Purge removes - the calls only mark it, a statement each
+(user), and the published copy a Delete takes back from a tree whose live copy is being deleted.
+
+- **Each sweep goes through the retained days, oldest first, a probe a day** (`markedIn`, on the day's deletion index:
+  partial on PostgreSQL, SQLite and SQL Server, named on MySQL and MariaDB, with a fallback read for a day made before
+  the index), and stops at the first day holding marked roots. Not a `UNION` over the days: a probe a day touches one
+  day's table at a time, and a sweep with work reads few days (user). A day whose tables are gone is passed, its
+  trees gone with it; a day whose probe fails is counted unknown. The sweep starts from the oldest day each time:
+  with no budget, nothing needs to resume past a slow day.
+- **The trees a batch holds are deleted together** (`deleteMarkedTrees`: the roots locked, a held one skipped on
+  PostgreSQL and MySQL, then the directory's rows for their flows, their steps and their flows, in one transaction); a
+  larger one in chunks, one tree at a time (`deleteChunk` on the day's tables). A failed batch is taken again a root at
+  a time; a root that fails alone is held and passed (`TestDeleteMarked_SmallTreesGoTogether`,
+  `TestDeleteMarked_ALargeTreeInChunksOneAtATime`, `TestDeleteMarked_AFailingTreeIsPendingAndTheRestGo`).
+- **Its gauges:** `dwarf_archive_deletions_pending`, the marked roots a sweep found and could not delete - failing, or
+  held by another transaction (`stillMarked` tells a held root from one another replica deleted) - and
+  `dwarf_archive_deletion_days_unknown`, the days it could not examine. Each reads the larger of the sweep under way's
+  count and the last complete one's, published as a tree fails rather than when the sweep completes: with 8 failures a
+  round and a 30 s wait between rounds, a sweep through a failing backlog runs for hours
+  (`TestDeleteMarked_FailuresShowBeforeTheSweepCompletes`, `TestDeleteMarked_AHeldTreeIsPending`,
+  `TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneUnknown`). A held tree's log names it by its correlation id,
+  which needs the root's `created_hour`: the probe reads it. Nothing reads until a sweep has completed - zero would
+  claim every day examined - but a failure as soon as it is met. A root another replica's sweep holds mid-deletion
+  counts as pending until this replica's next sweep finds it gone. Since every
+  archived deletion goes through the sweep, a pending count is normal for a moment after a Purge; one that stays is
+  the signal.
+- **A day whose deletions all fail holds the days after it back**: each failing root costs a failed batch, and a round
+  gives way after eight, so such a day passes about seven roots a round. Accepted, as every sweep through a failing
+  backlog is slow: the gauges show it, and a day failing whole is an operator's problem first.
+- **On MySQL and MariaDB the probe seeks on `delete_after_ms=1`**: their deletion index is the full
+  `(delete_after_ms)`, so an equality - every mark is 1 - with the primary key InnoDB appends is a seek in `flow_id`
+  order, where a range read and sorted every mark of the day for each batch.
+- **No residue class**, as live retention: replicas meeting on a root skip it on PostgreSQL and MySQL. It waits 30 s
+  after a round without progress, as every repair job.
+
 ## Chunked deletion (`chunk.go`)
 
 A tree larger than a batch is deleted over several transactions (`deleteChunk`), each about a batch, under its root's
-lock, each rechecking that the root is stamped and due: the stamp is the authorization, durable, so a chunked deletion
+lock, each rechecking that the root is marked - stamped and due in the live tables, marked in a day's (`markedSQL`),
+the directory's rows for each flow deleted with it there. **Its SQL, and the sizing's and the root lock's, takes a
+table suffix** (`""` for the live tables, `daySuffix(day)` for a day's), never a table name (user). The mark is the
+authorization, durable, so a chunked deletion
 needs nothing in memory to finish (`TestChunk_ARestartResumesTheDeletion`) and two replicas on one tree serialize per
 chunk (`TestChunk_TwoJanitorsShareATree`). The order and the reads are the reaper's (`internal/reaper/CLAUDE.md`,
 "Chunked deletion of a large live tree", holds their rationale while the reaper stands): descendants newest first, each

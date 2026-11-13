@@ -38,7 +38,7 @@ import (
 )
 
 // rig is a Manual, active Janitor with every job the engine adds - fast, sweep and large-tree archiving, fast and sweep
-// deletion, live retention - over one shard's own isolated,
+// deletion, live retention, the archive deletion sweep - over one shard's own isolated,
 // migrated database and its archive. Its janitor is made at its first use, so a test sets what it needs before; the
 // settings and the residue class are set on the jobs and the shard before every pass, so a test changes them between
 // passes.
@@ -62,6 +62,7 @@ type rig struct {
 	fd        *FastDeletion
 	sd        *SweepDeletion
 	lr        *LiveRetention
+	dm        *DeleteMarked
 }
 
 // rigSettings are the jobs' settings a test sets on the rig.
@@ -134,12 +135,14 @@ func (r *rig) janitor() *Janitor {
 		r.fd = NewFastDeletion()
 		r.sd = NewSweepDeletion(r.fd)
 		r.lr = NewLiveRetention(r.archive, r.retention)
+		r.dm = NewDeleteMarked(r.archive, r.retention)
 		r.j.AddJob(JobFastArchiving, r.fa)
 		r.j.AddJob(JobSweepArchiving, r.sa)
 		r.j.AddJob(JobLargeArchiving, r.la)
 		r.j.AddJob(JobFastDeletion, r.fd)
 		r.j.AddJob(JobSweepDeletion, r.sd)
 		r.j.AddJob(JobLiveRetention, r.lr)
+		r.j.AddJob(JobArchiveDeletionSweep, r.dm)
 		r.j.SetManual(true)
 		r.j.Start(r.t.Context())
 		r.j.Resume()
@@ -162,6 +165,7 @@ func (r *rig) janitor() *Janitor {
 	r.sd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	r.lr.SetGrace(s.grace)
 	r.lr.SetBatch(s.batchRoots)
+	r.dm.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
 	r.shard.SetResidency(r.count, r.ordinal, r.inClass, time.Now().Add(time.Hour))
 	return r.j
 }
@@ -339,6 +343,8 @@ func ascendingCloses(t *testing.T, r *rig, roots []int) {
 type logCounter struct {
 	mu   sync.Mutex
 	seen map[string]int
+	// correlationIDs are the correlation_id attributes the records carried, in order.
+	correlationIDs []string
 }
 
 func (l *logCounter) Enabled(context.Context, slog.Level) bool { return true }
@@ -347,6 +353,12 @@ func (l *logCounter) WithGroup(string) slog.Handler            { return l }
 func (l *logCounter) Handle(_ context.Context, r slog.Record) error {
 	l.mu.Lock()
 	l.seen[r.Message]++
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "correlation_id" {
+			l.correlationIDs = append(l.correlationIDs, a.Value.String())
+		}
+		return true
+	})
 	l.mu.Unlock()
 	return nil
 }

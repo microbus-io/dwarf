@@ -192,6 +192,7 @@ func TestArchiving_DeleteOfATreeArchivedMeanwhileDeletesItThere(t *testing.T) {
 	assert.Equal(2, flows, "the reaper archived the tree while the Delete was held")
 	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeleteStamp)
 	assert.NoError(<-deleted)
+	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the Delete marked
 	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), rootID)
 	assert.Zero(flows, "deleted from the archive")
 	assert.Zero(steps)
@@ -265,6 +266,7 @@ func TestArchiving_ARemovalOfADroppedDayIsNoError(t *testing.T) {
 	})
 	assert.NoError(err)
 	assert.Equal(1, removed, "the day still there")
+	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the call marked
 	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[0])
 	assert.Zero(flows + steps)
 	flows, _ = treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), roots[1])

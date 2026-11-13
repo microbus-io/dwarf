@@ -131,10 +131,10 @@ func TestReaperContract_EveryKindIsReportedFromTheStart(t *testing.T) {
 	assertNoReaperReadings(t, collect(t, reader))
 }
 
-// TestReaperContract_RemovalsRunOnTheCallersContext pins that Purge and Delete of archived trees keep to the caller's
-// context: neither the reaper's attempt deadline nor its faults apply to them. A Purge across two transactions and a
-// Delete succeed with the attempt at a nanosecond and every sizing fault armed.
-func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
+// TestArchiveDeletion_DeleteAndPurgeOnlyMark pins that Purge and Delete of archived trees only mark them: they
+// size nothing, so a Purge across two statements and a Delete succeed with every sizing fault armed, and the janitor's
+// archive deletion sweep deletes the trees.
+func TestArchiveDeletion_DeleteAndPurgeOnlyMark(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -154,7 +154,6 @@ func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
 	assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT flow_token, created_hour FROM "+migrations.FlowsTable(today)+
 		" WHERE flow_id=?", roots[3]).Scan(&token, &hour)))
 
-	e.reapAttempt = time.Nanosecond
 	e.purgeChunk = 2
 	e.diags.Seams().InjectN(diagnostics.FaultReapSizeErr, 10000)
 	defer e.diags.Seams().Withdraw(diagnostics.FaultReapSizeErr)
@@ -166,18 +165,25 @@ func TestReaperContract_RemovalsRunOnTheCallersContext(t *testing.T) {
 	assert.NoError(e.Delete(ctx, keys.NewFlowKey(1, hour, roots[3], token)))
 	removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 	assert.NoError(err)
-	assert.Equal(3, removed, "the other three, two to a transaction")
+	assert.Equal(3, removed, "the other three, marked two to a statement")
+	e.diags.Seams().Withdraw(diagnostics.FaultReapSizeErr)
+	for _, root := range roots {
+		e.diags.Seams().Withdraw(diagnostics.Join(diagnostics.FaultReapSizeErr, strconv.Itoa(root)))
+	}
+	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the calls marked
 	for _, root := range roots {
 		flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
 		assert.Zero(flows+steps, "tree %d", root)
 	}
 }
 
-// TestReaperContract_PurgeTakesTheReapersRowBudget pins Purge's transactions to the reaper's row budget: trees of four
-// rows each (two flows of a step each), at a budget of eight, go two to a transaction, and at a budget of four, one.
-func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
+// TestArchiveDeletion_TheSweepTakesTheRowBudget pins Purge's transactions to the reaper's row budget: trees of four
+// rows each (two flows of a step each) that a Purge marked are deleted by the archive deletion sweep in transactions of
+// at most the budget: at eight, the sweep's first batch of one root, then two, then the last; at four, one a
+// transaction.
+func TestArchiveDeletion_TheSweepTakesTheRowBudget(t *testing.T) {
 	t.Parallel()
-	for _, c := range []struct{ rows, transactions int }{{8, 2}, {4, 4}} {
+	for _, c := range []struct{ rows, transactions int }{{8, 3}, {4, 4}} {
 		t.Run(strconv.Itoa(c.rows), func(t *testing.T) {
 			assert := testarossa.For(t)
 			ctx := t.Context()
@@ -200,10 +206,11 @@ func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 			}
 
 			e.reapBatchRows = c.rows
-			before := e.diags.Seams().Visits(diagnostics.CheckpointReapArchiveDeleted)
 			removed, _, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 			assert.NoError(err)
 			assert.Equal(4, removed)
+			before := e.diags.Seams().Visits(diagnostics.CheckpointReapArchiveDeleted)
+			e.reapDueFlows(ctx)
 			assert.Equal(c.transactions, e.diags.Seams().Visits(diagnostics.CheckpointReapArchiveDeleted)-before,
 				"transactions deleting archived trees")
 		})
@@ -211,8 +218,7 @@ func TestReaperContract_PurgeTakesTheReapersRowBudget(t *testing.T) {
 }
 
 // TestReaperContract_APartialPurgeCountsWhatItRemoved pins a Purge that fails part-way: it reports the roots its
-// committed transactions removed, and dwarf_flows_removed counts exactly those. The second transaction's deletion is
-// faulted.
+// committed statements marked, and dwarf_flows_removed counts exactly those. The second statement's mark is faulted.
 func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -229,14 +235,14 @@ func TestReaperContract_APartialPurgeCountsWhatItRemoved(t *testing.T) {
 		t.Skip("midnight passed during the pass")
 	}
 
-	e.reapBatchRows = 4 // two trees to a transaction: roots[2] is in the second
-	fault := diagnostics.Join(diagnostics.FaultArchiveDelete, strconv.Itoa(roots[2]))
+	e.purgeChunk = 2 // two roots to a statement: roots[2] is in the second
+	fault := diagnostics.Join(diagnostics.FaultArchiveMark, strconv.Itoa(roots[2]))
 	e.diags.Seams().InjectN(fault, 1000)
 	defer e.diags.Seams().Withdraw(fault)
 	removed, done, err := e.Purge(ctx, enginetest.Recent(workflow.Query{Limit: 10}))
 	assert.Error(err)
 	assert.False(done)
-	assert.Equal(2, removed, "the first transaction's roots")
+	assert.Equal(2, removed, "the first statement's roots")
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_removed", map[string]string{"shard": "1", "op": "purge"}))
 }
 

@@ -404,10 +404,10 @@ func TestSize_TreesAreSizedInRowsAndBytes(t *testing.T) {
 	r := newRig(t, 30)
 	root := seedWideTree(t, r.db, 2, 3, 4) // a root of 2 steps, 3 children of 4: 4 flows, 14 steps
 	setStepBytes(t, r, root, 100, 1000)
-	got, err := treesSizesUpTo(ctx, r.db, []int{root}, []int{1000})
+	got, err := treesSizesUpTo(ctx, r.db, "", []int{root}, []int{1000})
 	assert.Must(assert.NoError(err))
 	assert.Equal(size{rows: 18, bytes: 14*100 + 4*1000, flows: 4}, got[0])
-	got, err = treesSizesUpTo(ctx, r.db, []int{root}, []int{5})
+	got, err = treesSizesUpTo(ctx, r.db, "", []int{root}, []int{5})
 	assert.Must(assert.NoError(err))
 	assert.True(got[0].rows >= 5, "read to its limit: %d rows", got[0].rows)
 }
@@ -556,7 +556,7 @@ func TestFast_AHeldRootIsNotWaitedForWhenStamped(t *testing.T) {
 	holderDone := make(chan error, 1)
 	go func() {
 		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
-			_, err := lockRoots(ctx, tx, false, "flow_id=?", large)
+			_, err := lockRoots(ctx, tx, "", false, "flow_id=?", large)
 			locked <- err
 			<-release
 			return err

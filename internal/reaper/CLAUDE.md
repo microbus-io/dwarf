@@ -37,7 +37,9 @@ live tables it runs (as `internal/piston` does, borrowing its handle and partiti
 stamped trees its fast and sweep deletion, trees past their retention its live retention, and the staged copy its
 large-tree archiving. **A pass runs nothing, and the engine no longer calls it**; the moved code stays here, commented
 out where the pass ran it, as the reference, and the tests that need it are skipped with a note naming their janitor
-copies. What still runs is `DeleteMarked`, `DeleteArchivedRoots` and `DeleteLive`, which the engine calls. Everything
+copies. The archive's deletions are the janitor's too - a Delete or Purge only marks an archived tree, and its archive
+deletion sweep deletes it - so the engine calls neither `DeleteMarked` nor `DeleteArchivedRoots`. What still runs is
+`DeleteLive`, which the engine's Delete calls. Everything
 below describes the reaper as a whole, both walkers included.
 
 On one shard the stages share the caller's turn and run serially: retention cleanup, then closed and stamped trees
@@ -300,10 +302,13 @@ other; the engine's `lockRows` names this one, and Fork's pins stay in the engin
 
 ## Archive-side deletion
 
+The engine calls none of this: a Delete or Purge of an archived tree only marks it, and the janitor's archive deletion
+sweep deletes it (`internal/janitor/CLAUDE.md`). What follows describes the reaper's own operations, kept as the
+reference.
+
 `DeleteArchivedRoots` (Delete, with one root; Purge) runs on the caller's context: no attempt deadline and none of
-the pass's faults, since an operator's call has its own deadline
-(`TestReaperContract_RemovalsRunOnTheCallersContext`). Its budget is the engine's `reapBatchRows` and
-`reapBatchBytes`, the same values as a pass's `BatchRows` and `BatchBytes`, passed in explicitly.
+the pass's faults, since an operator's call has its own deadline. Its budget is the batch's rows and bytes, passed in
+explicitly.
 
 - **A tree that fits a batch is deleted in one transaction**, the directory's rows with it. A day whose
   tables are gone deletes nothing and is no error. `FaultArchiveDelete`, targeted at a root, fails the transaction that
@@ -312,8 +317,8 @@ the pass's faults, since an operator's call has its own deadline
   the one UPDATE that also takes the root's lock; it hides the whole tree from every read at once (the visibility
   rule), so the call counts the tree removed. Whether a tree fits is read only as far as the batch (`cutWithin`'s
   capped reads), so sizing a tree of millions of rows does not spend the call before its allowance begins. The call
-  then deletes chunks (`chunk` on `archiveTarget`, which also deletes the directory's rows) until its deadline - the engine's `archiveDeleteInCall`, 5 s, since an API call must
-  not run for tens of seconds - and the rest is left. **The chunks run under that deadline**, not only between them:
+  then deletes chunks (`chunk` on `archiveTarget`, which also deletes the directory's rows) until its deadline, since
+  an API call must not run for tens of seconds, and the rest is left. **The chunks run under that deadline**, not only between them:
   checked between chunks alone, a chunk waiting on a lock held the call for as long as the lock was held
   (`TestDelete_TheInCallChunksKeepToTheirDeadline`). A chunk that fails after the mark is no failure of the call.
 - **A marked tree is never counted twice:** a mark already there matches nothing, Purge's list skips marked roots

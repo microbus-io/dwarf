@@ -271,7 +271,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 6, "fast, sweep and large-tree archiving, fast and sweep deletion, and live retention are reported")
+	assert.Len(got, 7, "fast, sweep and large-tree archiving, fast and sweep deletion, live retention and the archive deletion sweep are reported")
 	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
 	setRole(e, 1, false)

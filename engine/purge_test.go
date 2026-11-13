@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -112,6 +113,7 @@ func TestDelete_AnArchivedFlowIsDeletedInItsDay(t *testing.T) {
 	assert.Equal(2, flows, "untouched")
 
 	assert.NoError(e.Delete(ctx, rootKey))
+	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the Delete marked
 	flows, steps := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
 	assert.Zero(flows, "the tree's flows")
 	assert.Zero(steps, "and steps")
@@ -119,6 +121,35 @@ func TestDelete_AnArchivedFlowIsDeletedInItsDay(t *testing.T) {
 	_, err = e.Snapshot(ctx, rootKey)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
 	assert.Equal(http.StatusNotFound, errors.StatusCode(e.Delete(ctx, rootKey)), "deleted already")
+}
+
+// TestArchiveDeletion_ARootIsMarkedOnce pins the mark's count, which Delete and Purge report and dwarf_flows_removed
+// counts: a root is counted when it is marked, and a second mark of it - a racing Delete or Purge - matches nothing and
+// counts nothing; a subgraph child is never marked, its root's mark covering it.
+func TestArchiveDeletion_ARootIsMarkedOnce(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	today, err := e.archiveOn(1).Today(ctx)
+	assert.NoError(err)
+	root := closedRoots(t, e, 1)[0]
+	archivedTreeKeys(t, e, root, today)
+	if now, _ := e.archiveOn(1).Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	db := sh.DB()
+	var child int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM "+migrations.FlowsTable(today)+
+		" WHERE root_flow_id=? AND flow_id<>?", root, root).Scan(&child))
+	n, err := e.markArchived(ctx, db, today, []int{root, child}, 4096)
+	assert.NoError(err)
+	assert.Equal(1, n, "the root alone")
+	n, err = e.markArchived(ctx, db, today, []int{root}, 4096)
+	assert.NoError(err)
+	assert.Zero(n, "marked already")
 }
 
 // TestPurge_OldestArchivedFirstAndOnlyTheArchive pins Purge's order and its done flag over three archive days: the
@@ -178,6 +209,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(3, removed)
 	assert.False(done, "the archive may hold more")
+	deleteMarkedNow(ctx, e)
 	assert.Zero(inDay(today-2, roots[0]), "the oldest archived, deleted in its day")
 	assert.Zero(inDay(today-1, roots[1]), "the next two, both in one day: two chunks of one")
 	assert.Zero(inDay(today-1, roots[2]))
@@ -189,6 +221,7 @@ func TestPurge_OldestArchivedFirstAndOnlyTheArchive(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(1, removed, "the last archived root")
 	assert.True(done, "the archive held fewer than the limit")
+	deleteMarkedNow(ctx, e)
 	assert.Zero(inDay(today, roots[3]))
 	for _, root := range roots[4:] {
 		flows, _ := treeCount(t, e, "dwarf_flows", "dwarf_steps", root)
@@ -304,6 +337,7 @@ func TestDelete_AnArchivedTreeWaitsForAForkOfIt(t *testing.T) {
 	r := <-forked
 	assert.NoError(r.err)
 	assert.NoError(<-deleted)
+	e.reapDueFlows(ctx) // the archive deletion sweep deletes what the Delete marked
 	flows, _ := treeCount(t, e, migrations.FlowsTable(today), migrations.StepsTable(today), root)
 	assert.Zero(flows, "the source deleted after the fork")
 	if r.err == nil {
@@ -322,4 +356,10 @@ func TestPurge_Done(t *testing.T) {
 	assert.False(purgeDone(10, 10, 10), "the archive filled the limit")
 	assert.False(purgeDone(10, 3, 2), "a root went to a racing Delete first")
 	assert.True(purgeDone(10, 0, 0), "nothing matched")
+}
+
+// deleteMarkedNow runs the janitors' jobs until they make no progress with an archive grace of a day, so the archive
+// deletion sweep deletes what a Delete or Purge marked while nothing that closed since is archived.
+func deleteMarkedNow(ctx context.Context, e *Engine) {
+	e.drainJanitors(ctx, 24*time.Hour)
 }

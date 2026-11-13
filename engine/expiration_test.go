@@ -146,7 +146,7 @@ func age(t *testing.T, e *Engine, fk string, ago time.Duration) {
 
 // expireNow runs a reaper pass that expires, as the reaper's goroutine does every expireInterval.
 func expireNow(ctx context.Context, e *Engine) {
-	e.reapPass(ctx, e.archiveGrace, true)
+	e.reapPass(ctx, true)
 }
 
 // statusOf returns a flow's status, and its terminate reason.
@@ -441,7 +441,7 @@ func TestExpiration_AHandoffForgetsThePosition(t *testing.T) {
 	e, _, _ := expiryEngine(t, time.Hour)
 	e.expirePositions.set(1, 42)
 	setRole(e, 1, false)
-	e.reapPass(t.Context(), e.archiveGrace, false)
+	e.reapPass(t.Context(), false)
 	setRole(e, 1, true)
 	assert.Equal(0, e.expirePositions.of(1))
 }

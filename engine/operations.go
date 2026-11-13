@@ -1092,8 +1092,8 @@ func (e *Engine) archivedFlowRow(ctx context.Context, db *sequel.DB, shardNum, f
 	return day, status, surgraphFlowID, nil
 }
 
-// deleteArchivedFlow removes an authenticated archived root through the reaper's atomic or mark-and-drain path.
-// A subgraph child's key is a 400, as on the live side.
+// deleteArchivedFlow marks an authenticated archived root for deletion, which hides its tree from every read at once;
+// the janitor's archive deletion sweep deletes it. A subgraph child's key is a 400, as on the live side.
 func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum, flowID int, flowToken string, flowHour int) error {
 	day, _, surgraphFlowID, err := e.archivedFlowRow(ctx, db, shardNum, flowID, flowToken, flowHour)
 	if err != nil {
@@ -1102,9 +1102,9 @@ func (e *Engine) deleteArchivedFlow(ctx context.Context, db *sequel.DB, shardNum
 	if surgraphFlowID != 0 {
 		return errors.New("cannot delete a subgraph child; use the root flow key", http.StatusBadRequest)
 	}
-	n, err := e.reaper.Load().DeleteArchivedRoots(ctx, db, day, []int{flowID}, 1, e.reapBatchRows, e.reapBatchBytes, time.Now().Add(e.archiveDeleteInCall))
-	if sequel.IsUndefinedTableError(err) || (err == nil && n == 0) {
-		return errors.New("flow not found", http.StatusNotFound) // dropped, or deleted by a racing Delete or Purge
+	n, err := e.markArchived(ctx, db, day, []int{flowID}, 1)
+	if err == nil && n == 0 {
+		return errors.New("flow not found", http.StatusNotFound) // dropped, or marked by a racing Delete or Purge
 	}
 	if err != nil {
 		return errors.Trace(err)

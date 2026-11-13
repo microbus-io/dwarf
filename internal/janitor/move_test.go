@@ -588,7 +588,7 @@ func TestMove_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	holderDone := make(chan error, 1)
 	go func() {
 		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
-			_, err := lockRoots(ctx, tx, false, "flow_id=?", held)
+			_, err := lockRoots(ctx, tx, "", false, "flow_id=?", held)
 			locked <- err
 			<-release
 			return err
@@ -714,7 +714,7 @@ func TestMove_TheSizingSeeksEachFlowsSteps(t *testing.T) {
 	if r.db.DriverName() != "pgx" {
 		t.Skip("the plan pinned here is PostgreSQL's")
 	}
-	stmt := treesSizesUpToSQL(r.db.DriverName(), []int{1, 2}, []int{1001, 4097})
+	stmt := treesSizesUpToSQL(r.db.DriverName(), "", []int{1, 2}, []int{1001, 4097})
 	var plan strings.Builder
 	errRollback := errors.New("rollback")
 	err := r.db.Transact(ctx, func(tx *sequel.Tx) error {

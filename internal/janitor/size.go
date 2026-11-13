@@ -81,8 +81,8 @@ const (
 // treesSizesUpTo sizes each tree rooted at roots in the live tables - its flow rows and its step rows, and their payload bytes - each
 // read up to its own limit of rows, in one statement (treesSizesUpToSQL), so a group of trees costs one round trip and
 // no tree is read past its limit. A tree read up to its limit reports at least that many rows.
-func treesSizesUpTo(ctx context.Context, q sequel.Executor, roots, limits []int) ([]size, error) {
-	rows, err := q.QueryContext(ctx, treesSizesUpToSQL(q.DriverName(), roots, limits))
+func treesSizesUpTo(ctx context.Context, q sequel.Executor, sfx string, roots, limits []int) ([]size, error) {
+	rows, err := q.QueryContext(ctx, treesSizesUpToSQL(q.DriverName(), sfx, roots, limits))
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -107,7 +107,7 @@ func treesSizesUpTo(ctx context.Context, q sequel.Executor, roots, limits []int)
 // hash join over a scan of every step in the table, which the LIMIT stops early only for a tree larger than it, so a
 // small tree costs the whole table. MySQL, MariaDB and SQLite join an indexed equality by nested loops. Each read is
 // capped on its own, since a LIMIT over a UNION ALL is applied after MySQL materializes it whole.
-func treesSizesUpToSQL(driver string, roots, limits []int) string {
+func treesSizesUpToSQL(driver, sfx string, roots, limits []int) string {
 	// SQL Server sums an INT as an INT, which a tree's bytes can overflow, so it sums a BIGINT there.
 	sum := "COALESCE(SUM(b), 0)"
 	if driver == "mssql" {
@@ -116,16 +116,16 @@ func treesSizesUpToSQL(driver string, roots, limits []int) string {
 	branches := make([]string, 0, 2*len(roots))
 	for k, root := range roots {
 		n, id := strconv.Itoa(limits[k]), strconv.Itoa(root)
-		steps := stepBytesSQL + " AS b FROM dwarf_flows f JOIN dwarf_steps s ON s.flow_id=f.flow_id"
+		steps := stepBytesSQL + " AS b FROM dwarf_flows" + sfx + " f JOIN dwarf_steps" + sfx + " s ON s.flow_id=f.flow_id"
 		switch driver {
 		case "pgx":
-			steps = "s.b FROM dwarf_flows f CROSS JOIN LATERAL (SELECT " + stepBytesSQL + " AS b FROM dwarf_steps" +
+			steps = "s.b FROM dwarf_flows" + sfx + " f CROSS JOIN LATERAL (SELECT " + stepBytesSQL + " AS b FROM dwarf_steps" + sfx +
 				" s WHERE s.flow_id=f.flow_id LIMIT " + n + ") s"
 		case "mssql":
-			steps = "s.b FROM dwarf_flows f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL + " AS b FROM dwarf_steps" +
+			steps = "s.b FROM dwarf_flows" + sfx + " f CROSS APPLY (SELECT TOP (" + n + ") " + stepBytesSQL + " AS b FROM dwarf_steps" + sfx +
 				" s WHERE s.flow_id=f.flow_id) s"
 		}
-		flows := capped(driver, flowBytesSQL+" AS b FROM dwarf_flows WHERE root_flow_id="+id, limits[k])
+		flows := capped(driver, flowBytesSQL+" AS b FROM dwarf_flows"+sfx+" WHERE root_flow_id="+id, limits[k])
 		stepRows := capped(driver, steps+" WHERE f.root_flow_id="+id, limits[k])
 		agg := func(key int) string {
 			return "SELECT " + strconv.Itoa(key) + " AS k, COUNT(*) AS n, " + sum + " AS b FROM ("

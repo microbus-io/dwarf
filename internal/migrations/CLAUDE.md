@@ -257,10 +257,10 @@ ever exists under those names. So:
   `root_flow_id` - except that the status index is on `(status, archived_at)` rather than `(status, updated_at)`, plus
   an `(archived_at)` range: a day is read in archive order.
   - **`delete_after_ms` on an archive root is the archive's deletion mark** (a stamped live root is deleted, never
-    archived): a tree too large for one transaction is marked, hidden at once, and deleted in the background. Its
-    deletion index, `(flow_id) WHERE delete_after_ms > 0` (partial; filtered on SQL Server; the full
-    `(delete_after_ms)` on MySQL and MariaDB, named with `FORCE INDEX`), is what the reaper's five-minute probe of
-    every retained day reads: empty but for a mark on the partial dialects, about 5% on the archive insert on MySQL.
+    archived): a Delete or Purge marks the root, the tree is hidden at once, and the janitor's archive deletion sweep
+    deletes it. Its deletion index, `(flow_id) WHERE delete_after_ms > 0` (partial; filtered on SQL Server; the full
+    `(delete_after_ms)` on MySQL and MariaDB, named with `FORCE INDEX`), is what the sweep's probe of each retained day
+    reads: empty but for a mark on the partial dialects, about 5% on the archive insert on MySQL.
     Without it the probe reads each day's flows table in full (24-82 ms per 415,000-flow day).
   - **The roots index, `(archived_at, flow_id) WHERE surgraph_flow_id = 0`** (partial; filtered on SQL Server;
     `(surgraph_flow_id, archived_at, flow_id)`, full, on MySQL and MariaDB), serves the roots-only lists and Purge in

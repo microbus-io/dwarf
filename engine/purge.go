@@ -19,16 +19,20 @@ package engine
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strconv"
 	"sync/atomic"
-	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
 
 // purge removes the closed roots matching query from the archive, oldest archived first, at most query.Limit of them:
-// the internal ascending ListClosed, each tree deleted at once in its day. It reads only the archive, as ListClosed
+// the internal ascending ListClosed, each root marked for deletion in its day, its rows deleted by the janitor. It reads only the archive, as ListClosed
 // does, so a call removes what the same ListClosed would list; a root closed in the last minute, not archived yet, is
 // left for a later call, and Delete removes one by its key. done is true when the archive had fewer than it took and
 // every root it took was removed.
@@ -64,17 +68,14 @@ func purgeDone(limit, took, gone int) bool {
 	return took < limit && gone == took
 }
 
-// deleteArchivedRoots deletes the trees of the archived roots, each in the day the list read it from, and returns how
-// many roots it deleted. Each shard's day goes to the reaper in transactions of about a reaper batch (reapBatchRows and
-// reapBatchBytes) and at most purgeChunk roots: 4,096 roots of wide fan-outs would otherwise be millions of rows deleted in one transaction,
-// holding the vacuum horizon and the shard's turn for its length. dwarf_flows_removed counts each shard's total once,
-// what committed before a failure included.
+// deleteArchivedRoots marks the archived roots for deletion, each in the day the list read it from, and returns how
+// many it marked: each tree hidden from every read at once, and deleted by the janitor's archive deletion sweep. The
+// call deletes nothing itself, so it is a statement per purgeChunk roots whatever the trees hold. dwarf_flows_removed
+// counts each shard's total once, what committed before a failure included.
 func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int, error) {
 	if e.allActors() == nil || len(roots) == 0 {
 		return 0, nil
 	}
-	r := e.reaper.Load()
-	until := time.Now().Add(e.archiveDeleteInCall)
 	var deleted atomic.Int64
 	err := e.onShardsOf(ctx, roots, func(ctx context.Context, db *sequel.DB, rows []listRow) error {
 		shardDeleted := 0
@@ -88,7 +89,7 @@ func (e *Engine) deleteArchivedRoots(ctx context.Context, roots []listRow) (int,
 			byDay[lr.day] = append(byDay[lr.day], lr.flowID)
 		}
 		for day, dayIDs := range byDay {
-			n, err := r.DeleteArchivedRoots(ctx, db, day, dayIDs, e.purgeChunk, e.reapBatchRows, e.reapBatchBytes, until)
+			n, err := e.markArchived(ctx, db, day, dayIDs, e.purgeChunk)
 			shardDeleted += n
 			if err != nil {
 				return errors.Trace(err)
@@ -117,4 +118,46 @@ func (e *Engine) onShardsOf(ctx context.Context, rows []listRow, fn func(ctx con
 		defer doneTurn()
 		return fn(ctx, db, mine)
 	}))
+}
+
+// markArchived marks for deletion the archived roots among roots in day's tables on db that are roots and not marked
+// yet, in statements of at most chunk roots, and returns how many it marked. A mark hides the whole tree from every read
+// at once; the janitor's archive deletion sweep deletes it. A day whose tables are gone marks nothing and is no error:
+// its trees went with it. Each statement locks the roots it marks, as a deletion's lock does, so a Fork holding one
+// is waited for.
+func (e *Engine) markArchived(ctx context.Context, db *sequel.DB, day int, roots []int, chunk int) (marked int, err error) {
+	chunk = max(chunk, 1)
+	flows := migrations.FlowsTable(day)
+	for ids := slices.Sorted(slices.Values(roots)); len(ids) > 0; {
+		n := min(chunk, len(ids))
+		if e.diags.Seams().Enabled() {
+			for _, root := range ids[:n] {
+				// diagnostics.FaultArchiveMark, targeted at a root, fails the statement that would mark it.
+				if e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultArchiveMark, strconv.Itoa(root))) {
+					return marked, errors.New("injected fault: " + diagnostics.FaultArchiveMark)
+				}
+			}
+		}
+		// A transaction of one statement, for Transact's retry of a deadlock or a lock wait; the mark is idempotent, a root
+		// marked already matching nothing.
+		var k int64
+		err := db.Transact(ctx, func(tx *sequel.Tx) error {
+			res, err := tx.ExecContext(ctx, "UPDATE "+flows+" SET delete_after_ms=1 WHERE flow_id IN ("+database.IntList(ids[:n])+
+				") AND surgraph_flow_id=0 AND delete_after_ms=0")
+			if err != nil {
+				return err
+			}
+			k, err = res.RowsAffected()
+			return errors.Trace(err)
+		})
+		if sequel.IsUndefinedTableError(err) {
+			return marked, nil
+		}
+		if err != nil {
+			return marked, errors.Trace(err)
+		}
+		marked += int(k)
+		ids = ids[n:]
+	}
+	return marked, nil
 }

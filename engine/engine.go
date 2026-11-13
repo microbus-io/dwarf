@@ -355,16 +355,11 @@ type Engine struct {
 	reapBatchBytes      int           // about how many payload bytes one reaper batch moves, at least one tree (16 MiB)
 	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
 	reapStageBytes      int           // the tree payload above which archival is staged, when it is; 0, no byte threshold
-	reapAttempt         time.Duration // one database attempt (30s)
-	reapBudget          time.Duration // healthy backlog work per pass (30s)
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
-	purgeChunk int
-	// archiveDeleteInCall is how long a Delete or Purge spends deleting an archived tree it marked before it returns,
-	// the rest left to the reaper's periodic stage (5s): an API call must not run for tens of seconds.
-	archiveDeleteInCall time.Duration
-	reapInterval        time.Duration // reaper goroutine tick; read once at Startup (15s)
+	purgeChunk   int
+	reapInterval time.Duration // reaper goroutine tick; read once at Startup (15s)
 	// The expiration pass (expiration.go): how often it runs in the reaper's goroutine (5m), how long one shard's pass
 	// may keep reading and starting terminations (30s), how many rows one page of its walk reads (256), and where each
 	// shard's walk resumes.
@@ -428,13 +423,10 @@ func NewEngine() *Engine {
 	e.deletionGrace = 1 * time.Minute
 	e.archiveGrace = 1 * time.Minute
 	e.sweepOverdue = janitor.DefaultSweepOverdue
-	e.reapAttempt = 30 * time.Second
-	e.reapBudget = 30 * time.Second
 	e.reapBatch = 512
 	e.reapBatchRows = 4096
 	e.reapBatchBytes = 16 << 20
 	e.purgeChunk = 4096
-	e.archiveDeleteInCall = 5 * time.Second
 	e.reapInterval = 15 * time.Second
 	e.expireInterval = 5 * time.Minute
 	e.expireBudget = 30 * time.Second
@@ -1504,10 +1496,10 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 }
 
 // Delete removes a closed flow and its subgraph subtree. An archived flow is gone from every read when Delete returns:
-// a small tree is deleted at once, a large one marked and its rows deleted in the background, as Purge does. One not
-// archived yet - the minute after it closes - is marked for deletion, and a background reaper removes it shortly after,
+// it is marked for deletion, and its rows are deleted in the background, as Purge's are. One not archived yet - the
+// minute after it closes - is marked for deletion too, and removed in the background shortly after,
 // without archiving it: History, Summary and Step return 404 for it immediately, though Snapshot, Fingerprint and Await
-// still report its outcome until the reaper removes it, and calling Delete on it again is success. The same holds for
+// still report its outcome until it is removed, and calling Delete on it again is success. The same holds for
 // a flow archived so recently that its copy in the live tables is still being removed. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
@@ -1521,11 +1513,11 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // Purge removes the closed flows ListClosed would list for a query, and their subgraph subtrees, oldest archived
 // first: at most Query.Limit roots in a call. A removed root is gone from the archive's reads and from every list when
 // the call returns; Snapshot, Fingerprint and Await of one archived so recently that its copy in the live tables is
-// still being removed keep reporting its outcome until that copy is gone. A small tree is deleted at once; a large one is marked, and its rows are deleted in the background, so its
-// storage is released later, or when its day drops. As of the reaper's last sweep, which runs every five minutes,
-// dwarf_archive_deletions_pending counts such trees still being deleted and dwarf_archive_deletion_days_unknown the
-// archive days the sweep could not examine: both reading zero five minutes after the call means their storage is
-// released. A flow awaiting archival is not in ListClosed
+// still being removed keep reporting its outcome until that copy is gone. Each root is marked for deletion, and its
+// tree's rows are deleted in the background, so its storage is released later, or when its day drops.
+// dwarf_archive_deletions_pending counts marked trees the background deletion found and could not delete yet - held by
+// another transaction, or failing - and dwarf_archive_deletion_days_unknown the archive days it could not examine. A
+// flow awaiting archival is not in ListClosed
 // and Purge leaves it - ListRecentlyClosed lists it, and Delete schedules its removal by key. Open
 // flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
 // removed with its root).
