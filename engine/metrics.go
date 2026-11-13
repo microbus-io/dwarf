@@ -157,7 +157,7 @@ type flowKeyAttrs struct {
 // shardAttrOpts returns the options carrying only the shard attribute.
 func (m *engineMetrics) shardAttrOpts(shard int) *attrOpts {
 	return m.shardOpts.get(shard, func(shard int) *attrOpts {
-		return newAttrOpts(attribute.String("shard", strconv.Itoa(shard)))
+		return newAttrOpts(shardAttr(shard))
 	})
 }
 
@@ -447,7 +447,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 	// Peer readings, per shard: atomic reads of what each Sonar last published, so this costs no round trip
 	// and stays honest while a shard is unreadable (the count holds, and blindFor is what says why).
 	for _, idx := range e.db.Indices() {
-		shard := metric.WithAttributes(attribute.String("shard", strconv.Itoa(idx)))
+		shard := metric.WithAttributes(shardAttr(idx))
 		o.ObserveInt64(g.peerReplicas, int64(e.replicasOn(idx)), shard)
 		dispatching := int64(0)
 		if e.dispatchesOn(idx) {
@@ -522,7 +522,7 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 			continue
 		}
 		for priority, n := range b.pending {
-			attrs := metric.WithAttributes(attribute.String("shard", strconv.Itoa(shard)), attribute.String("priority", strconv.Itoa(priority)))
+			attrs := metric.WithAttributes(shardAttr(shard), attribute.String("priority", strconv.Itoa(priority)))
 			o.ObserveInt64(g.stepsPending, n, attrs)
 			o.ObserveInt64(g.oldestAge, b.oldestS[priority], attrs)
 		}
@@ -544,7 +544,7 @@ func (e *Engine) metricFlowStarted(ctx context.Context, workflowURL string, prio
 		return
 	}
 	opts := e.metrics.flowStartOpts.get(flowKeyAttrs{workflow: workflowURL, shard: shardNum, priority: priority}, func(k flowKeyAttrs) *attrOpts {
-		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("shard", strconv.Itoa(k.shard)),
+		return newAttrOpts(attribute.String("workflow", k.workflow), shardAttr(k.shard),
 			attribute.String("priority", strconv.Itoa(k.priority)))
 	})
 	e.metrics.flowsStarted.Add(ctx, 1, opts.add...)
@@ -559,7 +559,7 @@ func (e *Engine) metricFlowClosed(ctx context.Context, workflowURL, status strin
 	}
 	opts := e.metrics.flowEndOpts.get(flowKeyAttrs{workflow: workflowURL, status: status, shard: shardNum, priority: priority}, func(k flowKeyAttrs) *attrOpts {
 		return newAttrOpts(attribute.String("workflow", k.workflow), attribute.String("status", k.status),
-			attribute.String("shard", strconv.Itoa(k.shard)), attribute.String("priority", strconv.Itoa(k.priority)))
+			shardAttr(k.shard), attribute.String("priority", strconv.Itoa(k.priority)))
 	})
 	e.metrics.flowsClosed.Add(ctx, 1, opts.add...)
 }
@@ -609,7 +609,7 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	// fleet-wide total cannot show one shard falling behind the others.
 	opts := e.metrics.stepExecOpts.get(stepExecKey{task: taskName, status: status, shard: shardNum}, func(k stepExecKey) *attrOpts {
 		return newAttrOpts(attribute.String("task_name", k.task), attribute.String("status", k.status),
-			attribute.String("shard", strconv.Itoa(k.shard)))
+			shardAttr(k.shard))
 	})
 	e.metrics.stepsExecuted.Add(ctx, 1, opts.add...)
 }
@@ -621,7 +621,7 @@ func (e *Engine) metricOperation(ctx context.Context, op string, shardNum int, d
 		return
 	}
 	opts := e.metrics.operationOpts.get(operationKey{op: op, shard: shardNum}, func(k operationKey) *attrOpts {
-		return newAttrOpts(attribute.String("op", k.op), attribute.String("shard", strconv.Itoa(k.shard)))
+		return newAttrOpts(attribute.String("op", k.op), shardAttr(k.shard))
 	})
 	e.metrics.operationSeconds.Record(ctx, d.Seconds(), opts.rec...)
 }
@@ -635,7 +635,7 @@ func (e *Engine) metricPeerCountChanged(ctx context.Context, shardNum, from, to 
 	if e.metrics == nil {
 		return
 	}
-	e.metrics.peerChanges.Add(ctx, 1, metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
+	e.metrics.peerChanges.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
 }
 
 func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {
@@ -654,7 +654,7 @@ func (e *Engine) metricStepWriteRetried(ctx context.Context, shardNum int) {
 	}
 	// STRING, not Int - see shardAttr's note in internal/piston. Every `shard` attribute the engine emits
 	// must be the same OTLP type or a backend that distinguishes them cannot group across them.
-	e.metrics.stepsWriteRetried.Add(ctx, 1, metric.WithAttributes(attribute.String("shard", strconv.Itoa(shardNum))))
+	e.metrics.stepsWriteRetried.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
 }
 
 // metricStepWriteFailed is an alarm, not a statistic: the engine could reach the database and still could not
@@ -704,7 +704,8 @@ func (e *Engine) metricOrphanedFlow(ctx context.Context, workflowURL string) {
 	e.metrics.flowsOrphaned.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", workflowURL)))
 }
 
-// shardAttr is the shard attribute alone, for the archive's cold-path recorders.
+// shardAttr is the shard attribute every engine instrument carries. It is a string, as the piston's and the janitor's
+// are: a backend that distinguishes attribute types would read an int beside it as a different attribute.
 func shardAttr(shardNum int) attribute.KeyValue {
 	return attribute.String("shard", strconv.Itoa(shardNum))
 }

@@ -233,6 +233,17 @@ func (e *Engine) flowGraphIn(ctx context.Context, db sequel.Executor, t flowTabl
 	return cg.Graph, workflowURL, nil
 }
 
+// internGraph is graphcache's Intern with its parse failure made a permanentError: the stored bytes will not parse
+// on a retry either, and a flow whose graph cannot be read must still be stoppable (terminalFinalState takes a
+// permanentError as an empty final state). Every intern goes through here.
+func (e *Engine) internGraph(graphJSON []byte, workflowURL, graphHash string) (*graphcache.Entry, error) {
+	cg, err := e.graphs.Intern(graphJSON, workflowURL, graphHash)
+	if err != nil {
+		return nil, errors.Trace(&permanentError{err})
+	}
+	return cg, nil
+}
+
 // computeFinalState computes the merged state for a flow.
 func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID int, flowToken string) ([]byte, string, error) {
 	var completed terminalTails
