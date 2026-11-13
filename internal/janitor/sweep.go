@@ -45,7 +45,7 @@ const (
 )
 
 // HeldRootsDescription is the sweep gauge's description, the same for every kind.
-const HeldRootsDescription = "Roots a sweep failed on singly: the larger of the current sweep's count and the last complete one's. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff."
+const HeldRootsDescription = "Roots a sweep failed on singly: the larger of the current sweep's count and the last complete one's. Per replica, shard, kind and job: a replica's jobs of one kind hold disjoint roots, but two replicas can hold the same one, so aggregate replicas with max, not sum. Resets at restart or handoff."
 
 // sweep is a sweep job's account of its sweeps: whether one is under way, how many roots its next batch takes, and what
 // its gauges report. The job's goroutine alone touches sweeping, size and front; the rest is under mu, which the gauge

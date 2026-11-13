@@ -19,16 +19,21 @@ Package janitor runs one shard's background jobs on the live and archive tables,
 Its jobs are fast archiving (NewFastArchiving) - closed trees moved into the archive, or deleted at a retention of 0,
 as they come due - large-tree archiving (NewLargeArchiving) - trees too large for one transaction copied into the
 archive in stages, then published - and fast deletion (NewFastDeletion) - the trees stamped for deletion deleted as
-they come due.
+they come due. Several fast jobs of one kind share out the shard's roots (SetShare), each with a sweep of its own
+behind it (NewSweepArchiving, NewSweepDeletion).
 
 A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
 dispatches the shard - and a paused one holds no goroutine and no connection:
 
 	j := janitor.New(shard, diags)
-	fa := janitor.NewFastArchiving(archive, retentionDays)
-	fa.SetGrace(grace)
-	j.AddJob(janitor.JobFastArchiving, fa)
-	j.AddJob(janitor.JobFastDeletion, janitor.NewFastDeletion())
+	for k := 1; k <= 2; k++ {
+		fa := janitor.NewFastArchiving(archive, retentionDays)
+		fa.SetShare(k, 2)
+		fa.SetGrace(grace)
+		j.AddJob(janitor.ShareName(janitor.JobFastArchiving, k), fa)
+		j.AddJob(janitor.ShareName(janitor.JobSweepArchiving, k), janitor.NewSweepArchiving(fa, archive, retentionDays))
+	}
+	j.AddJob(janitor.ShareName(janitor.JobFastDeletion, 1), janitor.NewFastDeletion())
 	j.Start(ctx)
 	j.Resume() // this replica dispatches the shard
 	j.Pause()  // it stopped dispatching the shard

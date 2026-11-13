@@ -30,17 +30,18 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// JobSweepArchiving is the name the engine adds its sweep archiving job under.
+// JobSweepArchiving is the kind of the engine's sweep archiving jobs, the one behind ShareName(JobFastArchiving, k)
+// added under ShareName(JobSweepArchiving, k).
 const JobSweepArchiving = "sweep_archiving"
 
-// SweepArchiving is the job that archives the closed roots fast archiving left behind: one it failed on, found held or
-// could not start an attempt for, one whose close committed late behind its position, one of a slow peer's class. Each
-// sweep captures fast archiving's position as it begins and walks the closed roots at or behind it in close order,
-// taking those overdue by its window past the archive grace - what fast archiving has passed and is no longer coming
-// back for. It routes them as fast archiving does: moved, a tree over the staging threshold given its attempt for
-// large-tree archiving, one with an attempt passed, and at a retention of 0 deleted or stamped. A failed batch is
-// taken again a root at a time; a root that fails alone is held - counted, logged and passed - and the next sweep
-// comes back to it.
+// SweepArchiving is the job that archives the closed roots its fast archiving job left behind: one it failed on, found
+// held or could not start an attempt for, one whose close committed late behind its position, one of a slow peer's
+// class. Each sweep captures the fast job's position as it begins and walks the closed roots of its share at or behind
+// it in close order, taking those overdue by its window past the archive grace - what fast archiving has passed and is
+// no longer coming back for. It routes them as fast archiving does: moved, a tree over the staging threshold given its
+// attempt for large-tree archiving, one with an attempt passed, and at a retention of 0 deleted or stamped. A failed
+// batch is taken again a root at a time; a root that fails alone is held - counted, logged and passed - and the next
+// sweep comes back to it.
 type SweepArchiving struct {
 	fast          *FastArchiving
 	archive       *archiver.Archive
@@ -131,7 +132,7 @@ func (s *SweepArchiving) attach(j *Janitor, name string) {
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
 	errs[3] = err
-	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindClosed))
+	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindClosed), attribute.String("job", name))
 	jobShard := metric.WithAttributes(s.shardAttr, attribute.String("job", name))
 	s.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
@@ -299,12 +300,12 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	return moved
 }
 
-// restriction is a sweep batch's restriction of its scan: the residue class of its end, with every root overdue by
-// the steal grace past the sweep's window; the range after the sweep's position; the range at or behind its end; and,
-// when archiving, no root with an archive attempt - large-tree archiving's, which every sweep would otherwise pass
-// again, a batch at a time, for as long as its copy runs.
+// restriction is a sweep batch's restriction of its scan: the share and residue class of its end, with every root of
+// the share overdue by the steal grace past the sweep's window; the range after the sweep's position; the range at or
+// behind its end; and, when archiving, no root with an archive attempt - large-tree archiving's, which every sweep would
+// otherwise pass again, a batch at a time, for as long as its copy runs.
 func (s *SweepArchiving) restriction(driver string, archiving bool) (where string, args []any) {
-	where, args = closedResidency(s.end.count, s.end.ordinal, s.end.partitioned, s.grace+s.overdue, stealGrace)
+	where, args = closedResidency(s.end.count, s.end.ordinal, s.end.partitioned, s.end.share, s.grace+s.overdue, stealGrace)
 	if archiving {
 		none, noneArg := NoAttemptSQL(driver)
 		where += " AND archive_attempt_at<=" + none

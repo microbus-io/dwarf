@@ -3184,8 +3184,8 @@ same site as its error log; the flows it does repair count in `dwarf_steps_recov
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**Archive instruments read what the jobs read anyway, but for three statements of their own:** fast archiving's lag
-probe and large-tree archiving's oldest-attempt probe, each at most once a second while busy and once a round while
+**Archive instruments read what the jobs read anyway, but for three statements of their own:** each fast archiving
+job's lag probe and large-tree archiving's oldest-attempt probe, each at most once a second while busy and once a round while
 idle, and live retention's count of the flows of the trees it stamps (a `GROUP BY` over the batch's roots, before its
 transaction). Counters record completed work and gauges read job state. `dwarf_flows_archived` and
 `dwarf_flows_reaped{reason}` count flow rows only after a successful transaction result. Reasons are `deleted`,
@@ -3193,19 +3193,20 @@ transaction). Counters record completed work and gauges read job state. `dwarf_f
 **stamps** it, the moment its records are given up. Its deletion then counts the same flows again under `deleted`, so
 for these trees the two reasons overlap and the reasons do not sum to the flows removed (user; the janitor's
 `CLAUDE.md`, "Live retention").
-`dwarf_archive_lag_seconds` is the fast archiving job's probe of the shard's oldest due closed root
-(`internal/janitor/CLAUDE.md`). A failed archive attempt is seen through `dwarf_archive_failing_seconds` and the logs,
+`dwarf_archive_lag_seconds` is a series per fast archiving job (`job`), each its probe of the oldest due closed root
+of its share; the shard's lag is their max (`internal/janitor/CLAUDE.md`). A failed archive attempt is seen through `dwarf_archive_failing_seconds` and the logs,
 not counted.
 
-A sweep publishes `dwarf_archive_held_roots{shard,kind}` as the maximum of the running and last completed sweep's
+A sweep publishes `dwarf_archive_held_roots{shard,kind,job}` as the maximum of the running and last completed sweep's
 failed-single count. Kind is the janitor job's: `closed` sweep archiving, `deleted` sweep deletion, `retention` live
-retention, each registering its own series (`internal/janitor/CLAUDE.md`, "The sweeps"). These are per-replica
-observations: aggregate with max, never sum as distinct roots. Collection does not query the database. Running
+retention, each job registering its own series (`internal/janitor/CLAUDE.md`, "The sweeps"). These are per-replica
+observations: a replica's jobs of one kind hold disjoint roots, but two replicas can hold the same one, so aggregate
+replicas with max, never sum. Collection does not query the database. Running
 failure counts are published between attempts, so a long sweep does not hide accumulated failures until completion.
 
 `dwarf_archive_failing_seconds` is a series per archiving job (`job`; aggregate with max), each the job's own
-episode (`internal/janitor/CLAUDE.md`): fast archiving's begins at a scan, day or move failure and ends at a later
-move that archives something or a probe finding nothing due at the failure still live; sweep archiving's begins at
+episode (`internal/janitor/CLAUDE.md`): a fast archiving job's begins at a scan, day or move failure and ends at a
+later move that archives something or a probe finding nothing of its share due at the failure still live; sweep archiving's begins at
 any of its failures and ends at a sweep that completes failing nothing; large-tree archiving's begins at a failed chunk
 and ends at a lap over the started archives that fails none. Janitor readings appear only on dispatchers and are forgotten on handoff or
 restart. Shutdown is not failure. Individual repair failures log the token-free correlation ID, never a flow key.
@@ -3627,20 +3628,25 @@ wiring (`janitor.go`):
   reads its residue class from its `database.Shard`, where the shard's Sonar publishes it, as the piston does.
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
-- **The jobs are built from the engine's fields** (`addJanitorJobs`: archive retention; fast archiving, sweep archiving
-  behind it and large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live
-  retention; the archive deletion sweep), at Startup. Archive retention is added first because a drain runs the jobs in
+- **The jobs are built from the engine's fields** (`addJanitorJobs`: archive retention; the fast archiving jobs, each
+  with sweep archiving behind it, and large-tree archiving into the shard's archive; the fast deletion jobs, each with
+  sweep deletion behind it; live retention; the archive deletion sweep), at Startup. Archive retention is added first because a drain runs the jobs in
   the order they were added: fast archiving archives only once tomorrow is whole, and in a test of short days with
   Manual janitors, nothing else makes the days ahead. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace.
+- **Two fast jobs of each kind, one on SQLite** (`fastArchivingJobs`, `fastDeletionJobs`, `fastJobs`; user): each
+  takes its share of the shard's roots and has a sweep of its own, all named by the share (`janitor.ShareName`:
+  `fast_archiving_1`, `sweep_archiving_1`). SQLite's single writer gains nothing from a second job. How the share
+  divides the roots is the janitor's (`internal/janitor/CLAUDE.md`, "Shares"). A test reading a gauge that has a series
+  per job reads them all (`gaugeOver`). Pinned by `TestJanitor_FastJobsOfEachKind`.
 - **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like every
-  janitor gauge. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, the held-root and sweep
-  gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge,
-  labelled by job; the archive deletion gauges are the archive deletion sweep's. **Every walk of the live tables is the
+  janitor gauge. The archive lag is the fast archiving jobs' own, the attempt gauge large-tree archiving's, the held-root
+  and sweep gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge;
+  each job's series is labelled by job; the archive deletion gauges are the archive deletion sweep's. **Every walk of the live tables is the
   janitor's**, and expiration is the janitor's expiration job, running the engine's pass (`expirePass`). `sweepOverdue` (30 s) is the
-  window of both sweeps behind a fast job: a test that wants a sweep to take what its fast job passed sets it to 0
+  window of every sweep behind a fast job: a test that wants a sweep to take what its fast job passed sets it to 0
   before its first drain, since a change rebuilds the jobs and starts the fast jobs over.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), expiration
   included when the engine's `flowExpiration` is on (the settings carry it, so a test turning it on mid-run gets the job
@@ -3718,7 +3724,7 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `d` after its creation is terminated by `terminateSubtree` with a fixed reason (`expirationReason`) and **deleted,
   not archived** (user): the UPDATE that terminates the root also marks it for deletion, due at once
   (`deleteTree`), and the deletion jobs delete the tree - mostly sweep deletion, within its window: an expired root is
-  old, so it is behind fast deletion's position once any newer root has been stamped since the resume, as well as when
+  old, so it is behind its fast deletion job's position once any newer root of its share has been stamped since the resume, as well as when
   it is larger than a batch. **The mark goes
   in that UPDATE, not a statement after it:** only a closed root is ever marked, and a terminated root left unmarked
   for a moment - a crash between the two, or fast archiving at a short grace - would be archived instead. Until the

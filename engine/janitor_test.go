@@ -261,13 +261,50 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 		}
 		return out
 	}
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	driver := sh.DB().DriverName()
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 8, "fast, sweep and large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep and archive retention are reported")
-	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
+	assert.Len(got, 4+2*fastJobs(fastArchivingJobs, driver)+2*fastJobs(fastDeletionJobs, driver),
+		"fast and sweep archiving, large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep and archive retention are reported")
+	first := janitor.ShareName(janitor.JobFastArchiving, 1)
+	assert.True(got[first] >= 0.1 && got[first] < 10, "age %v", got)
 
 	setRole(e, 1, false)
 	assert.Len(ages(), 0, "a shard no longer dispatched is not reported")
+}
+
+// TestJanitor_FastJobsOfEachKind pins the fast jobs a shard's janitor runs: fastArchivingJobs fast archiving jobs and
+// fastDeletionJobs fast deletion jobs, each with the sweep behind it, all named by their share; and one of each kind on
+// SQLite.
+func TestJanitor_FastJobsOfEachKind(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	want := map[string]int{
+		janitor.JobFastArchiving:  fastArchivingJobs,
+		janitor.JobSweepArchiving: fastArchivingJobs,
+		janitor.JobFastDeletion:   fastDeletionJobs,
+		janitor.JobSweepDeletion:  fastDeletionJobs,
+	}
+	if sh.DB().DriverName() == "sqlite" {
+		for kind := range want {
+			want[kind] = 1
+		}
+	}
+	ages := e.janitorOn(1).JobAges(time.Now())
+	for kind, n := range want {
+		for k := 1; k <= n+1; k++ {
+			_, ok := ages[janitor.ShareName(kind, k)]
+			assert.Equal(k <= n, ok, "%s of %d", janitor.ShareName(kind, k), n)
+		}
+	}
 }
 
 // TestJanitor_TheGraceOverrideReachesTheJobs pins the grace a test's ArchiveNow passes: the janitors' rounds under it

@@ -90,7 +90,7 @@ func (l *LiveRetention) SetBatch(roots int) {
 }
 
 // attach creates the job's instruments on j's meter, and registers its gauges.
-func (l *LiveRetention) attach(j *Janitor, _ string) {
+func (l *LiveRetention) attach(j *Janitor, name string) {
 	l.j = j
 	l.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
@@ -98,7 +98,7 @@ func (l *LiveRetention) attach(j *Janitor, _ string) {
 	l.reaped, errs[0] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	gauges, err := newSweepGauge(meter)
 	errs[1] = err
-	kind := metric.WithAttributes(l.shardAttr, attribute.String("kind", kindRetention))
+	kind := metric.WithAttributes(l.shardAttr, attribute.String("kind", kindRetention), attribute.String("job", name))
 	l.gauges, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if j.isActive() {
 			gauges.observe(o, &l.w, kind)

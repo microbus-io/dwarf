@@ -284,30 +284,42 @@ func TestMetrics_EmittedOnRun(t *testing.T) {
 	assert.True(gaugePresent(rm, "dwarf_state_cache_bytes"), "dwarf_state_cache_bytes gauge should be present")
 }
 
-// gaugeAt returns the data point of an int64 or float64 observable gauge whose attributes include every
 // failingAt is dwarf_archive_failing_seconds on shard: the largest of its archiving jobs' series, and whether any is
 // reported.
 func failingAt(rm metricdata.ResourceMetrics, shard string) (float64, bool) {
-	var most float64
-	found := false
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			g, ok := m.Data.(metricdata.Gauge[float64])
-			if m.Name != "dwarf_archive_failing_seconds" || !ok {
-				continue
-			}
-			for _, dp := range g.DataPoints {
-				if v, ok := dp.Attributes.Value("shard"); ok && v.AsString() == shard && (!found || dp.Value > most) {
-					most, found = dp.Value, true
-				}
-			}
-		}
-	}
+	most, _, found := gaugeOver(rm, "dwarf_archive_failing_seconds", map[string]string{"shard": shard})
 	return most, found
 }
 
+// gaugeAt returns the data point of an int64 or float64 observable gauge whose attributes include every
 // key=value in attrs.
 func gaugeAt(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (float64, bool) {
+	var first float64
+	found := false
+	gaugePoints(rm, name, attrs, func(v float64) {
+		if !found {
+			first, found = v, true
+		}
+	})
+	return first, found
+}
+
+// gaugeOver returns the largest and the sum of the data points of an int64 or float64 observable gauge whose
+// attributes include every key=value in attrs - a series per job, say - and whether there is any.
+func gaugeOver(rm metricdata.ResourceMetrics, name string, attrs map[string]string) (most, sum float64, found bool) {
+	gaugePoints(rm, name, attrs, func(v float64) {
+		if !found || v > most {
+			most = v
+		}
+		sum += v
+		found = true
+	})
+	return most, sum, found
+}
+
+// gaugePoints calls fn with each data point of an int64 or float64 observable gauge whose attributes include every
+// key=value in attrs.
+func gaugePoints(rm metricdata.ResourceMetrics, name string, attrs map[string]string, fn func(v float64)) {
 	matches := func(set attribute.Set) bool {
 		for k, want := range attrs {
 			v, ok := set.Value(attribute.Key(k))
@@ -326,19 +338,18 @@ func gaugeAt(rm metricdata.ResourceMetrics, name string, attrs map[string]string
 			case metricdata.Gauge[int64]:
 				for _, dp := range g.DataPoints {
 					if matches(dp.Attributes) {
-						return float64(dp.Value), true
+						fn(float64(dp.Value))
 					}
 				}
 			case metricdata.Gauge[float64]:
 				for _, dp := range g.DataPoints {
 					if matches(dp.Attributes) {
-						return dp.Value, true
+						fn(dp.Value)
 					}
 				}
 			}
 		}
 	}
-	return 0, false
 }
 
 // TestMetrics_BacklogGauges pins the backlog gauges' three properties: a collection makes no query (the

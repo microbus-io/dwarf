@@ -61,17 +61,19 @@ func closedDueSQL(grace time.Duration) (cond string, args []any) {
 		" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?)", []any{-grace.Milliseconds()}
 }
 
-// closedResidency restricts a closed scan to this replica's share of the shard's dispatchers, flow_id % count =
-// ordinal, plus every root overdue by the steal grace past the archive grace. Two janitors then take disjoint roots
-// while both keep up. A position-ordered scan steals only the overdue roots ahead of its position - when its job is
-// behind - so a slow peer's roots, once behind it, are a sweep's. It fails open, as the piston's partition does: an
-// unknown or invalid pair, or a solo dispatcher, restricts nothing.
-func closedResidency(count, ordinal int, ok bool, grace, steal time.Duration) (clause string, args []any) {
-	if !ok || count < 2 || ordinal < 0 || ordinal >= count {
-		return "", nil
+// closedResidency restricts a closed scan to the job's share s of the roots, and of them to this replica's residue
+// class of the shard's dispatchers, flow_id % count = ordinal, plus every root overdue by the steal grace past the
+// archive grace. Two janitors then take disjoint roots while both keep up, and so do two jobs of one janitor. A
+// position-ordered scan steals only the overdue roots ahead of its position - when its job is behind - so a slow
+// peer's roots, once behind it, are a sweep's. The class fails open (restricts) and the share restricts whatever the
+// class.
+func closedResidency(count, ordinal int, ok bool, s share, grace, steal time.Duration) (clause string, args []any) {
+	clause, args = s.sql(count, ordinal, ok)
+	if !restricts(count, ordinal, ok) {
+		return clause, args
 	}
-	return " AND (flow_id % ? = ? OR updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
-		[]any{count, ordinal, -(grace + steal).Milliseconds()}
+	return clause + " AND (flow_id % ? = ? OR updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
+		append(args, count, ordinal, -(grace + steal).Milliseconds())
 }
 
 // scanClosed selects up to limit closed roots due grace after their close, restricted by where (a SQL
@@ -87,21 +89,7 @@ func closedResidency(count, ordinal int, ok bool, grace, steal time.Duration) (c
 // branches are merged here: their first limit are exactly the order's first, since each branch holds its own first
 // limit.
 func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, grace time.Duration, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
-	var stmt string
-	var args []any
-	for i, status := range database.TerminalStatuses {
-		if i > 0 {
-			stmt += " UNION ALL "
-		}
-		stmt += "SELECT flow_id, updated_at, age_ms, created_hour FROM (SELECT flow_id, updated_at, created_hour," +
-			" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
-			" FROM dwarf_flows WHERE status='" + status + "'" +
-			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
-			where + " ORDER BY updated_at, flow_id LIMIT_OFFSET(?, 0)) due_" + status
-		args = append(args, -grace.Milliseconds())
-		args = append(args, whereArgs...)
-		args = append(args, limit)
-	}
+	stmt, args := closedScanSQL(grace, where, whereArgs, limit)
 	rows, err := q.QueryContext(ctx, stmt, args...)
 	// diagnostics.FaultReapSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
 	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
@@ -135,6 +123,24 @@ func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster
 		return cmp.Compare(a.flowID, b.flowID)
 	})
 	return roots[:min(limit, len(roots))], oldest, nil
+}
+
+// closedScanSQL is scanClosed's statement.
+func closedScanSQL(grace time.Duration, where string, whereArgs []any, limit int) (stmt string, args []any) {
+	for i, status := range database.TerminalStatuses {
+		if i > 0 {
+			stmt += " UNION ALL "
+		}
+		stmt += "SELECT flow_id, updated_at, age_ms, created_hour FROM (SELECT flow_id, updated_at, created_hour," +
+			" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
+			" FROM dwarf_flows WHERE status='" + status + "'" +
+			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
+			where + " ORDER BY updated_at, flow_id LIMIT_OFFSET(?, 0)) due_" + status
+		args = append(args, -grace.Milliseconds())
+		args = append(args, whereArgs...)
+		args = append(args, limit)
+	}
+	return stmt, args
 }
 
 // cutClosed returns the roots among candidates, in order, that one batch takes, and what it does with them. A root with an

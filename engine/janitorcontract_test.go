@@ -59,7 +59,7 @@ func assertNoJanitorReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	assert := testarossa.For(t)
 	for _, kind := range sweepKinds {
 		attrs := map[string]string{"shard": "1", "kind": kind}
-		v, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+		v, _, ok := gaugeOver(rm, "dwarf_archive_held_roots", attrs)
 		assert.True(ok, "dwarf_archive_held_roots{kind=%s} is reported", kind)
 		assert.Zero(v, "dwarf_archive_held_roots{kind=%s}", kind)
 	}
@@ -75,7 +75,7 @@ func assertNoJanitorReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 func assertHeldReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	t.Helper()
 	assert := testarossa.For(t)
-	held, _ := gaugeAt(rm, "dwarf_archive_held_roots", map[string]string{"shard": "1", "kind": "closed"})
+	_, held, _ := gaugeOver(rm, "dwarf_archive_held_roots", map[string]string{"shard": "1", "kind": "closed"})
 	assert.Equal(float64(1), held)
 	failing, _ := failingAt(rm, "1")
 	assert.True(failing > 0, "archiving is failing")

@@ -32,17 +32,18 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// JobFastDeletion is the name the engine adds its fast deletion job under.
+// JobFastDeletion is the kind of the engine's fast deletion jobs, each added under ShareName(JobFastDeletion, k).
 const JobFastDeletion = "fast_deletion"
 
 // ReasonDeleted is the reason a stamped tree is deleted, the reason attribute of dwarf_flows_reaped.
 const ReasonDeleted = "deleted"
 
 // FastDeletion is the job that deletes the stamped trees - a Delete's, a DeleteOnCompletion's, a published tree's live
-// copy - as they come due: one batch a round, the stamped roots after its position in flow_id order, the position then
-// past them whatever became of them. It passes a tree too large for a batch, left to the deletion in chunks, and the
-// roots it fails on or finds held, leaving them behind its position.
+// copy - as they come due: one batch a round, the stamped roots of its share after its position in flow_id order, the
+// position then past them whatever became of them. It passes a tree too large for a batch, left to the deletion in
+// chunks, and the roots it fails on or finds held, leaving them behind its position.
 type FastDeletion struct {
+	share      share
 	batchRoots int
 	batchRows  int
 	batchBytes int
@@ -66,7 +67,19 @@ type FastDeletion struct {
 // NewFastDeletion returns a fast deletion job with the engine's default batch until SetBatch; set it before adding the
 // job to a janitor.
 func NewFastDeletion() *FastDeletion {
-	return &FastDeletion{batchRoots: defaultBatchRoots, batchRows: defaultBatchRows, batchBytes: defaultBatchBytes}
+	return &FastDeletion{
+		share:      share{1, 1},
+		batchRoots: defaultBatchRoots,
+		batchRows:  defaultBatchRows,
+		batchBytes: defaultBatchBytes,
+	}
+}
+
+// SetShare sets which of a shard's fast deletion jobs this one is, the k-th of of, from 1 (1 of 1, every root): a
+// shard's jobs of k from 1 to of each take their share of its stamped roots, and none takes another's. The sweep behind
+// it sweeps the same share.
+func (f *FastDeletion) SetShare(k, of int) {
+	f.share = share{k, of}
 }
 
 // SetBatch sets one batch: how many due roots it considers (500, at most database.MaxListIDs), and about how many rows (4,000) and payload bytes
@@ -103,7 +116,7 @@ const stampedDueSQL = "delete_after_ms>0 AND surgraph_flow_id=0 AND DATE_ADD_MIL
 func (f *FastDeletion) round(ctx context.Context, batch batchFunc) (progress bool) {
 	_ = batch(ctx, func(ctx context.Context, h handle) error { // one that did not run made no progress
 		progress = f.batch(ctx, h)
-		f.boundary.Store(&boundary{dueRoot{flowID: f.after}, f.count, f.ordinal, f.partitioned})
+		f.boundary.Store(&boundary{dueRoot{flowID: f.after}, f.count, f.ordinal, f.partitioned, f.share})
 		return nil
 	})
 	return progress
@@ -163,15 +176,15 @@ func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 	return removed.flows > 0 || passed
 }
 
-// restriction is a round's restriction of its scan: this replica's residue class of the roots, as the shard reports
-// it, and every root overdue by the steal grace; and the range after the position. A residue class other than the one
-// the position was walked in starts the walk over from the beginning.
+// restriction is a round's restriction of its scan: the job's share, and this replica's residue class of it, as the
+// shard reports it, with every root of the share overdue by the steal grace; and the range after the position. A
+// residue class other than the one the position was walked in starts the walk over from the beginning.
 func (f *FastDeletion) restriction() (where string, args []any) {
 	count, ordinal, partitioned := f.j.shard.Residency()
 	if count != f.count || ordinal != f.ordinal || partitioned != f.partitioned {
 		f.count, f.ordinal, f.partitioned, f.after = count, ordinal, partitioned, 0
 	}
-	where, args = stampedResidency(count, ordinal, partitioned, stealGrace)
+	where, args = stampedResidency(count, ordinal, partitioned, f.share, stealGrace)
 	if f.after != 0 {
 		where += " AND flow_id>?"
 		args = append(args, f.after)
@@ -193,14 +206,15 @@ func (f *FastDeletion) reset() {
 	f.boundary.Store(nil)
 }
 
-// stampedResidency restricts a stamped scan to this replica's share of the shard's dispatchers, as closedResidency
-// does, a root overdue by the steal grace past its stamp's due time taken by any.
-func stampedResidency(count, ordinal int, ok bool, steal time.Duration) (clause string, args []any) {
-	if !ok || count < 2 || ordinal < 0 || ordinal >= count {
-		return "", nil
+// stampedResidency restricts a stamped scan to the job's share s and this replica's residue class, as closedResidency
+// does, a root of s overdue by the steal grace past its stamp's due time taken by any class.
+func stampedResidency(count, ordinal int, ok bool, s share, steal time.Duration) (clause string, args []any) {
+	clause, args = s.sql(count, ordinal, ok)
+	if !restricts(count, ordinal, ok) {
+		return clause, args
 	}
-	return " AND (flow_id % ? = ? OR DATE_ADD_MILLIS(updated_at, delete_after_ms)<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
-		[]any{count, ordinal, -steal.Milliseconds()}
+	return clause + " AND (flow_id % ? = ? OR DATE_ADD_MILLIS(updated_at, delete_after_ms)<=DATE_ADD_MILLIS(NOW_UTC(), ?))",
+		append(args, count, ordinal, -steal.Milliseconds())
 }
 
 // scanStamped selects up to limit stamped roots due for deletion, restricted by where, in flow_id order.

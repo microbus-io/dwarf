@@ -177,7 +177,7 @@ func TestDelete_ResidencySplitsTheStampedRoots(t *testing.T) {
 	_, err := r.db.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1 WHERE flow_id=?", root)
 	assert.NoError(err)
 	selectWith := func(steal time.Duration, ordinal int) []int {
-		where, args := stampedResidency(2, ordinal, true, steal)
+		where, args := stampedResidency(2, ordinal, true, share{1, 1}, steal)
 		roots, err := scanStamped(ctx, r.db, r.seams, where, args, 512)
 		assert.NoError(err)
 		return rootIDs(roots)

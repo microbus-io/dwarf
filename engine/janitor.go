@@ -58,37 +58,65 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 	}
 }
 
-// addJanitorJobs adds a shard's janitor its jobs - archive retention; fast archiving, sweep archiving behind it and
-// large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live retention; the
-// archive deletion sweep; expiration, when the flow expiration is on - built with s, replacing the ones it has, which
-// start over. Archive retention comes first: a drain runs the jobs in that order, and fast archiving archives only
-// into days archive retention has made.
+// The fast jobs of each kind a shard's janitor runs, each taking its share of the shard's roots with a sweep of its
+// own behind it (fastJobs).
+const (
+	fastArchivingJobs = 2
+	fastDeletionJobs  = 2
+)
+
+// fastJobs is how many fast jobs of a kind whose number is n a shard's janitor runs on a database of driver: n, and one
+// on SQLite, whose single writer a second job would only queue behind.
+func fastJobs(n int, driver string) int {
+	if driver == "sqlite" {
+		return 1
+	}
+	return n
+}
+
+// addJanitorJobs adds a shard's janitor its jobs - archive retention; the fast archiving jobs, each with sweep
+// archiving behind it, and large-tree archiving into the shard's archive; the fast deletion jobs, each with sweep
+// deletion behind it; live retention; the archive deletion sweep; expiration, when the flow expiration is on - built
+// with s, replacing the ones it has, which start over. Archive retention comes first: a drain runs the jobs in that
+// order, and fast archiving archives only into days archive retention has made.
 func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, archive *archiver.Archive, s janitorSettings) {
+	var driver string
+	if sh, err := e.db.Shard(shard); err == nil {
+		driver = sh.DB().DriverName()
+	}
 	j.AddJob(janitor.JobArchiveRetention, janitor.NewArchiveRetention(archive, e.retentionDays))
-	fa := janitor.NewFastArchiving(archive, e.retentionDays)
-	fa.SetGrace(s.grace)
-	fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-	fa.SetStaging(s.stageRows, s.stageBytes)
-	fa.SetQuietMargin(!s.noQuietMargin)
-	j.AddJob(janitor.JobFastArchiving, fa)
-	sa := janitor.NewSweepArchiving(fa, archive, e.retentionDays)
-	sa.SetGrace(s.grace)
-	sa.SetOverdue(s.overdue)
-	sa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-	sa.SetStaging(s.stageRows, s.stageBytes)
-	sa.SetQuietMargin(!s.noQuietMargin)
-	j.AddJob(janitor.JobSweepArchiving, sa)
+	of := fastJobs(fastArchivingJobs, driver)
+	for k := 1; k <= of; k++ {
+		fa := janitor.NewFastArchiving(archive, e.retentionDays)
+		fa.SetShare(k, of)
+		fa.SetGrace(s.grace)
+		fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+		fa.SetStaging(s.stageRows, s.stageBytes)
+		fa.SetQuietMargin(!s.noQuietMargin)
+		j.AddJob(janitor.ShareName(janitor.JobFastArchiving, k), fa)
+		sa := janitor.NewSweepArchiving(fa, archive, e.retentionDays)
+		sa.SetGrace(s.grace)
+		sa.SetOverdue(s.overdue)
+		sa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+		sa.SetStaging(s.stageRows, s.stageBytes)
+		sa.SetQuietMargin(!s.noQuietMargin)
+		j.AddJob(janitor.ShareName(janitor.JobSweepArchiving, k), sa)
+	}
 	la := janitor.NewLargeArchiving(archive, e.retentionDays)
 	la.SetBatch(s.batchRows, s.batchBytes)
 	la.SetQuietMargin(!s.noQuietMargin)
 	j.AddJob(janitor.JobLargeArchiving, la)
-	fd := janitor.NewFastDeletion()
-	fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-	j.AddJob(janitor.JobFastDeletion, fd)
-	sd := janitor.NewSweepDeletion(fd)
-	sd.SetOverdue(s.overdue)
-	sd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-	j.AddJob(janitor.JobSweepDeletion, sd)
+	of = fastJobs(fastDeletionJobs, driver)
+	for k := 1; k <= of; k++ {
+		fd := janitor.NewFastDeletion()
+		fd.SetShare(k, of)
+		fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+		j.AddJob(janitor.ShareName(janitor.JobFastDeletion, k), fd)
+		sd := janitor.NewSweepDeletion(fd)
+		sd.SetOverdue(s.overdue)
+		sd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+		j.AddJob(janitor.ShareName(janitor.JobSweepDeletion, k), sd)
+	}
 	lr := janitor.NewLiveRetention(archive, e.retentionDays)
 	lr.SetGrace(s.grace)
 	lr.SetBatch(s.batchRoots)

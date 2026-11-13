@@ -29,13 +29,14 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// JobSweepDeletion is the name the engine adds its sweep deletion job under.
+// JobSweepDeletion is the kind of the engine's sweep deletion jobs, the one behind ShareName(JobFastDeletion, k) added
+// under ShareName(JobSweepDeletion, k).
 const JobSweepDeletion = "sweep_deletion"
 
-// SweepDeletion is the job that deletes the stamped trees fast deletion left behind: one too large for a batch, one it
-// failed on or found held, one whose stamp came due behind its position, one of a slow peer's class. Each sweep
-// captures fast deletion's position as it begins and walks the stamped roots at or behind it in flow_id order, taking
-// those overdue by its window past their stamp's due time. A tree a batch holds is deleted with the others of its
+// SweepDeletion is the job that deletes the stamped trees its fast deletion job left behind: one too large for a batch,
+// one it failed on or found held, one whose stamp came due behind its position, one of a slow peer's class. Each sweep
+// captures the fast job's position as it begins and walks the stamped roots of its share at or behind it in flow_id
+// order, taking those overdue by its window past their stamp's due time. A tree a batch holds is deleted with the others of its
 // batch; a larger one in chunks, one tree at a time, a chunk a batch, until it is gone or a chunk fails. A failed batch
 // is taken again a root at a time; a root that fails alone is held - counted and passed - and the next sweep comes back
 // to it.
@@ -87,7 +88,7 @@ func (s *SweepDeletion) SetBatch(roots, rows, bytes int) {
 }
 
 // attach creates the job's instruments on j's meter, and registers its gauges.
-func (s *SweepDeletion) attach(j *Janitor, _ string) {
+func (s *SweepDeletion) attach(j *Janitor, name string) {
 	s.j = j
 	s.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
@@ -95,7 +96,7 @@ func (s *SweepDeletion) attach(j *Janitor, _ string) {
 	s.reaped, errs[0] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	gauges, err := newSweepGauge(meter)
 	errs[1] = err
-	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindDeleted))
+	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindDeleted), attribute.String("job", name))
 	s.gauges, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if j.isActive() {
 			gauges.observe(o, &s.w, kind)
@@ -235,11 +236,11 @@ func (s *SweepDeletion) chunk(ctx context.Context, h handle, budget limit) outco
 	return passed // done with nothing deleted: held, gone or no longer due
 }
 
-// restriction is a sweep batch's restriction of its scan: the residue class of its end, with every root overdue by the
-// steal grace past the sweep's window; the stamps overdue by the window; and the flow ids after the sweep's position
-// and at or behind its end.
+// restriction is a sweep batch's restriction of its scan: the share and residue class of its end, with every root of
+// the share overdue by the steal grace past the sweep's window; the stamps overdue by the window; and the flow ids
+// after the sweep's position and at or behind its end.
 func (s *SweepDeletion) restriction() (where string, args []any) {
-	where, args = stampedResidency(s.end.count, s.end.ordinal, s.end.partitioned, s.overdue+stealGrace)
+	where, args = stampedResidency(s.end.count, s.end.ordinal, s.end.partitioned, s.end.share, s.overdue+stealGrace)
 	where += " AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND flow_id>? AND flow_id<=?"
 	args = append(args, -s.overdue.Milliseconds(), s.after, s.end.after.flowID)
 	return where, args

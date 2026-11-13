@@ -122,7 +122,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	e.archiveGrace = 0
 	rm := collect(t, reader)
 	assert.Equal(int64(4), sumAt(rm, "dwarf_flows_archived", shard1), "two trees of two flows")
-	lag, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
+	lag, _, ok := gaugeOver(rm, "dwarf_archive_lag_seconds", shard1) // the largest of the fast archiving jobs'
 	assert.True(ok)
 	assert.Zero(lag, "the last probe found nothing due")
 	failing, ok := failingAt(rm, "1")
@@ -131,7 +131,7 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 
 	e.reapDueFlows(ctx)
 	rm = collect(t, reader)
-	lag, _ = gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
+	lag, _, _ = gaugeOver(rm, "dwarf_archive_lag_seconds", shard1)
 	assert.Zero(lag, "nothing due")
 
 	// Archiving fails across passes: the tree stays live and no deletion is counted. Fast archiving passes it after its
@@ -334,15 +334,16 @@ func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	e.reapDueFlows(t.Context()) // fast archiving fails the batch of three and passes it; the sweep takes each alone
 	rm := collect(t, reader)
+	// The sum over the sweep archiving jobs: one replica's jobs hold disjoint roots.
 	attrs := map[string]string{"shard": "1", "kind": "closed"}
-	n, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+	_, n, ok := gaugeOver(rm, "dwarf_archive_held_roots", attrs)
 	assert.True(ok)
 	assert.Equal(float64(3), n, "each root failed alone")
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
 	e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(t.Context())
 	rm = collect(t, reader)
-	n, _ = gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+	_, n, _ = gaugeOver(rm, "dwarf_archive_held_roots", attrs)
 	assert.Zero(n)
 	for _, id := range roots {
 		assert.False(live(t, e, id), "root %d swept", id)

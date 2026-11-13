@@ -32,7 +32,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// JobFastArchiving is the name the engine adds its fast archiving job under.
+// JobFastArchiving is the kind of the engine's fast archiving jobs, each added under ShareName(JobFastArchiving, k).
 const JobFastArchiving = "fast_archiving"
 
 // The reason a closed tree is deleted without archiving, the reason attribute of dwarf_flows_reaped.
@@ -54,15 +54,16 @@ const probeInterval = time.Second
 // would otherwise consume.
 var noSeams = seamster.New(false)
 
-// FastArchiving is the job that archives closed trees as they come due: one batch a round, the closed roots after its
-// position in close order, the position then past them whatever became of them. At a retention of 0 it deletes them
-// instead. It passes the roots that are not its own - one with an archive attempt, one over the staging threshold, and
-// at a retention of 0 one too large for a batch, which it stamps for deletion in chunks - and the roots it fails on or
-// finds held, leaving them behind its position. It reports dwarf_archive_lag_seconds and
+// FastArchiving is the job that archives closed trees as they come due: one batch a round, the closed roots of its share
+// after its position in close order, the position then past them whatever became of them. At a retention of 0 it
+// deletes them instead. It passes the roots that are not its own - one with an archive attempt, one over the staging
+// threshold, and at a retention of 0 one too large for a batch, which it stamps for deletion in chunks - and the roots
+// it fails on or finds held, leaving them behind its position. It reports dwarf_archive_lag_seconds and
 // dwarf_archive_failing_seconds while its janitor is active.
 type FastArchiving struct {
 	archive       *archiver.Archive
 	retentionDays int
+	share         share
 	grace         time.Duration
 	batchRoots    int
 	batchRows     int
@@ -106,11 +107,19 @@ func NewFastArchiving(archive *archiver.Archive, retentionDays int) *FastArchivi
 	return &FastArchiving{
 		archive:       archive,
 		retentionDays: retentionDays,
+		share:         share{1, 1},
 		grace:         defaultGrace,
 		batchRoots:    defaultBatchRoots,
 		batchRows:     defaultBatchRows,
 		batchBytes:    defaultBatchBytes,
 	}
+}
+
+// SetShare sets which of a shard's fast archiving jobs this one is, the k-th of of, from 1 (1 of 1, every root): a
+// shard's jobs of k from 1 to of each take their share of its closed roots, and none takes another's. The sweep behind
+// it sweeps the same share.
+func (f *FastArchiving) SetShare(k, of int) {
+	f.share = share{k, of}
 }
 
 // SetGrace sets how long after its close a closed root is archived (a minute).
@@ -147,19 +156,18 @@ func (f *FastArchiving) attach(j *Janitor, name string) {
 	f.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
 	f.reaped, errs[1] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	lag, err := meter.Float64ObservableGauge("dwarf_archive_lag_seconds", metric.WithUnit("s"),
-		metric.WithDescription("Per shard: how long archiving is behind - how long past the archive grace the shard's oldest closed root not yet archived has waited, every replica's and one being archived in stages included - read about once a second while this replica dispatches the shard, and aging between readings. Aggregate with max."))
+		metric.WithDescription("Per shard and fast archiving job: how long archiving is behind - how long past the archive grace the oldest closed root of the job's share not yet archived has waited, every replica's and one being archived in stages included - read about once a second while this replica dispatches the shard, and aging between readings. A shard's jobs share out its roots: aggregate with max."))
 	errs[2] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
 	errs[3] = err
-	shard := metric.WithAttributes(f.shardAttr)
 	jobShard := metric.WithAttributes(f.shardAttr, attribute.String("job", name))
 	f.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
 		if l, ok := f.lagReading(); ok {
-			o.ObserveFloat64(lag, l.Seconds(), shard)
+			o.ObserveFloat64(lag, l.Seconds(), jobShard)
 		}
 		o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), jobShard)
 		return nil
@@ -189,7 +197,7 @@ func (f *FastArchiving) round(ctx context.Context, batch batchFunc) (progress bo
 	}
 	_ = batch(ctx, func(ctx context.Context, h handle) error { // one that did not run made no progress
 		progress = f.batch(ctx, h)
-		f.boundary.Store(&boundary{f.after, f.count, f.ordinal, f.partitioned})
+		f.boundary.Store(&boundary{f.after, f.count, f.ordinal, f.partitioned, f.share})
 		return nil
 	})
 	return progress
@@ -215,12 +223,12 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	// A failure episode ends only in a round that could archive: one whose day was read and is open. A closed day
 	// fails every round, so ending its episode in between would report it as starting anew each time.
 	canEnd := refreshed && (d == nil || d.startable())
+	where, whereArgs := f.restriction(h.DriverName())
 	probed := false
 	if time.Since(f.probedAt) >= probeInterval {
 		f.probe(ctx, h, canEnd)
 		probed = true
 	}
-	where, whereArgs := f.restriction(h.DriverName())
 	candidates, _, err := scanClosed(ctx, h, seams, f.grace, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting closed trees", "error", err)
@@ -285,14 +293,16 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	return removed.flows > 0 || via != routeMove
 }
 
-// probe reads the shard's oldest due closed root - every replica's, behind the position or ahead of it, with an archive
-// attempt or without - for the archive lag. During a failure episode, and when canEnd, it also reads the oldest without
-// an attempt, and ends the episode once there is none, or that one came due more than endMargin after the last
-// failure: everything due then has left the live tables. A tree being archived in stages is not a failure, so it does not hold an episode open. Ages are compared
-// on the database's clock and the failure's on this process's, so neither clock's offset matters.
+// probe reads the oldest due closed root of the job's share - every replica's, behind the position or ahead of it, with
+// an archive attempt or without - for the archive lag. During a failure episode, and when canEnd, it also reads the
+// oldest without an attempt, and ends the episode once there is none, or that one came due more than endMargin after
+// the last failure: everything of its share due then has left the live tables. A tree being archived in stages is not
+// a failure, so it does not hold an episode open. Ages are compared on the database's clock and the failure's on this
+// process's, so neither clock's offset matters. The share is the one of the residue class the round's restriction read.
 func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	f.probedAt = time.Now()
-	due, oldest, err := scanClosed(ctx, h, noSeams, f.grace, "", nil, 1)
+	inShare, shareArgs := f.share.sql(f.count, f.ordinal, f.partitioned)
+	due, oldest, err := scanClosed(ctx, h, noSeams, f.grace, inShare, shareArgs, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -308,7 +318,8 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 		return
 	}
 	none, noneArg := NoAttemptSQL(h.DriverName())
-	unattempted, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
+	unattempted, oldestUnattempted, err := scanClosed(ctx, h, noSeams, f.grace, inShare+" AND archive_attempt_at<="+none,
+		append(slices.Clone(shareArgs), noneArg), 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
@@ -326,15 +337,15 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 // is still live. A root due within the margin is the job's to archive next, and that move ends the episode.
 const endMargin = time.Second
 
-// restriction is a round's restriction of its scan: this replica's residue class of the roots, as the shard reports
-// it, and every root overdue by the steal grace; and the range after the position. A residue class other than the one
-// the position was walked in starts the walk over from the beginning.
+// restriction is a round's restriction of its scan: the job's share, and this replica's residue class of it, as the
+// shard reports it, with every root of the share overdue by the steal grace; and the range after the position. A
+// residue class other than the one the position was walked in starts the walk over from the beginning.
 func (f *FastArchiving) restriction(driver string) (where string, args []any) {
 	count, ordinal, partitioned := f.j.shard.Residency()
 	if count != f.count || ordinal != f.ordinal || partitioned != f.partitioned {
 		f.count, f.ordinal, f.partitioned, f.after = count, ordinal, partitioned, dueRoot{}
 	}
-	where, args = closedResidency(count, ordinal, partitioned, f.grace, stealGrace)
+	where, args = closedResidency(count, ordinal, partitioned, f.share, f.grace, stealGrace)
 	if f.after.flowID != 0 {
 		// After the position in close order, by an explicit timestamp seek rather than an OR across its leading column.
 		ts, arg := database.SQLTime(driver, f.after.updatedAt)
@@ -394,12 +405,13 @@ func (f *FastArchiving) reset() {
 }
 
 // boundary is where a fast job stood at the end of a round - its position, the last root it was done with - and the
-// residue class its scan was restricted to. The roots at or behind it are its sweep's: in close order for fast
-// archiving, in flow_id order (after.flowID alone) for fast deletion.
+// residue class and share its scan was restricted to. The roots of its share at or behind it are its sweep's: in close
+// order for fast archiving, in flow_id order (after.flowID alone) for fast deletion. A fast job's share is fixed.
 type boundary struct {
 	after          dueRoot
 	count, ordinal int
 	partitioned    bool
+	share          share
 }
 
 // sameClass reports whether b was taken in the residue class of o.

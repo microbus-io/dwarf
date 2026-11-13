@@ -188,7 +188,7 @@ func TestMove_ResidencySplitsTheDueRoots(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 4, soloShape)
 	selectWith := func(steal time.Duration, ordinal int) []int {
-		residency, residencyArgs := closedResidency(2, ordinal, true, r.settings.grace, steal)
+		residency, residencyArgs := closedResidency(2, ordinal, true, share{1, 1}, r.settings.grace, steal)
 		roots, _, err := scanClosed(ctx, db, r.seams, r.settings.grace, residency, residencyArgs, r.settings.batchRoots)
 		assert.NoError(err)
 		return rootIDs(roots)

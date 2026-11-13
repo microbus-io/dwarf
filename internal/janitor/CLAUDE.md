@@ -1,7 +1,7 @@
 # Dwarf `internal/janitor` — one shard's background jobs, a goroutine each
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn,
-> any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion, live retention,
+> any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion and their shares, live retention,
 > the archive deletion sweep, archive retention, expiration - chunked deletion, the shared sweep machinery, or the
 > janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
@@ -16,13 +16,13 @@ the shard** (`Resume`, `Pause`): paused, it holds no goroutine and no connection
 goroutines, their idle waits, their time since progress, and the turn each batch takes. It works on
 the `database.Shard` it is made with, and the engine sets its activity from the dispatch role.
 
-**A job owns everything particular to it**: its settings, its dependencies (fast archiving's archive and retention),
-its position and what it observed, its instruments and gauges. The janitor holds no setting of any job. A job's
-settings are fixed when it is added (`AddJob(name, job)`), and **changing them means adding a new job under the same
-name**, which replaces the old one and starts over - which is what a test changing the engine's fields mid-run wants,
-and production never does. The name is the job's handle - its metric label, what `RemoveJob` takes - so two jobs of
-one kind can run side by side (`fast1`, `fast2`). `Job` is an interface whose methods are unexported: only this
-package's jobs, and its tests', satisfy it.
+**A job owns everything particular to it**: its settings, its dependencies (fast archiving's archive and retention), its
+position and what it observed, its instruments and gauges. The janitor holds no setting of any job. A job's settings are
+fixed when it is added (`AddJob(name, job)`), and **changing them means adding a new job under the same name**, which
+replaces the old one and starts over - which is what a test changing the engine's fields mid-run wants, and production
+never does. The name is the job's handle - its metric label, what `RemoveJob` takes - so two jobs of one kind can run
+side by side (`fast_archiving_1`, `fast_archiving_2`: "Shares" below). `Job` is an interface whose methods are
+unexported: only this package's jobs, and its tests', satisfy it.
 
 A resume starts every job over, its position and observations forgotten: a replica that dispatches the shard again
 saw nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. Each job
@@ -44,7 +44,7 @@ job whose candidates all fail would otherwise spin on them. No failure counters,
 retention its pass interval and expiration its own pace (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
 retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn and its reads every second
 on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
-each time. So in a healthy fleet the janitor's steady cost is the two fast jobs. The wait slows nothing that works: a
+each time. So in a healthy fleet the janitor's steady cost is its fast jobs. The wait slows nothing that works: a
 round with progress is followed at once by the next. What it delays: a large tree's first chunk after fast archiving
 starts its attempt, a root fast archiving passed (up to the sweep's window plus the wait, which is how long a single
 failure shows in `dwarf_archive_lag_seconds`), and the repair jobs' gauges, which are as old as their last round - an
@@ -102,11 +102,39 @@ failing cannot hang on it, and jobs that feed each other are run until both are 
 so a `Drain` beside the goroutines never overlaps a round (`TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound`).
 Pinned by `TestJanitor_DrainReturnsWhereAJobWouldWait`.
 
+## Shares: fast jobs of one kind side by side (`share.go`)
+
+A shard's janitor runs several fast archiving jobs and several fast deletion jobs, each told its share when it is made
+(`SetShare(k, of)`: the k-th of `of`, from 1) and added under `ShareName(kind, k)` - `fast_archiving_1`,
+`fast_archiving_2`, `fast_deletion_1` - with a sweep of its own behind it under the same share's name
+(`sweep_archiving_1`). How many is the engine's: two of each, one on SQLite (`engine/CLAUDE.md`).
+
+- **A root's share is `(flow_id / R) % of = k-1`**, R the residue class's count of dispatchers, or `flow_id % of = k-1`
+  when the class restricts nothing. It is a conjunct beside the class (`closedResidency`, `stampedResidency`) and
+  restricts even when the class fails open. Within a class the shares divide its roots, and a root has one share
+  whichever class it is in, so a fast job steals another class's overdue roots of its own share only: each stolen root
+  is still one job's on each replica (`TestShare_TheSharesSplitTheClosedRoots`,
+  `TestShare_TheSharesSplitTheStampedRoots`, `TestShare_EachFastJobTakesItsShare`).
+- **The share is one comparison, `(flow_id + R*of - R*(k-1)) % (R*of) < R`**: the range of `flow_id % (R*of)` from
+  `R*(k-1)` to `R*k-1`, rotated. One modulus, since `/` is not integer division on MySQL. **Do not write it as a range**
+  (`BETWEEN`, or two comparisons): PostgreSQL estimates a range on an expression at 0.5% of the rows and a comparison at
+  a third, and at 0.5% a scan's `LIMIT` reads as a walk of every row. Measured on PostgreSQL 18 with 300k closed and 30k
+  stamped roots, the range sent the stamped scan to a bitmap read and sort of every stamped root (10 ms against 0.3 ms)
+  and the closed scan to parallel workers (25 ms against 1.2 ms). Pinned by `TestShare_TheScansWalkTheirIndexes`.
+- **Each sweep sweeps its own fast job's share**, behind that job's position: the boundary carries the share with the
+  class, and the sweep restricts its scan to both. A root of another share behind the position is that share's
+  sweep's, and a sweep whose fast job has not run takes nothing (`TestShare_EachSweepTakesWhatItsFastJobPassed`). A
+  share is fixed for its job, so the boundary's class comparison leaves it out.
+- **The gauges are per job, each labelled with its name** (`job`), so two series of one name never collide: each fast
+  archiving job's lag and failure episode are its share's - its probe reads the oldest due root of its share, of every
+  class - and the shard's lag is the max of its jobs' (`TestShare_EachFastArchivingJobReportsItsLag`); each sweep's held
+  count and failing series are its own.
+
 ## Fast archiving (`fastarchiving.go`)
 
-The janitor's first job (`JobFastArchiving`): the closed roots as they come due, by close time, one batch a round,
-moved into today's archive in one transaction - or deleted, at a retention of 0. The move - its root locks and the
-rechecks under them, the directory rows and the archive time - is under "The move" below.
+The fast archiving jobs (`JobFastArchiving`, one a share): the closed roots of the job's share as they come due, by
+close time, one batch a round, moved into today's archive in one transaction - or deleted, at a retention of 0. The
+move - its root locks and the rechecks under them, the directory rows and the archive time - is under "The move" below.
 
 - **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
   moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
@@ -131,14 +159,14 @@ rechecks under them, the directory rows and the archive time - is under "The mov
 - **An atomic batch holds at most `MaxBatchFlows` (4,096) flows**, whatever its rows and bytes allow: every flow of a
   batch gets one archive time, and `ListClosed` cannot page across a tie larger than its `Limit`, so the lists'
   maximum must stay above it. A tree of more goes alone (`TestMove_ABatchHoldsAtMostMaxBatchFlows`).
-- **The job reports its own gauges** - `dwarf_archive_lag_seconds`, and its series of `dwarf_archive_failing_seconds`
-  (labelled with the job's name, `job="fast_archiving"`) - registered on the meter when it is added, observed only
+- **The job reports its own gauges** - its series of `dwarf_archive_lag_seconds` and of `dwarf_archive_failing_seconds`
+  (labelled with the job's name, `job="fast_archiving_1"`) - registered on the meter when it is added, observed only
   while its janitor is active, and unregistered when it is removed or the janitor stops. The engine reads nothing of
   it.
-- **A probe reads the shard's oldest due closed root** - one `LIMIT 1` per terminal status on
-  `idx_dwarf_flows_status`, unrestricted: every replica's class, behind the position or ahead of it. It runs at most
-  once a second while the job is busy, and in every round whose scan finds nothing, which the idle wait paces. A
-  probe's scan consults no fault, or it would consume one a test armed for a round's scan.
+- **A probe reads the oldest due closed root of the job's share** - one `LIMIT 1` per terminal status on
+  `idx_dwarf_flows_status`, restricted to the share alone: every replica's class, behind the position or ahead of it. It
+  runs at most once a second while the job is busy, and in every round whose scan finds nothing, which the idle wait
+  paces. A probe's scan consults no fault, or it would consume one a test armed for a round's scan.
 - **The lag is the probe's**: how long archiving is behind - how long past the grace the oldest due root has waited, a
   root a failure left behind the position included, and one being staged; 0 when none is. **It goes on aging after its
   probe** (the probe records when the root passed the grace), so between probes it reads how long that root has waited,
@@ -146,24 +174,23 @@ rechecks under them, the directory rows and the archive time - is under "The mov
   whole stall when the job is blocked. Pinned by
   `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
-  whole, a failed scan, attempt read, sizing or move - and ends at a later
-  move that archives something, or at a probe that finds no due root without an archive attempt, or finds the oldest
-  came due more than `endMargin` (1 s) after the last failure: everything due then has left the live tables. A staged
-  tree in progress is not a failure, so it holds no episode open. The probe's ages are the database's and the failure's
-  time is this process's, compared as durations, so neither clock's offset matters - **but they are read at different
-  instants and resolutions, so do not compare them without the margin.** A root that failed just after it came due
-  then reads as due after its own failure, and the episode ends with the root still live: with no margin,
-  `TestArchiveMetrics_TheReaperCountsWhatItMoves` failed 49 of 300 runs on SQLite. **Do not end it at an empty round:** the scan is after the
-  position, and a root a failure left behind is not in it, so a failing root on a quiet shard would read as
-  recovered. Ending it only at a move fails the other way: one transient error on a quiet shard reads as failing for
-  as long as nothing closes. **And end it only in a round that could archive** - its day read and open: a closed day
-  fails every round, and an episode ended in between would read as starting anew each time
-  (`TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure`). Pinned by
-  `TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft` and the engine's
+  whole, a failed scan, attempt read, sizing or move - and ends at a later move that archives something, or at a probe
+  that finds no due root of its share without an archive attempt, or finds the oldest came due more than `endMargin` (1
+  s) after the last failure: everything due then has left the live tables. A staged tree in progress is not a failure,
+  so it holds no episode open. The probe's ages are the database's and the failure's time is this process's, compared as
+  durations, so neither clock's offset matters - **but they are read at different instants and resolutions, so do not
+  compare them without the margin.** A root that failed just after it came due then reads as due after its own failure,
+  and the episode ends with the root still live: with no margin, `TestArchiveMetrics_TheReaperCountsWhatItMoves` failed
+  49 of 300 runs on SQLite. **Do not end it at an empty round:** the scan is after the position, and a root a failure
+  left behind is not in it, so a failing root on a quiet shard would read as recovered. Ending it only at a move fails
+  the other way: one transient error on a quiet shard reads as failing for as long as nothing closes. **And end it only
+  in a round that could archive** - its day read and open: a closed day fails every round, and an episode ended in
+  between would read as starting anew each time (`TestArchiveMetrics_ASweepWhileTomorrowIsMissingEndsNoFailure`). Pinned
+  by `TestFast_TheFailureEndsAtAMoveOrOnceItsRootsHaveLeft` and the engine's
   `TestArchiveMetrics_ATransientFailureEndsWhenNothingDueAtItRemains` and
-  `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
-  logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
-  episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
+  `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is logged
+  (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an episode
+  (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
 - **The counters more than one job creates** - `dwarf_flows_archived`, `dwarf_flows_reaped` - take their
   descriptions from one constant each (`job.go`): two instruments of one name with
   different descriptions are exported as two streams of that name.
@@ -205,11 +232,11 @@ A batch of trees leaves the live tables in one transaction: moved into a day's a
 
 ## Fast deletion (`fastdeletion.go`)
 
-The second job (`JobFastDeletion`): the trees stamped for deletion - a Delete's, a DeleteOnCompletion's once its
-grace has run, a published tree's live copy - deleted whole as their stamps come due, one batch a round, by the same
-transaction as an archive move with no day (`move`, the stamp rechecked under the root lock). It walks the stamped
-roots by `flow_id` through `idx_dwarf_flows_delete_after`, from a position it moves past every root a round
-considered, and starts over when its residue class changes, as fast archiving does.
+The fast deletion jobs (`JobFastDeletion`, one a share): the trees stamped for deletion - a Delete's, a
+DeleteOnCompletion's once its grace has run, a published tree's live copy - deleted whole as their stamps come due, one
+batch a round, by the same transaction as an archive move with no day (`move`, the stamp rechecked under the root lock).
+Each walks the stamped roots of its share by `flow_id` through `idx_dwarf_flows_delete_after`, from a position it moves
+past every root a round considered, and starts over when its residue class changes, as fast archiving does.
 
 - **A stamped tree too large for a batch is passed**, stamped and whole, to sweep deletion, which deletes it in chunks;
   one transaction deleting a tree grows with the tree until it cannot finish (`TestDelete_ALargeStampedTreeIsPassed`).
@@ -226,9 +253,9 @@ considered, and starts over when its residue class changes, as fast archiving do
 
 ## The sweeps (`sweep.go`)
 
-Three jobs sweep: sweep archiving and sweep deletion behind a fast job, and live retention, stamping the trees past
+The sweep jobs: sweep archiving or sweep deletion behind each fast job, and live retention, stamping the trees past
 their retention. They share one account of their sweeps (`sweep`: whether one is under way, the size of its next batch, the
-held count), one gauge under a `kind` per job (`closed`, `deleted`, `retention`; `sweepGauge`) and one round
+held count), one gauge under the job's `kind` (`closed`, `deleted`, `retention`; `sweepGauge`) and name, and one round
 (`sweepRound`); each job owns its population, its position and its routing.
 
 - **A failed batch is taken again a root at a time**, from the same position; a root that fails alone is held -
@@ -250,16 +277,16 @@ held count), one gauge under a `kind` per job (`closed`, `deleted`, `retention`;
 
 ## Sweep archiving (`sweeparchiving.go`)
 
-The job behind fast archiving (`JobSweepArchiving`): the closed roots fast archiving left - one it failed on, found held
-or could not start an attempt for, one whose close committed late with a time behind its position, one of a slow
-peer's class it passed. Routed as fast archiving routes them, through the same functions (`closed.go`): moved, a tree
-over the staging threshold given its attempt, and at a retention of 0 deleted or stamped. **When archiving, a root with
-an attempt is not in its scan**: it is large-tree archiving's, its copy can run for a day before it publishes, and
-every sweep would pass it again, a batch at a time.
+The job behind each fast archiving job (`JobSweepArchiving`): the closed roots of its share fast archiving left - one it
+failed on, found held or could not start an attempt for, one whose close committed late with a time behind its position,
+one of a slow peer's class it passed. Routed as fast archiving routes them, through the same functions (`closed.go`):
+moved, a tree over the staging threshold given its attempt, and at a retention of 0 deleted or stamped. **When
+archiving, a root with an attempt is not in its scan**: it is large-tree archiving's, its copy can run for a day before
+it publishes, and every sweep would pass it again, a batch at a time.
 
-- **The boundary is fast archiving's position**, published at the end of every round with the residue class its scan
-  was restricted to (`boundary`, read lock-free). A sweep captures it as it begins and takes the roots at or behind it
-  in close order: the root fast archiving was last done with is the sweep's, failed or not
+- **The boundary is fast archiving's position**, published at the end of every round with the residue class and the
+  share its scan was restricted to (`boundary`, read lock-free). A sweep captures it as it begins and takes the roots at
+  or behind it in close order: the root fast archiving was last done with is the sweep's, failed or not
   (`TestSweep_TheLastRootFastFailedOnIsTheSweeps`). **The end is fixed for the sweep**, so roots that close while it
   runs are ahead of it and a sweep completes however fast they arrive (`TestSweep_CompletesUnderContinuousArrivals`).
   Before fast archiving's first round there is no boundary and no sweep begins; a position at the start has nothing
@@ -272,15 +299,16 @@ every sweep would pass it again, a batch at a time.
   fast archiving just failed on can be retried at once (`TestSweep_ARootWaitsOutTheWindow`). The failed root is the
   shard's oldest due root until the sweep takes it, so a single failure shows in `dwarf_archive_lag_seconds` for the
   window and the sweep's idle wait.
-- **The residue class is the boundary's, not read from the shard.** A sweep sweeps the class fast archiving's position
-  was taken in, plus the roots overdue by the steal grace past its window, and is dropped when fast archiving's class
-  changes: fast archiving then starts over, and the next sweep has the new class's position to sweep behind
-  (`TestSweep_FollowsFastArchivingsResidueClass`). Read from the shard, a sweep could pair one class with a position
-  taken in another. A dropped sweep's held roots still count, and, not having completed, it ends no failure episode.
+- **The residue class is the boundary's, not read from the shard.** A sweep sweeps the share and the class fast
+  archiving's position was taken in, plus the share's roots overdue by the steal grace past its window, and is dropped
+  when fast archiving's class changes: fast archiving then starts over, and the next sweep has the new class's position
+  to sweep behind (`TestSweep_FollowsFastArchivingsResidueClass`). Read from the shard, a sweep could pair one class
+  with a position taken in another. A dropped sweep's held roots still count, and, not having completed, it ends no
+  failure episode.
 - **A failed batch is retried a root at a time, as every sweep does** (`TestSweep_APoisonTreeDoesNotLoseItsBatchMates`,
   `TestSweep_PassesFailedTrees`).
-- **Its gauges are its own**, observed only while its janitor is active: the held count under `kind="closed"`, and
-  its series of `dwarf_archive_failing_seconds`.
+- **Its gauges are its own**, observed only while its janitor is active: the held count under `kind="closed"` and its
+  name, and its series of `dwarf_archive_failing_seconds`.
 - **Its failure episode** begins at a failure - the day, a scan, a sizing, a move - and ends at a sweep that completes
   having failed nothing, in a batch whose day was read and open: a sweep starting after the failure and finding every
   root behind fast archiving's position taken (`TestSweep_HeldRootsAndTheFailureEpisode`). At a retention of 0 nothing
@@ -291,12 +319,12 @@ every sweep would pass it again, a batch at a time.
 
 ## Sweep deletion (`sweepdeletion.go`)
 
-The job behind fast deletion (`JobSweepDeletion`): the stamped roots fast deletion left - a tree too large for a
-batch, one it failed on or found held, one whose stamp came due behind its position (a DeleteOnCompletion tree still in
-its grace when passed), one of a slow peer's class.
+The job behind each fast deletion job (`JobSweepDeletion`): the stamped roots of its share fast deletion left - a tree
+too large for a batch, one it failed on or found held, one whose stamp came due behind its position (a
+DeleteOnCompletion tree still in its grace when passed), one of a slow peer's class.
 
-- **The boundary is fast deletion's position** (a `flow_id`) with its residue class, published at the end of every
-  round as fast archiving's is. A sweep captures it as it begins and takes the stamped roots at or behind it in
+- **The boundary is fast deletion's position** (a `flow_id`) with its residue class and share, published at the end of
+  every round as fast archiving's is. A sweep captures it as it begins and takes the stamped roots at or behind it in
   `flow_id` order, overdue by its window past their stamp's due time, in the class it captured plus every root overdue
   by the steal grace past the window; a class change drops the sweep (`TestSweepDeletion_TheEndIsFixed`,
   `TestSweepDeletion_TakesWhatFastDeletionPassed`, `TestSweepDeletion_FollowsFastDeletionsResidueClass`).
