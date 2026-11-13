@@ -35,9 +35,18 @@ backlog growing all run. Do not reintroduce slices, a pass budget or a shared ti
 
 A round reports whether it made progress: work done that moved the job forward. A round with progress is followed
 at once by the next; a round without - nothing found, or every candidate held or failing - by the job's own idle wait
-(1 s for the jobs on the live tables; `SetIdle` replaces every job's for a test). **The wait follows a round without
-progress, not only an empty scan:** a job whose candidates all fail would otherwise spin on them. No failure
-counters, backoff or retry classes beyond that.
+(`SetIdle` replaces every job's for a test). **The wait follows a round without progress, not only an empty scan:** a
+job whose candidates all fail would otherwise spin on them. No failure counters, backoff or retry classes beyond that.
+
+**The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`). A fast job
+polls for work that keeps arriving. A repair job - sweep archiving, large-tree archiving - normally has nothing to do,
+and its wait is what it costs then: polled every second it would take a turn, a connection and its reads every second
+on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
+each time. So in a healthy fleet the janitor's steady cost is the two fast jobs. The wait slows nothing that works: a
+round with progress is followed at once by the next. What it delays: a large tree's first chunk after fast archiving
+starts its attempt, a root fast archiving passed (up to the sweep's window plus the wait, which is how long a single
+failure shows in `dwarf_archive_lag_seconds`), and the repair jobs' gauges, which are as old as their last round - an
+attempt published, or a held root taken, reads until the next.
 
 The janitor records the time of each round with progress, and `JobAges` reports how long since, per job
 (`dwarf_janitor_progress_age_seconds`). A blocked job shows there: SQL Server waits on a held lock without bound, and

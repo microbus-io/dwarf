@@ -181,7 +181,7 @@ func (f *FastArchiving) detach() {
 
 // idleWait is how long the job waits after a round without progress.
 func (f *FastArchiving) idleWait() time.Duration {
-	return time.Second
+	return fastIdle
 }
 
 // round runs one batch.

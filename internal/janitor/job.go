@@ -58,6 +58,16 @@ const stealGrace = 30 * time.Second
 
 // The descriptions of the counters more than one job creates, and internal/reaper too, each word for word the same in
 // every one of them: two instruments of one name and different descriptions are exported as two streams of that name.
+// The idle waits: how long a job waits after a round without progress. A fast job polls for work that keeps arriving.
+// A repair job - a sweep, large-tree archiving - normally has none: polled every second it would cost a turn, a
+// connection and its reads every second on every shard, and retry a root or tree that keeps failing every second - a
+// large tree's failing chunk copied again each time. A round with progress is followed at once by the next whatever
+// the wait, so a repair job with work is not slowed.
+const (
+	fastIdle   = time.Second
+	repairIdle = 30 * time.Second
+)
+
 const (
 	archivedDescription     = "Counts flows moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is archiving keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart."
 	moveFailuresDescription = "Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees."

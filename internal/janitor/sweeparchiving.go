@@ -200,7 +200,7 @@ func (s *SweepArchiving) detach() {
 
 // idleWait is how long the job waits after a round without progress.
 func (s *SweepArchiving) idleWait() time.Duration {
-	return time.Second
+	return repairIdle
 }
 
 // reset forgets where the job stood and what it observed: a replica that sweeps the shard again saw nothing of what

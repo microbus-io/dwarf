@@ -159,7 +159,7 @@ func (l *LargeArchiving) detach() {
 
 // idleWait is how long the job waits after a round without progress.
 func (l *LargeArchiving) idleWait() time.Duration {
-	return time.Second
+	return repairIdle
 }
 
 // reset forgets where the job stood: its position, every copy's position, and its reading.

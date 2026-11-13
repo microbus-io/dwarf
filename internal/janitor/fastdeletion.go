@@ -87,7 +87,7 @@ func (f *FastDeletion) detach() {}
 
 // idleWait is how long the job waits after a round without progress.
 func (f *FastDeletion) idleWait() time.Duration {
-	return time.Second
+	return fastIdle
 }
 
 // stampedDueSQL is the condition, on a live flows row, that it is a root stamped for deletion whose stamp is due. Only

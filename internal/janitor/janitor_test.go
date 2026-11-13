@@ -501,3 +501,16 @@ func TestJanitor_ABatchThatCannotTakeItsConnectionFails(t *testing.T) {
 	counts, _ := batchParts(t, assert, reader)
 	assert.Equal(map[string]uint64{partTurn: 1, partAcquire: 1}, counts)
 }
+
+// TestJanitor_TheIdleWaits pins each job's wait after a round without progress: a second for the fast jobs, which poll
+// for work that keeps arriving; 30 s for the repair jobs, which normally have none, and would otherwise retry a root or
+// tree that keeps failing every second.
+func TestJanitor_TheIdleWaits(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	r := newRig(t, 30)
+	assert.Equal(time.Second, r.fast().idleWait())
+	assert.Equal(time.Second, r.del().idleWait())
+	assert.Equal(30*time.Second, r.sweep().idleWait())
+	assert.Equal(30*time.Second, r.large().idleWait())
+}
