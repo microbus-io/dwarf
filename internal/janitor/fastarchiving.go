@@ -301,8 +301,8 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 
 // probe reads the shard's oldest due closed root - every replica's, behind the position or ahead of it, with an archive
 // attempt or without - for the archive lag. During a failure episode, and when canEnd, it also reads the oldest without
-// an attempt, and ends the episode once that one came due after the last failure: everything due then has left the
-// live tables. A tree being archived in stages is not a failure, so it does not hold an episode open. Ages are compared
+// an attempt, and ends the episode once there is none, or that one came due more than endMargin after the last
+// failure: everything due then has left the live tables. A tree being archived in stages is not a failure, so it does not hold an episode open. Ages are compared
 // on the database's clock and the failure's on this process's, so neither clock's offset matters.
 func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 	f.probedAt = time.Now()
@@ -319,16 +319,23 @@ func (f *FastArchiving) probe(ctx context.Context, h handle, canEnd bool) {
 		return
 	}
 	none, noneArg := noAttemptSQL(h.DriverName())
-	_, oldestUnattempted, err := f.scanClosed(ctx, h, noSeams, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
+	unattempted, oldestUnattempted, err := f.scanClosed(ctx, h, noSeams, " AND archive_attempt_at<="+none, []any{noneArg}, 1)
 	if err != nil {
 		f.logError(ctx, "Janitor: reading the oldest closed root", "error", err)
 		return
 	}
 	// A root due at the last failure had waited the grace by then, and has waited since.
-	if oldestUnattempted < time.Since(failLast)+f.grace {
+	if len(unattempted) == 0 || oldestUnattempted+endMargin < time.Since(failLast)+f.grace {
 		f.clearUnlessFailedSince(failLast.Add(time.Nanosecond))
 	}
 }
+
+// endMargin is how long after the last failure the oldest unattempted root must have come due for a probe to end the
+// episode. The two sides are read at different instants - the root's age on the database's clock, in milliseconds, when
+// the probe's statement runs; the time since the failure on this process's after it returns - so with no margin a root
+// that failed just after it came due can read as having come due after its own failure, and the episode ends while it
+// is still live. A root due within the margin is the job's to archive next, and that move ends the episode.
+const endMargin = time.Second
 
 // cut returns the roots among candidates, in order, that one batch takes, and what it does with them. A root with an
 // archive attempt is left out, and passed. Of the rest it takes a leading run whose trees fit a batch (cutWithin) -

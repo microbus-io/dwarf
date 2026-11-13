@@ -130,10 +130,13 @@ rechecks under them, the directory rows and the archive time are the reaper's, c
   `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
   whole, a batch that cannot take its connection, a failed scan, attempt read, sizing or move - and ends at a later
-  move that archives something, or at a probe that finds the oldest due root without an archive attempt came due
-  after the last failure: everything due then has left the live tables. A staged tree in progress is not a failure,
-  so it holds no episode open. The probe's ages are the database's and the failure's time is this process's, compared
-  as durations, so neither clock's offset matters. **Do not end it at an empty round:** the scan is after the
+  move that archives something, or at a probe that finds no due root without an archive attempt, or finds the oldest
+  came due more than `endMargin` (1 s) after the last failure: everything due then has left the live tables. A staged
+  tree in progress is not a failure, so it holds no episode open. The probe's ages are the database's and the failure's
+  time is this process's, compared as durations, so neither clock's offset matters - **but they are read at different
+  instants and resolutions, so do not compare them without the margin.** A root that failed just after it came due
+  then reads as due after its own failure, and the episode ends with the root still live: with no margin,
+  `TestArchiveMetrics_TheReaperCountsWhatItMoves` failed 49 of 300 runs on SQLite. **Do not end it at an empty round:** the scan is after the
   position, and a root a failure left behind is not in it, so a failing root on a quiet shard would read as
   recovered. Ending it only at a move fails the other way: one transient error on a quiet shard reads as failing for
   as long as nothing closes. **And end it only in a round that could archive** - its day read and open: a closed day
