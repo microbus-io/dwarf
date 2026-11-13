@@ -168,8 +168,8 @@ rechecks under them, the directory rows and the archive time - is under "The mov
   `TestArchiveMetrics_TheReaperCountsWhatItMoves`. A stop records nothing. Only the episode's first failure is
   logged (`TestMove_ALastingFaultPreservesAndLogs`). At a retention of 0 nothing is archived, so nothing starts an
   episode (`TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure`).
-- **The counters more than one job creates** - `dwarf_flows_archived`, `dwarf_archive_move_failures`,
-  `dwarf_flows_reaped` - take their descriptions from one constant each (`job.go`): two instruments of one name with
+- **The counters more than one job creates** - `dwarf_flows_archived`, `dwarf_flows_reaped` - take their
+  descriptions from one constant each (`job.go`): two instruments of one name with
   different descriptions are exported as two streams of that name.
 - **The recheck under the root lock is the authority, not the scan:** a root selected and sized is moved only if it is
   still a closed root due, unstamped, and with no archive attempt when locked (`TestMove_TheLockRechecksEveryRoot`); a
@@ -232,8 +232,8 @@ considered, and starts over when its residue class changes, as fast archiving do
 
 Three jobs sweep: sweep archiving and sweep deletion behind a fast job, and live retention, stamping the trees past
 their retention. They share one account of their sweeps (`sweep`: whether one is under way, the size of its next batch, the
-held count, the front's age, the sweep's age), one set of gauges under a `kind` per job (`closed`, `deleted`,
-`retention`; `sweepGauges`) and one round (`sweepRound`); each job owns its population, its position and its routing.
+held count), one gauge under a `kind` per job (`closed`, `deleted`, `retention`; `sweepGauge`) and one round
+(`sweepRound`); each job owns its population, its position and its routing.
 
 - **A failed batch is taken again a root at a time**, from the same position; a root that fails alone is held -
   counted and passed - and the next sweep comes back to it. Only the first `heldLogLimit` (8) a sweep holds are logged,
@@ -245,8 +245,7 @@ held count, the front's age, the sweep's age), one set of gauges under a `kind` 
   ever idling and a test's drain from ever returning (`TestSweep_PassingAStuckAttemptIsNoProgress`).
 - **The held count is the larger of the current sweep's and the last complete one's**, published as each root is held
   (`TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes`); a sweep dropped before it completes - its fast job's
-  residue class changed - keeps its count. The front's age is the oldest root at a sweep's first scan, aging until the
-  next sweep's.
+  residue class changed - keeps its count.
 - **Sweep deletion deletes a large tree one at a time**, a chunk a batch, until it is gone, no longer due, held by another
   transaction, or a chunk fails - held, as a root that fails alone is - and only then the next root (user): with the
   trees' chunks interleaved, each tree's deletion would take longer the more were in flight, all of them holding their
@@ -284,7 +283,7 @@ every sweep would pass it again, a batch at a time.
   taken in another. A dropped sweep's held roots still count, and, not having completed, it ends no failure episode.
 - **A failed batch is retried a root at a time, as every sweep does** (`TestSweep_APoisonTreeDoesNotLoseItsBatchMates`,
   `TestSweep_PassesFailedTrees`).
-- **Its gauges are its own**, observed only while its janitor is active: the sweep gauges under `kind="closed"`, and
+- **Its gauges are its own**, observed only while its janitor is active: the held count under `kind="closed"`, and
   its series of `dwarf_archive_failing_seconds`.
 - **Its failure episode** begins at a failure - the day, a scan, a sizing, a move, a connection - and ends at a sweep
   that completes having failed nothing, in a batch whose day was read and open: a sweep starting after the failure and
@@ -309,7 +308,7 @@ its grace when passed), one of a slow peer's class.
 - **A tree a batch holds is deleted with its batch** (`move`, the stamp rechecked under the root lock); a larger one in
   chunks, one tree at a time (above). A failed chunk is held. No failure episode: deleting is not archiving.
 - **`dwarf_flows_reaped{reason="deleted"}` counts each chunk as it commits**, so a later chunk's failure loses none of
-  it, and only trees never archived (`TestChunk_CommittedChunksAreCountedWhenALaterOneFails`). Its sweep gauges are
+  it, and only trees never archived (`TestChunk_CommittedChunksAreCountedWhenALaterOneFails`). Its held count is
   under `kind="deleted"` (`TestSweepDeletion_TheGauges`).
 
 ## Live retention (`liveretention.go`)
@@ -332,9 +331,8 @@ from the archive's day tables' retention, a job of its own.
   boundary: no fast job precedes it. **No residue class**: every root past its retention is overdue by the steal
   grace, so a class would restrict nothing; replicas meeting on a root skip it on PostgreSQL and MySQL, and a stamp is
   short (user: a rare event, not worth a class).
-- **The stamp sets `updated_at` to now**, so the tree's wait for deletion - sweep deletion's window, the `deleted`
-  kind's oldest-held gauge - counts from when it was given up, not from its close days ago, which would read as a
-  stamped tree held for days. (A Delete's stamp keeps `updated_at`, so a Delete of an old flow still ages that gauge.)
+- **The stamp sets `updated_at` to now**, so the tree's wait for deletion - sweep deletion's window - counts from when
+  it was given up, not from its close days ago, which would make a tree given up just now overdue at once.
 - **`dwarf_flows_reaped{reason="archive_failed"}` counts at the stamp** - the flows of each stamped tree, counted by
   root before the transaction so no root is held through a read of whole trees (a closed tree gains no flow; one that
   leaves the live tables in between is not locked, so not counted): the records given up, which must stay zero. Their deletion counts them again under `deleted`, as a
@@ -358,15 +356,15 @@ The job that deletes the archived trees marked for deletion (`JobArchiveDeletion
   larger one in chunks, one tree at a time (`deleteChunk` on the day's tables). A failed batch is taken again a root at
   a time; a root that fails alone is held and passed (`TestDeleteMarked_SmallTreesGoTogether`,
   `TestDeleteMarked_ALargeTreeInChunksOneAtATime`, `TestDeleteMarked_AFailingTreeIsPendingAndTheRestGo`).
-- **Its gauges:** `dwarf_archive_deletions_pending`, the marked roots a sweep found and could not delete - failing, or
-  held by another transaction (`stillMarked` tells a held root from one another replica deleted) - and
-  `dwarf_archive_deletion_days_unknown`, the days it could not examine. Each reads the larger of the sweep under way's
-  count and the last complete one's, published as a tree fails rather than when the sweep completes: with 8 failures a
+- **Its gauge:** `dwarf_archive_deletions_pending`, the marked roots a sweep found and could not delete - failing, or
+  held by another transaction (`stillMarked` tells a held root from one another replica deleted). A day whose probe
+  fails is logged, its trees not counted. It reads the larger of the sweep under way's count and the last complete
+  one's, published as a tree fails rather than when the sweep completes: with 8 failures a
   round and a 30 s wait between rounds, a sweep through a failing backlog runs for hours
   (`TestDeleteMarked_FailuresShowBeforeTheSweepCompletes`, `TestDeleteMarked_AHeldTreeIsPending`,
-  `TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneUnknown`). A held tree's log names it by its correlation id,
+  `TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneLogged`). A held tree's log names it by its correlation id,
   which needs the root's `created_hour`: the probe reads it. Nothing reads until a sweep has completed - zero would
-  claim every day examined - but a failure as soon as it is met. A root another replica's sweep holds mid-deletion
+  claim every day swept - but a failure as soon as it is met. A root another replica's sweep holds mid-deletion
   counts as pending until this replica's next sweep finds it gone. Since every
   archived deletion goes through the sweep, a pending count is normal for a moment after a Purge; one that stays is
   the signal.
@@ -400,8 +398,7 @@ pass interval (`PassInterval`): hourly for a day of a day or longer, a twenty-fo
   run them only by taking a second, the hold-and-wait the batch rule forbids (`TestArchiveRetention_TakesNoSecondConnection`,
   making days on a pool of one; `TestArchiveRetention_WaitsForATurn`). The engine's shutdown-ordering test, which holds
   every batch at its connection, counts every job but this one.
-- **Its counters:** `dwarf_archive_days_dropped`, which the engine's PurgeBefore counts too under the same description
-  (`DaysDroppedDescription`), and `dwarf_archive_maintain_failed`, a failed pass, not a stopped one
+- **Its counter:** `dwarf_archive_maintain_failed`, a failed pass, not a stopped one
   (`TestArchiveRetention_KeepsTheDays` on days of 48 hours, which the rig never made, so a job that only dropped
   fails it; `TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`). The engine's
   `CheckpointArchivePassDone` is its catalog refresh's; a test waiting for a maintenance pass waits for
@@ -457,7 +454,13 @@ transaction, and then never finishes: the delete wall.
   a large child's remaining steps on every chunk, quadratic over the tree (measured 279 ms a chunk on PostgreSQL at
   4,000 steps a child). Step ids are read in `step_id` order from `idx_dwarf_steps_flow_id` and deleted by a literal
   list: a range or an ordered `DELETE` with a limit is not portable, and the read stays bounded by the flow's own steps
-  only with that index keyed on `(flow_id, step_id)`.
+  only with that index keyed on `(flow_id, step_id)`. **On PostgreSQL every chunk transaction turns bitmap scans off
+  first** (`boundReads`, deleting and copying alike): with no statistics on a large flow - written since the last
+  ANALYZE - the planner reads its steps by a bitmap scan of the flow index and sorts them, every remaining step of the
+  flow on every chunk; without the bitmap scan it walks the index in order and stops at the limit. The 1% ANALYZE
+  trigger on `dwarf_steps` narrows that window and cannot close it, so do not rely on statistics for the bound
+  (`TestChunk_APopulatedStepReadStopsAtItsBudget`, a populated table with none; `TestChunk_TheStepBoundaryWalksTheFlowsIndex`,
+  the plan at the production budget on every dialect but SQL Server).
 - **A budget is rows and bytes, and a chunk stops at whichever it reaches first** (`limit`, `size.go`), the byte counts
   read from the `*_bytes` columns, so no payload is read to size it. **A chunk takes at least one step only while it
   has taken nothing** (`stepsWithin`'s `fresh`): a step over the whole budget then goes alone, and a chunk that already
@@ -523,8 +526,7 @@ stamped for deletion with its attempt kept. The protocol:
   gives way at once and is taken again when the position comes round to it (`TestStage_AFailedChunkIsRetried`).
   **A round goes on to the next tree until a chunk makes progress or a lap makes none**, each tree once a round, and
   only then does the job wait: idling after any tree without progress would let one stuck tree hold every other to a
-  chunk a second (`TestStage_AStuckTreeDoesNotHoldTheOthers`). A failed chunk counts in `dwarf_archive_move_failures`
-  and is logged.
+  chunk a second (`TestStage_AStuckTreeDoesNotHoldTheOthers`). A failed chunk is logged.
 - **At a retention of 0 it copies nothing**, since nothing is archived there: a tree whose attempt an earlier
   run started is fast archiving's to delete, which it does attempt or not (its move fences on the attempt only when
   archiving, and its stamp clears it). Copying it as well would race the deletion and could publish a tree into an
@@ -561,8 +563,8 @@ stamped for deletion with its attempt kept. The protocol:
 - **A published tree's live copy is fast deletion's** when a batch holds it, and otherwise sweep deletion's, in chunks:
   fast deletion passes a stamped tree larger than a batch, and its position is then past it.
 
-Staging is off in production (`reapStageRows` 0): fast archiving starts no attempt, and the job copies only attempts
-already there. The engine and fixtures suites exercise it with `DWARF_STAGE_ROWS=1`.
+Staging is on past 256k rows or 128 MiB of payload by the engine's defaults (`engine/CLAUDE.md`). The engine and
+fixtures suites exercise it on every tree with `DWARF_STAGE_ROWS=1`.
 
 ## The archive attempt (`attempt.go`) and publication accounting
 

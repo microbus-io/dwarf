@@ -25,7 +25,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -60,7 +59,6 @@ type engineMetrics struct {
 	operationSeconds    metric.Float64Histogram
 	peerChanges         metric.Int64Counter
 	flowsRemoved        metric.Int64Counter
-	daysDropped         metric.Int64Counter
 	flowsExpired        metric.Int64Counter
 	expireFailed        metric.Int64Counter
 
@@ -252,7 +250,6 @@ func (e *Engine) initMetrics() error {
 	// a statement. Exact counts of the live or archive tables by status (a GROUP BY linear in the tables) and the
 	// database's own statistics (a privileged read in four dialect shapes) are left to the server's exporter.
 	m.flowsRemoved = ctr("dwarf_flows_removed", "Counts root flows Delete and Purge removed, by shard, by operation (op: delete, purge) and by side: archive for a tree deleted from the archive at once, live for a closed tree not archived yet that Delete scheduled for deletion, which is then deleted within seconds and counted as dwarf_flows_reaped{reason=\"deleted\"}. Purge reads only the archive, so it counts on the archive side only.")
-	m.daysDropped = ctr("dwarf_archive_days_dropped", janitor.DaysDroppedDescription) // the janitor's archive retention counts its drops
 	m.flowsExpired = ctr("dwarf_flows_expired", "Counts root flows terminated because they were still open after the flow expiration (SetFlowExpiration), by shard. Each is also counted in dwarf_flows_closed{status=\"terminated\"}, with its subgraph flows. Zero while the expiration is off.")
 	m.expireFailed = ctr("dwarf_flows_expire_failed", "Counts attempts to terminate an expired root flow that failed, by shard - attempts, not flows: a root that fails again is counted on every pass, up to an hour apart, until it is terminated. Expect zero: a database failing the termination, or a tree spawning subgraphs faster than it can be stopped. The error log names the flow and the cause.")
 
@@ -319,7 +316,6 @@ func (e *Engine) initMetrics() error {
 	// Archive gauges are per-shard facts, aggregated with max. Janitor readings come from dispatching replicas;
 	// archive-day readings come from every replica, using its latest catalog observation. The archive lag, failing,
 	// attempt, sweep and archive deletion gauges are the janitor's jobs' own (internal/janitor).
-	archiveDays := gauge("dwarf_archive_days", "Per-shard: the archive days whose tables exist on that shard, by each replica's last reading of them (every archive pass, 24 times a day): the retained days, today, and the two days ahead made early - the retention plus 3 once the shard has kept a full retention. More means expired days are not being dropped (dwarf_archive_maintain_failed). Aggregate with max.", "")
 	janitorProgress := gaugeF("dwarf_janitor_progress_age_seconds", "Per shard and job: how long since the job last made progress - work done that moved it forward - or since its janitor started, on each replica dispatching the shard. A job with work makes progress batch after batch, so this stays near zero while there is work and grows while there is none; growing while the job's work waits means the job is blocked or failing, and the logs say why. Aggregate with max.", "s")
 	archiveOldest := gaugeF("dwarf_archive_oldest_day_age_seconds", "Per-shard: how long ago the oldest archive day on that shard began, by each replica's last reading of the days. About the retention plus a day once maintenance keeps up, and up to two hours more, since days drop on hourly passes; beyond that, expired days are not being dropped. Aggregate with max.", "s")
 
@@ -343,14 +339,13 @@ func (e *Engine) initMetrics() error {
 				inFlightBytes:    inFlightBytes,
 				inFlightSteps:    inFlightSteps,
 				stateCacheBytes:  stateCacheBytes,
-				archiveDays:      archiveDays,
 				archiveOldest:    archiveOldest,
 				janitorProgress:  janitorProgress,
 			})
 		},
 		queueDepth, stepsPending, oldestAge, dispatchLag, peerReplicas, shardDispatching, peerBlind, tallyAge,
 		turnstileAvail, turnstileWaiting, workersResident, inFlightBytes, inFlightSteps, stateCacheBytes,
-		dbPhaseWorkers, archiveDays, archiveOldest,
+		dbPhaseWorkers, archiveOldest,
 		janitorProgress,
 	)
 	if err != nil {
@@ -391,7 +386,6 @@ type observableGauges struct {
 	inFlightBytes   metric.Int64ObservableGauge
 	inFlightSteps   metric.Int64ObservableGauge
 	stateCacheBytes metric.Int64ObservableGauge
-	archiveDays     metric.Int64ObservableGauge
 	archiveOldest   metric.Float64ObservableGauge
 	janitorProgress metric.Float64ObservableGauge
 }
@@ -458,7 +452,6 @@ func (e *Engine) observeGauges(ctx context.Context, o metric.Observer, g observa
 		if actors != nil {
 			a := actors.archive
 			days := a.DaysIn(math.MinInt, math.MaxInt)
-			o.ObserveInt64(g.archiveDays, int64(len(days)), shard)
 			if len(days) > 0 {
 				// A day begins where the one before it ends.
 				o.ObserveFloat64(g.archiveOldest, max(now.Sub(a.DayEnds(days[0]-1)), 0).Seconds(), shard)
@@ -688,14 +681,6 @@ func (e *Engine) metricFlowsRemoved(ctx context.Context, shardNum int, side, op 
 	}
 	e.metrics.flowsRemoved.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum),
 		attribute.String("side", side), attribute.String("op", op)))
-}
-
-// metricArchiveDaysDropped counts the archive days a PurgeBefore dropped.
-func (e *Engine) metricArchiveDaysDropped(ctx context.Context, shardNum, n int) {
-	if e.metrics == nil || n <= 0 {
-		return
-	}
-	e.metrics.daysDropped.Add(ctx, int64(n), metric.WithAttributes(shardAttr(shardNum)))
 }
 
 // metricFlowsExpired counts the roots one expiration pass terminated on a shard.

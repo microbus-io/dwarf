@@ -202,7 +202,7 @@ func TestLiveRetention_PassesFailedRoots(t *testing.T) {
 	for i, id := range roots {
 		assert.Equal(i != 2, stampOf(t, r, id) == 1, "root %d", i)
 	}
-	assert.True(r.liveRetention().w.reading(time.Now()).held > 0, "held")
+	assert.True(r.liveRetention().w.held() > 0, "held")
 	r.seams.Withdraw(targeted)
 	r.retentionRounds(ctx)
 	assert.Equal(1, stampOf(t, r, roots[2]))

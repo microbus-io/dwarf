@@ -556,9 +556,7 @@ func TestStage_AFailedChunkIsRetried(t *testing.T) {
 	assert.False(r.chunk(ctx), "and the tree is tried once a round")
 	r.seams.Withdraw(fault)
 	assert.True(attemptAt(t, r, root).Equal(at), "the attempt holds through a failed chunk")
-	var rm metricdata.ResourceMetrics
-	assert.NoError(reader.Collect(ctx, &rm))
-	assert.Equal(int64(2), counterSum(rm, "dwarf_archive_move_failures"))
+	assert.Equal(2, r.logs.count("Janitor: staging an archive"), "each failed chunk logged")
 	r.pass(ctx)
 	if now, _ := r.archive.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")

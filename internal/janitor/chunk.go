@@ -91,13 +91,32 @@ func stepsSizeUpTo(ctx context.Context, q sequel.Executor, sfx string, flows []i
 	return sz, errors.Trace(err)
 }
 
+// stepsWithinSQL is stepsWithin's read, its limit bound: the steps of flow after the step after, in step_id order.
+func stepsWithinSQL(sfx string, flow, after int) string {
+	return "SELECT s.step_id, " + stepBytesSQL + " FROM dwarf_steps" + sfx + " s WHERE s.flow_id=" + strconv.Itoa(flow) +
+		" AND s.step_id>" + strconv.Itoa(after) + " ORDER BY s.step_id LIMIT_OFFSET(?, 0)"
+}
+
+// boundReads keeps a chunk's reads bounded by its budget on PostgreSQL, whatever the planner's statistics: it turns
+// bitmap scans off for the chunk's transaction, the first statement of every chunk, deleting or copying. With no
+// statistics on a large flow - a flow written since the last ANALYZE - the planner reads its steps by a bitmap scan
+// of the flow index and sorts them, every remaining step of the flow on every chunk (measured: 40,000 steps scattered
+// at 4% density, about a second a chunk cold); without the bitmap scan it walks the index in order and stops at the
+// limit. The ANALYZE trigger at 1% narrows the window and cannot close it. Elsewhere it does nothing.
+func boundReads(ctx context.Context, tx *sequel.Tx) error {
+	if tx.DriverName() != "pgx" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, "SET LOCAL enable_bitmapscan = off")
+	return errors.Trace(err)
+}
+
 // stepsWithin returns the leading live steps of flow after the step after, in step_id order, that fit budget; their
 // size; and more when the budget, not the flow, ended them. When fresh - nothing else in the chunk yet - it takes at
 // least one, so a step over the whole budget goes alone; otherwise it may take none, and the chunk ends there. It reads
 // up to budget's rows, a seek into (flow_id, step_id) whatever else the table holds.
 func stepsWithin(ctx context.Context, tx *sequel.Tx, sfx string, flow, after int, budget limit, fresh bool) (ids []int, sz size, more bool, err error) {
-	rows, err := tx.QueryContext(ctx, "SELECT s.step_id, "+stepBytesSQL+" FROM dwarf_steps"+sfx+" s WHERE s.flow_id="+strconv.Itoa(flow)+
-		" AND s.step_id>"+strconv.Itoa(after)+" ORDER BY s.step_id LIMIT_OFFSET(?, 0)", max(budget.rows, 1))
+	rows, err := tx.QueryContext(ctx, stepsWithinSQL(sfx, flow, after), max(budget.rows, 1))
 	if err != nil {
 		return nil, size{}, false, errors.Trace(err)
 	}
@@ -198,6 +217,9 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 	var published int
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		deleted, done, at, published = removal{}, false, *pos, 0
+		if err := boundReads(ctx, tx); err != nil {
+			return err
+		}
 		locked, err := lockRoots(ctx, tx, sfx, true, "flow_id="+id+" AND "+marked)
 		if err != nil {
 			return errors.Trace(err)
@@ -335,6 +357,9 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 	})
 	if err != nil {
 		return removal{}, false, errors.Trace(err)
+	}
+	if seams.Enabled() && seams.IsFault(diagnostics.Join(diagnostics.FaultJanitorLostResponse, strconv.Itoa(root))) {
+		return removal{}, false, errors.New("injected fault: " + diagnostics.FaultJanitorLostResponse)
 	}
 	if !archived && published == 0 {
 		deleted.unarchived = deleted.flows

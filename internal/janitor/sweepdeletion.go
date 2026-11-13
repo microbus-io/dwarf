@@ -92,15 +92,15 @@ func (s *SweepDeletion) attach(j *Janitor, _ string) {
 	meter := j.diags.Meter()
 	var errs [3]error
 	s.reaped, errs[0] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
-	gauges, err := newSweepGauges(meter)
+	gauges, err := newSweepGauge(meter)
 	errs[1] = err
 	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindDeleted))
 	s.gauges, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if j.isActive() {
-			gauges.observe(o, s.w.reading(time.Now()), kind)
+			gauges.observe(o, &s.w, kind)
 		}
 		return nil
-	}, gauges.instruments()...)
+	}, gauges.held)
 	if err := errors.Join(errs[:]...); err != nil {
 		j.diags.Logger().Error("Creating the sweep deletion job's instruments", "shard", j.shard.Index(), "error", err)
 	}
@@ -156,17 +156,15 @@ func (s *SweepDeletion) batch(ctx context.Context, h handle) outcome {
 		return s.chunk(ctx, h, budget)
 	}
 	if s.end.after.flowID == 0 {
-		s.w.sawFront(false, 0)
 		s.w.complete() // fast deletion has passed nothing: nothing is behind it
 		return idle
 	}
 	where, args := s.restriction()
-	candidates, oldest, err := scanStamped(ctx, h, seams, where, args, s.w.limit(s.batchRoots))
+	candidates, err := scanStamped(ctx, h, seams, where, args, s.w.limit(s.batchRoots))
 	if err != nil {
 		s.logError(ctx, "Janitor: selecting stamped trees to sweep", "error", err)
 		return idle
 	}
-	s.w.sawFront(len(candidates) > 0, oldest)
 	if len(candidates) == 0 {
 		s.w.complete()
 		return idle

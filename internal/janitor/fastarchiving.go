@@ -42,7 +42,7 @@ const ReasonNoRetention = "no_retention"
 const (
 	defaultGrace      = time.Minute
 	defaultBatchRoots = 512
-	defaultBatchRows  = 4096
+	defaultBatchRows  = 8192
 	defaultBatchBytes = 16 << 20
 )
 
@@ -72,12 +72,11 @@ type FastArchiving struct {
 	noQuietMargin bool
 
 	// j is the janitor the job is added to; the instruments are created on its meter, and record under shardAttr.
-	j            *Janitor
-	shardAttr    attribute.KeyValue
-	archived     metric.Int64Counter
-	moveFailures metric.Int64Counter
-	reaped       metric.Int64Counter
-	gauges       metric.Registration
+	j         *Janitor
+	shardAttr attribute.KeyValue
+	archived  metric.Int64Counter
+	reaped    metric.Int64Counter
+	gauges    metric.Registration
 
 	// after is the position: the last root a round was done with. count, ordinal and partitioned are the residue
 	// class the position was walked in; a round in another starts over from the beginning, since the roots of a
@@ -144,19 +143,18 @@ func (f *FastArchiving) attach(j *Janitor, name string) {
 	f.j = j
 	f.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
-	errs := make([]error, 6)
+	errs := make([]error, 5)
 	f.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
-	f.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures", metric.WithDescription(moveFailuresDescription))
-	f.reaped, errs[2] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
+	f.reaped, errs[1] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	lag, err := meter.Float64ObservableGauge("dwarf_archive_lag_seconds", metric.WithUnit("s"),
 		metric.WithDescription("Per shard: how long archiving is behind - how long past the archive grace the shard's oldest closed root not yet archived has waited, every replica's and one being archived in stages included - read about once a second while this replica dispatches the shard, and aging between readings. Aggregate with max."))
-	errs[3] = err
+	errs[2] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
-	errs[4] = err
+	errs[3] = err
 	shard := metric.WithAttributes(f.shardAttr)
 	jobShard := metric.WithAttributes(f.shardAttr, attribute.String("job", name))
-	f.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	f.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
@@ -285,7 +283,6 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	f.after = candidates[last]
 	switch {
 	case err != nil && archiving:
-		f.moveFailures.Add(ctx, 1, metric.WithAttributes(f.shardAttr))
 		f.failed(ctx, "archiving closed trees", err)
 		return false
 	case err != nil:

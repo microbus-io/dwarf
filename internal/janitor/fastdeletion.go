@@ -126,7 +126,7 @@ func (f *FastDeletion) position() (b boundary, ok bool) {
 func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 	seams := f.j.diags.Seams()
 	where, whereArgs := f.restriction()
-	found, _, err := scanStamped(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
+	found, err := scanStamped(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
 	candidates := rootIDs(found)
 	if err != nil {
 		f.logError(ctx, "Janitor: selecting stamped trees", "error", err)
@@ -206,8 +206,7 @@ func stampedResidency(count, ordinal int, ok bool, steal time.Duration) (clause 
 		[]any{count, ordinal, -steal.Milliseconds()}
 }
 
-// scanStamped selects up to limit stamped roots due for deletion, restricted by where, in flow_id order, and returns
-// the age of the oldest it read since its updated_at, 0 for none.
+// scanStamped selects up to limit stamped roots due for deletion, restricted by where, in flow_id order.
 //
 // ORDER BY flow_id is required: LIMIT_OFFSET compiles to OFFSET/FETCH on SQL Server, which rejects it without one. It
 // walks idx_dwarf_flows_delete_after, keyed on flow_id over the stamped roots only, in its own order. Without that index
@@ -216,7 +215,7 @@ func stampedResidency(count, ordinal int, ok bool, steal time.Duration) (clause 
 // no partial index, so their index is the full (delete_after_ms) one and the scan is told to use it: it then reads
 // every stamped root and sorts them, bounded by what is stamped rather than by what is held; left to itself MariaDB
 // walked the primary key.
-func scanStamped(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
+func scanStamped(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, where string, whereArgs []any, limit int) (roots []dueRoot, err error) {
 	stmt, args := stampedScanSQL(q.DriverName(), where, whereArgs, limit)
 	rows, err := q.QueryContext(ctx, stmt, args...)
 	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
@@ -224,20 +223,18 @@ func scanStamped(ctx context.Context, q sequel.Executor, seams *seamster.Seamste
 		err = errors.New("injected fault: " + diagnostics.FaultReapSelectErr)
 	}
 	if err != nil {
-		return nil, 0, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var r dueRoot
-		var ageMs float64 // fractional on SQLite
-		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs, &r.createdHour); err != nil {
-			return nil, 0, errors.Trace(err)
+		if err := rows.Scan(&r.flowID, &r.updatedAt, &r.createdHour); err != nil {
+			return nil, errors.Trace(err)
 		}
 		r.updatedAt = database.StoredTime(r.updatedAt)
 		roots = append(roots, r)
-		oldest = max(oldest, time.Duration(ageMs*float64(time.Millisecond)))
 	}
-	return roots, oldest, errors.Trace(rows.Err())
+	return roots, errors.Trace(rows.Err())
 }
 
 // stampedScanSQL is scanStamped's statement.
@@ -246,7 +243,7 @@ func stampedScanSQL(driver, where string, whereArgs []any, limit int) (string, [
 	if driver == "mysql" || driver == "mariadb" {
 		from += " FORCE INDEX (idx_dwarf_flows_delete_after)"
 	}
-	return "SELECT flow_id, updated_at, DATE_DIFF_MILLIS(NOW_UTC(), updated_at), created_hour FROM " + from + " WHERE " +
+	return "SELECT flow_id, updated_at, created_hour FROM " + from + " WHERE " +
 			stampedDueSQL + where + " ORDER BY flow_id LIMIT_OFFSET(?, 0)",
 		append(slices.Clone(whereArgs), limit)
 }

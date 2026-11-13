@@ -55,8 +55,8 @@ func unmadeArchive(r *rig) *archiver.Archive {
 	return archiver.New(r.db, 48*time.Hour, migrations.Archive())
 }
 
-// TestArchiveRetention_KeepsTheDays pins a pass: today and the days ahead made, the days past the retention dropped and
-// counted, and progress reported; the next pass finds neither and reports none, so the idle wait paces the one after.
+// TestArchiveRetention_KeepsTheDays pins a pass: today and the days ahead made, the days past the retention dropped,
+// and progress reported; the next pass finds neither and reports none, so the idle wait paces the one after.
 func TestArchiveRetention_KeepsTheDays(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -66,7 +66,7 @@ func TestArchiveRetention_KeepsTheDays(t *testing.T) {
 	today, err := archive.Today(ctx)
 	assert.Must(assert.NoError(err))
 	assert.Must(assert.NoError(makeArchiveDay(t, r, today-5)))
-	round, reader := retentionJanitor(t, r, archive, 1)
+	round, _ := retentionJanitor(t, r, archive, 1)
 	assert.True(round(ctx), "the days made and the day dropped are progress")
 	assert.False(round(ctx), "the next pass has nothing to do")
 	if now, _ := archive.Today(ctx); now != today {
@@ -77,9 +77,6 @@ func TestArchiveRetention_KeepsTheDays(t *testing.T) {
 	for day := today; day <= today+2; day++ {
 		assert.True(archive.Whole(day), "day %d made", day)
 	}
-	var rm metricdata.ResourceMetrics
-	assert.Must(assert.NoError(reader.Collect(ctx, &rm)))
-	assert.Equal(int64(1), counterSum(rm, "dwarf_archive_days_dropped"))
 }
 
 // TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot pins dwarf_archive_maintain_failed: a pass that fails counts

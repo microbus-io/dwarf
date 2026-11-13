@@ -193,7 +193,6 @@ func TestSweep_CompletesUnderContinuousArrivals(t *testing.T) {
 	}
 	assert.True(rounds < 10, "the sweep completed")
 	assert.False(r.sweep().w.sweeping, "the sweep completed")
-	assert.Zero(r.sweep().w.reading(time.Now()).sweep, "between sweeps")
 	if now, _ := r.archive.Today(ctx); now != today {
 		t.Skip("midnight passed")
 	}
@@ -431,11 +430,8 @@ func TestSweep_HeldRootsAndTheFailureEpisode(t *testing.T) {
 	r.seams.InjectN(targeted, 10000)
 	r.pass(ctx)
 
-	reading := r.sweep().w.reading(time.Now())
-	assert.Equal(1, reading.held, "the root that failed alone is held")
+	assert.Equal(1, r.sweep().w.held(), "the root that failed alone is held")
 	assert.True(r.sweep().failingFor(time.Now()) > 0, "the sweep is failing")
-	assert.Zero(reading.sweep, "between sweeps")
-	assert.True(reading.oldestHeld >= 10*time.Minute, "the front's oldest due root: %v", reading.oldestHeld)
 	var rm metricdata.ResourceMetrics
 	assert.NoError(reader.Collect(ctx, &rm))
 	held, ok := gaugeOf(rm, "dwarf_archive_held_roots", map[string]string{"shard": "1", "kind": "closed"})
@@ -446,10 +442,8 @@ func TestSweep_HeldRootsAndTheFailureEpisode(t *testing.T) {
 
 	r.seams.Withdraw(targeted)
 	r.pass(ctx)
-	reading = r.sweep().w.reading(time.Now())
-	assert.Zero(reading.held, "a clean sweep holds nothing")
+	assert.Zero(r.sweep().w.held(), "a clean sweep holds nothing")
 	assert.Zero(r.sweep().failingFor(time.Now()), "a sweep that failed nothing ends the episode")
-	assert.Zero(reading.oldestHeld, "nothing due at the last sweep's front")
 }
 
 // TestSweep_PassingAStuckAttemptIsNoProgress pins that a root the sweep only passes - one with an archive attempt whose
@@ -479,9 +473,7 @@ func TestSweep_PassingAStuckAttemptIsNoProgress(t *testing.T) {
 		t.Fatal("the drain did not return: passing the stuck attempt counted as progress")
 	}
 	assert.Zero(r.sweepRounds(ctx), "a sweep makes no progress on the root")
-	reading := r.sweep().w.reading(time.Now())
-	assert.Zero(reading.held, "a root with an attempt is not the sweep's to hold")
-	assert.Zero(reading.oldestHeld, "nor in its scan: large-tree archiving's while its copy runs")
+	assert.Zero(r.sweep().w.held(), "a root with an attempt is not the sweep's to hold")
 }
 
 // TestSweep_NothingMovesWhileTomorrowIsNotWhole pins the day's gate on the sweep: with tomorrow's tables missing, the
@@ -565,14 +557,12 @@ func TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes(t *testing.T) {
 	defer r.seams.Withdraw(diagnostics.FaultReapArchiveErr)
 	r.fastRounds(ctx)
 	assert.False(r.roundOf(ctx, JobSweepArchiving), "a round of failures makes no progress")
-	reading := r.sweep().w.reading(time.Now())
-	assert.Equal(sweepFailureLimit, reading.held, "held as they fail")
-	assert.True(reading.sweep > 0, "the sweep is under way")
+	assert.Equal(sweepFailureLimit, r.sweep().w.held(), "held as they fail")
+	assert.True(r.sweep().w.sweeping, "the sweep is under way")
 
 	r.roundOf(ctx, JobSweepArchiving)
-	reading = r.sweep().w.reading(time.Now())
-	assert.Equal(sweepFailureLimit+1, reading.held, "the last complete sweep's count")
-	assert.Zero(reading.sweep, "complete")
+	assert.Equal(sweepFailureLimit+1, r.sweep().w.held(), "the last complete sweep's count")
+	assert.False(r.sweep().w.sweeping, "complete")
 	assert.Equal(heldLogLimit, r.logs.count("Janitor: a sweep could not remove a tree"), "the first of a sweep logged")
 }
 

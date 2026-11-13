@@ -53,17 +53,15 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 }
 
 // assertNoJanitorReadings asserts that the janitor's gauges on shard 1 report no reading of a previous run: every
-// kind's series at zero, and no archive lag.
+// kind's held count at zero, and no archive lag.
 func assertNoJanitorReadings(t *testing.T, rm metricdata.ResourceMetrics) {
 	t.Helper()
 	assert := testarossa.For(t)
 	for _, kind := range sweepKinds {
 		attrs := map[string]string{"shard": "1", "kind": kind}
-		for _, name := range []string{"dwarf_archive_held_roots", "dwarf_archive_oldest_held_seconds", "dwarf_archive_sweep_seconds"} {
-			v, ok := gaugeAt(rm, name, attrs)
-			assert.True(ok, "%s{kind=%s} is reported", name, kind)
-			assert.Zero(v, "%s{kind=%s}", name, kind)
-		}
+		v, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
+		assert.True(ok, "dwarf_archive_held_roots{kind=%s} is reported", kind)
+		assert.Zero(v, "dwarf_archive_held_roots{kind=%s}", kind)
 	}
 	failing, ok := failingAt(rm, "1")
 	assert.True(ok, "dwarf_archive_failing_seconds is reported")

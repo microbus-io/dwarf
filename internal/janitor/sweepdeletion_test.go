@@ -18,14 +18,20 @@ package janitor
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -324,7 +330,7 @@ func TestChunk_AFailingLargeTreeDoesNotHoldBackTheRest(t *testing.T) {
 	}
 	f, s, _ := rowsOf(t, r, big)
 	assert.Equal([2]int{7, 20}, [2]int{f, s}, "the failing tree is whole")
-	assert.Equal(1, r.sweepDel().w.reading(time.Now()).held, "and held, once a sweep")
+	assert.Equal(1, r.sweepDel().w.held(), "and held, once a sweep")
 
 	r.seams.Withdraw(fault)
 	r.pass(ctx)
@@ -530,7 +536,7 @@ func TestSweepDeletion_PassesFailedTrees(t *testing.T) {
 					assert.Zero(flows+steps, "root %d", i)
 				}
 			}
-			assert.True(r.sweepDel().w.reading(time.Now()).held > 0, "held")
+			assert.True(r.sweepDel().w.held() > 0, "held")
 			r.seams.Withdraw(targeted)
 			r.pass(ctx)
 			flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", roots[2])
@@ -634,8 +640,7 @@ func TestSweepDeletion_AClassChangeDropsTheSweep(t *testing.T) {
 	assert.NotEqual(big, r.sweepDel().current.flowID, "the class 0 tree was dropped")
 }
 
-// TestSweepDeletion_TheGauges pins the sweep's gauges, under kind="deleted": a root that fails alone is held, and the
-// oldest root at the sweep's front is reported.
+// TestSweepDeletion_TheGauges pins the sweep's gauge, under kind="deleted": a root that fails alone is held.
 func TestSweepDeletion_TheGauges(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -656,6 +661,178 @@ func TestSweepDeletion_TheGauges(t *testing.T) {
 	attrs := map[string]string{"shard": "1", "kind": kindDeleted}
 	held, ok := gaugeOf(rm, "dwarf_archive_held_roots", attrs)
 	assert.True(ok && held == 1, "held: %v %v", held, ok)
-	oldest, ok := gaugeOf(rm, "dwarf_archive_oldest_held_seconds", attrs)
-	assert.True(ok && oldest >= 119, "the front's oldest: %v %v", oldest, ok)
+}
+
+// TestChunk_ALostChunkResponse pins a deletion chunk whose commit succeeds and whose response is lost: the sweep holds
+// the tree as it holds a failed chunk, and the next sweep takes it again from what is left, deleting it whole, the
+// root last and no step outliving its flow.
+func TestChunk_ALostChunkResponse(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 0)
+	r.settings.overdue = 0
+	r.settings.batchRows = 6
+	root := seedWideTree(t, r.db, 3, 10, 4)
+	stampTree(t, r.db, root)
+	flows := treeIDs(t, r, root)
+	for r.roundOf(ctx, JobFastDeletion) {
+	}
+	r.seams.InjectN(diagnostics.Join(diagnostics.FaultJanitorLostResponse, strconv.Itoa(root)), 1)
+	r.roundOf(ctx, JobSweepDeletion) // the tree found too large: taken from the next batch on
+	r.roundOf(ctx, JobSweepDeletion)
+	f, s, rootThere := rowsOf(t, r, root)
+	assert.True(rootThere && f+s < 11+43, "the lost chunk committed: %d flows, %d steps left", f, s)
+	assert.Equal(1, r.sweepDel().w.held(), "and the tree is held")
+
+	r.pass(ctx)
+	f, s, _ = rowsOf(t, r, root)
+	assert.Zero(f + s)
+	assert.Zero(stepsOf(t, r, flows))
+}
+
+// TestChunk_TheStepBoundaryWalksTheFlowsIndex pins the plan of a chunk's step read (stepsWithin's), at the production
+// budget and in a chunk transaction's settings (boundReads), on the live steps table and on an archive day's, to the
+// flow_id index in step_id order, with no sort: keyed on (flow_id, step_id) it is bounded by the flow's own steps,
+// however few of the table's they are. Keyed on (flow_id) alone, PostgreSQL walks the primary key instead, past every
+// other flow's steps (3.6k-6.9k buffers a chunk at 4% density, against about 20 with the pair). Do not key it on
+// flow_id alone. The tables are empty, so PostgreSQL is kept from a sequential scan; TestChunk_APopulatedStepReadStops
+// AtItsBudget pins the populated case.
+func TestChunk_TheStepBoundaryWalksTheFlowsIndex(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 0)
+	var explain, priceOut string
+	switch r.db.DriverName() {
+	case "pgx":
+		explain, priceOut = "EXPLAIN ", "SET LOCAL enable_seqscan = off"
+	case "sqlite":
+		explain = "EXPLAIN QUERY PLAN "
+	case "mysql", "mariadb":
+		explain = "EXPLAIN "
+	default:
+		t.Skip("the plan shapes pinned here are PostgreSQL's, SQLite's, MySQL's and MariaDB's")
+	}
+	today, err := r.archive.Today(ctx)
+	assert.Must(assert.NoError(err))
+	for sfx, index := range map[string]string{
+		"":               "idx_dwarf_steps_flow_id",
+		daySuffix(today): "idx_" + migrations.StepsTable(today) + "_flow_id",
+	} {
+		var plan string
+		errRollback := errors.New("rollback")
+		err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+			if err := boundReads(ctx, tx); err != nil {
+				return err
+			}
+			if priceOut != "" {
+				if _, err := tx.ExecContext(ctx, priceOut); err != nil {
+					return err
+				}
+			}
+			rows, err := tx.QueryContext(ctx, explain+stepsWithinSQL(sfx, 7, 0), defaultBatchRows)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			cols, _ := rows.Columns()
+			for rows.Next() {
+				vals := make([]any, len(cols))
+				ptrs := make([]any, len(cols))
+				for i := range vals {
+					ptrs[i] = &vals[i]
+				}
+				if err := rows.Scan(ptrs...); err != nil {
+					return err
+				}
+				for _, v := range vals {
+					if b, ok := v.([]byte); ok {
+						v = string(b)
+					}
+					plan += " " + planCell(v)
+				}
+				plan += "\n"
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return errRollback
+		})
+		assert.True(errors.Is(err, errRollback), "%v", err)
+		assert.Contains(plan, index, "dwarf_steps%s: %s", sfx, plan)
+		if r.db.DriverName() != "mysql" && r.db.DriverName() != "mariadb" {
+			assert.False(strings.Contains(plan, "Sort") || strings.Contains(plan, "TEMP B-TREE"), "no sort on dwarf_steps%s: %s", sfx, plan)
+		}
+	}
+}
+
+// planCell renders a plan cell.
+func planCell(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return strconv.Quote(fmt.Sprint(v))
+}
+
+// TestChunk_APopulatedStepReadStopsAtItsBudget pins the bounded cost of a chunk's step read on PostgreSQL, in a
+// populated table the planner holds no statistics on (autovacuum off, no ANALYZE): a flow of 10,000 steps scattered at
+// 4% density among 250,000. In a chunk transaction's settings (boundReads) the read at the production budget walks
+// the flow index in order and stops at its limit; left to itself the planner reads and sorts every step of the flow.
+func TestChunk_APopulatedStepReadStopsAtItsBudget(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 0)
+	if r.db.DriverName() != "pgx" {
+		t.Skip("PostgreSQL's planner")
+	}
+	const flow, every, target = 7, 25, 10_000
+	_, err := r.db.ExecContext(ctx, "ALTER TABLE dwarf_steps SET (autovacuum_enabled = false)")
+	assert.Must(assert.NoError(err))
+	_, err = r.db.ExecContext(ctx, "INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status,"+
+		" time_budget_ms, flow_created_hour, state_bytes) SELECT CASE WHEN g % $1 = 0 THEN $2 ELSE 1000 + g % 997 END, 1,"+
+		" 'tok', 'T', 'seed/t', 'completed', 60000, 0, 200 FROM generate_series(1, $3) g ORDER BY g", every, flow, every*target)
+	assert.Must(assert.NoError(err))
+	plan := func(bounded bool) string {
+		var b strings.Builder
+		errRollback := errors.New("rollback")
+		err := r.db.Transact(ctx, func(tx *sequel.Tx) error {
+			if bounded {
+				if err := boundReads(ctx, tx); err != nil {
+					return err
+				}
+			}
+			rows, err := tx.QueryContext(ctx, "EXPLAIN (ANALYZE) "+stepsWithinSQL("", flow, 0), defaultBatchRows)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					return err
+				}
+				b.WriteString(line + "\n")
+			}
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return errRollback
+		})
+		assert.True(errors.Is(err, errRollback), "%v", err)
+		return b.String()
+	}
+	t.Logf("left to itself:\n%s", plan(false))
+	got := plan(true)
+	assert.Contains(got, "Index Scan using idx_dwarf_steps_flow_id", got)
+	assert.False(strings.Contains(got, "Bitmap") || strings.Contains(got, "Sort"), "no bitmap scan, no sort: %s", got)
+	read := regexp.MustCompile(`Index Scan using idx_dwarf_steps_flow_id[^\n]*actual time=[0-9.]+\.\.[0-9.]+ rows=([0-9]+)`).FindStringSubmatch(got)
+	if assert.Len(read, 2, got) {
+		n, _ := strconv.Atoi(read[1])
+		assert.True(n <= defaultBatchRows, "read %d rows of the flow's %d for a budget of %d", n, target, defaultBatchRows)
+	}
 }

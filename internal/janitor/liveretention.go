@@ -96,15 +96,15 @@ func (l *LiveRetention) attach(j *Janitor, _ string) {
 	meter := j.diags.Meter()
 	var errs [3]error
 	l.reaped, errs[0] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
-	gauges, err := newSweepGauges(meter)
+	gauges, err := newSweepGauge(meter)
 	errs[1] = err
 	kind := metric.WithAttributes(l.shardAttr, attribute.String("kind", kindRetention))
 	l.gauges, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if j.isActive() {
-			gauges.observe(o, l.w.reading(time.Now()), kind)
+			gauges.observe(o, &l.w, kind)
 		}
 		return nil
-	}, gauges.instruments()...)
+	}, gauges.held)
 	if err := errors.Join(errs[:]...); err != nil {
 		j.diags.Logger().Error("Creating the live retention job's instruments", "shard", j.shard.Index(), "error", err)
 	}
@@ -154,7 +154,6 @@ func (l *LiveRetention) batch(ctx context.Context, h handle) outcome {
 		return idle
 	}
 	if l.retentionDays >= today {
-		l.w.sawFront(false, 0)
 		l.w.complete() // no day is that old
 		return idle
 	}
@@ -163,12 +162,11 @@ func (l *LiveRetention) batch(ctx context.Context, h handle) outcome {
 	cutoff := l.archive.DayEnds(today - l.retentionDays - 1).Add(-l.grace)
 	seams := l.j.diags.Seams()
 	where, args := l.restriction(h.DriverName(), cutoff)
-	candidates, oldest, err := scanClosed(ctx, h, seams, l.grace, where, args, l.w.limit(l.batchRoots))
+	candidates, _, err := scanClosed(ctx, h, seams, l.grace, where, args, l.w.limit(l.batchRoots))
 	if err != nil {
 		l.logError(ctx, "Janitor: selecting trees past their retention", "error", err)
 		return idle
 	}
-	l.w.sawFront(len(candidates) > 0, oldest)
 	if len(candidates) == 0 {
 		l.w.complete()
 		return idle

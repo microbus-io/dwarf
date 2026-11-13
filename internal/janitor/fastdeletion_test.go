@@ -178,7 +178,7 @@ func TestDelete_ResidencySplitsTheStampedRoots(t *testing.T) {
 	assert.NoError(err)
 	selectWith := func(steal time.Duration, ordinal int) []int {
 		where, args := stampedResidency(2, ordinal, true, steal)
-		roots, _, err := scanStamped(ctx, r.db, r.seams, where, args, 512)
+		roots, err := scanStamped(ctx, r.db, r.seams, where, args, 512)
 		assert.NoError(err)
 		return rootIDs(roots)
 	}

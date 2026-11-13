@@ -3193,18 +3193,15 @@ transaction). Counters record completed work and gauges read job state. `dwarf_f
 **stamps** it, the moment its records are given up. Its deletion then counts the same flows again under `deleted`, so
 for these trees the two reasons overlap and the reasons do not sum to the flows removed (user; the janitor's
 `CLAUDE.md`, "Live retention").
-`dwarf_archive_move_failures` counts failed attempts, not distinct trees. `dwarf_archive_lag_seconds` is the fast
-archiving job's probe of the shard's oldest due closed root (`internal/janitor/CLAUDE.md`).
+`dwarf_archive_lag_seconds` is the fast archiving job's probe of the shard's oldest due closed root
+(`internal/janitor/CLAUDE.md`). A failed archive attempt is seen through `dwarf_archive_failing_seconds` and the logs,
+not counted.
 
 A sweep publishes `dwarf_archive_held_roots{shard,kind}` as the maximum of the running and last completed sweep's
-failed-single count, `dwarf_archive_oldest_held_seconds{shard,kind}` as the age of its last observed front (including
-not-yet-attempted roots), and `dwarf_archive_sweep_seconds{shard,kind}` as the current sweep's age. Kind is the
-janitor job's: `closed` sweep archiving, `deleted` sweep deletion, `retention` live retention, each registering its own
-series (`internal/janitor/CLAUDE.md`, "The sweeps"). These are per-replica observations: aggregate with max, never sum
-as distinct roots.
-The age grows between observations. A completed healthy sweep can leave a conservative front age until the next
-sweep samples it; collection does not query the database. Running failure counts are published between attempts,
-so a long sweep does not hide accumulated failures until completion.
+failed-single count. Kind is the janitor job's: `closed` sweep archiving, `deleted` sweep deletion, `retention` live
+retention, each registering its own series (`internal/janitor/CLAUDE.md`, "The sweeps"). These are per-replica
+observations: aggregate with max, never sum as distinct roots. Collection does not query the database. Running
+failure counts are published between attempts, so a long sweep does not hide accumulated failures until completion.
 
 `dwarf_archive_failing_seconds` is a series per archiving job (`job`; aggregate with max), each the job's own
 episode (`internal/janitor/CLAUDE.md`): fast archiving's begins at a scan, day or move failure and ends at a later
@@ -3559,9 +3556,7 @@ statement per `purgeChunk` roots), which hides the whole tree from every read at
 janitor's archive deletion sweep deletes it (`internal/janitor/CLAUDE.md`). So a call sizes nothing, takes no lock
 past its statement, and has no deadline of its own; the cost is that the storage is released when the sweep comes to
 it - after the marked trees before it, a large one deleted one at a time. `dwarf_archive_deletions_pending` counts the
-marked trees a sweep found and could not
-delete; `dwarf_archive_deletion_days_unknown` counts retained days it could not examine. Both must be zero to report
-that the sweep found nothing left.
+marked trees a sweep found and could not delete; a retained day it could not read is logged.
 
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`,
 `Delete` and expiration **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
@@ -3671,10 +3666,10 @@ so no strand and no corruption. Whichever of the janitor and the wedge sweep rea
 janitor therefore does **not** reguard on descendant status. Backed by a
 partial index `idx_dwarf_flows_delete_after (flow_id) WHERE delete_after_ms > 0` (full `(delete_after_ms)` on MySQL and
 MariaDB, which the scan names with `FORCE INDEX`) that walks the stamped roots alone in the scan's `flow_id` order; why
-it is keyed on `flow_id` is in `internal/migrations/CLAUDE.md`. (`deletionGrace`/`reapInterval` are Engine fields, not constants, only so a test can
-shorten them -
-engine-package tests force a reap via `reapDueFlows`; fixtures verify the observable public contract via the lists/
-`History`/`Snapshot`.)
+it is keyed on `flow_id` is in `internal/migrations/CLAUDE.md`. (`deletionGrace` is an Engine field, not a constant,
+only so a test can shorten it. In test mode the janitors are Manual, so engine-package tests force the deletion with a
+drain (`reapDueFlows`), and a test of the background removal sets `janitorManual` false with a short `janitorIdle`
+(`shortenDeletion`); fixtures verify the observable public contract via the lists/`History`/`Snapshot`.)
 
 **Deletion race gate.** Because deletion is an *orthogonal column*, not a status, the invariant that keeps a
 deletion from racing a lifecycle op is **`delete_after_ms > 0 ⟹ terminal status`**, and the janitor reaps only
@@ -3712,11 +3707,14 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   no archive**: closed roots are deleted rather than archived, and every day before today is dropped, but the tables of
   today and the days ahead are still made - nothing writes them - so the shape of a shard does not depend on the setting. Keeping it indefinitely is a large number of days,
   never a sentinel. Any replica's pass may drop a day, so the smallest retention in the fleet wins.
-- **Staged archival is off** (`reapStageRows` 0, no setter): a tree too large to move in one transaction stays live
-  until its retention deletes it, in chunks. Tests set the field to archive such a tree in stages (the protocol
-  is `internal/janitor/CLAUDE.md`'s); turning it on for production waits on the threshold's qualification. The reads
-  around it need nothing of their own: a copy is invisible until published, and a published tree is read from the
-  archive (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
+- **Staged archival is on past 256k rows or 128 MiB of payload** (`reapStageRows`, `reapStageBytes`, no setter;
+  user): such a tree is copied into the archive a batch at a time (the protocol is `internal/janitor/CLAUDE.md`'s),
+  and a smaller one moves whole. **A batch is 8,192 rows or 16 MiB** (`reapBatchRows`, `reapBatchBytes`), sized to
+  stay under about 0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the aim); a tree past a batch but
+  under the staging threshold moves alone, in one longer transaction. `DWARF_STAGE_ROWS`/`DWARF_STAGE_BYTES` replace
+  the thresholds for the rig and the staging-on suites. The reads around a copy need nothing of their own: it is
+  invisible until published, and a published tree is read from the archive
+  (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
 - **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
   `d` after its creation is terminated by `terminateSubtree` with a fixed reason (`expirationReason`) and **deleted,
   not archived** (user): the UPDATE that terminates the root also marks it for deletion, due at once
@@ -4477,7 +4475,7 @@ call (the per-shard debug path is `ShardInfo` + `Query.Shard`). `Limit` is requi
   (`TestList_TheLimitIsAboveAJanitorBatch`): a caller paging by window cannot page across a tie larger than its
   `Limit`. That bounds a roots-only list (`reapBatch`, 512 roots); with `IncludeSubgraphs` a batch's one tree, which it
   takes however large, can be a tie of more flows than any `Limit`. On the dialects storing milliseconds (all but PostgreSQL) batches on different shards can share one, so a
-  tie can reach shards x `reapBatchRows`: at 16 shards, the whole maximum. And **commit order is not stamp order** - a
+  tie can reach shards x a batch's flow cap (`janitor.MaxBatchFlows`, 4,096): at 16 shards, the whole maximum. And **commit order is not stamp order** - a
   long batch stamped earlier can commit after a later one - so the godoc tells a walk to keep its newest bound a few
   seconds behind now. Neither list has a cursor or a promise of a stable walk.
 - **`Purge` takes the exact oldest `Limit` across shards from the archive only**, through the same merge (ascending),

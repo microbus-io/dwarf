@@ -36,11 +36,8 @@ import (
 // JobArchiveDeletionSweep is the name the engine adds its archive deletion sweep under.
 const JobArchiveDeletionSweep = "archive_deletion_sweep"
 
-// The descriptions of the archive deletion sweep's gauges.
-const (
-	deletionsPendingDescription = "Archived trees marked for deletion that the last archive deletion sweep found and could not delete - held by another transaction, or failing - by shard. Hidden from reads. A Delete or Purge only marks, so marked trees wait for the next sweep; a count that stays above zero across sweeps is the one to look at. Check dwarf_archive_deletion_days_unknown too: a zero pending count does not imply completion while some days were not examined."
-	deletionDaysDescription     = "Retained archive days the last archive deletion sweep could not examine, by shard. Zero means all retained days were examined; nonzero means the pending tree count is incomplete."
-)
+// deletionsPendingDescription is the archive deletion sweep's gauge's description.
+const deletionsPendingDescription = "Archived trees marked for deletion that the last archive deletion sweep found and could not delete - held by another transaction, or failing - by shard. Hidden from reads. A Delete or Purge only marks, so marked trees wait for the next sweep; a count that stays above zero across sweeps is the one to look at. A retained day the sweep could not read is logged, and its trees are not counted."
 
 // DeleteMarked is the archive deletion sweep: the job that deletes the archived trees a Delete or a Purge marked for
 // deletion - every one of them, the calls only mark - and the archive copy of a published tree a Delete took back. Each
@@ -71,12 +68,11 @@ type DeleteMarked struct {
 	pos        chunkPos
 
 	mu sync.Mutex
-	// pendingNow and unknownNow count the roots left and the days not examined in the sweep under way, pending and
-	// unknown the last complete sweep's; the gauges report the larger of each pair, so a failure shows as it happens,
-	// not only once the sweep completes. observed is whether a sweep has completed.
-	pendingNow, unknownNow int
-	pending, unknown       int
-	observed               bool
+	// pendingNow counts the roots left in the sweep under way, pending the last complete sweep's; the gauge reports the
+	// larger, so a failure shows as it happens, not only once the sweep completes. observed is whether a sweep has
+	// completed.
+	pendingNow, pending int
+	observed            bool
 }
 
 // NewDeleteMarked returns an archive deletion sweep over the shard's archive, which keeps retentionDays of days. Its
@@ -103,26 +99,22 @@ func (d *DeleteMarked) attach(j *Janitor, _ string) {
 	d.j = j
 	shard := metric.WithAttributes(attribute.String("shard", strconv.Itoa(j.shard.Index())))
 	meter := j.diags.Meter()
-	var errs [3]error
+	var errs [2]error
 	pending, err := meter.Int64ObservableGauge("dwarf_archive_deletions_pending", metric.WithUnit("{tree}"),
 		metric.WithDescription(deletionsPendingDescription))
 	errs[0] = err
-	unknown, err := meter.Int64ObservableGauge("dwarf_archive_deletion_days_unknown", metric.WithUnit("{day}"),
-		metric.WithDescription(deletionDaysDescription))
-	errs[1] = err
-	d.gauges, errs[2] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	d.gauges, errs[1] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		// Nothing until a sweep completes - zero would claim every day examined - but a failure as soon as it is met.
-		if d.observed || d.pendingNow > 0 || d.unknownNow > 0 {
+		if d.observed || d.pendingNow > 0 {
 			o.ObserveInt64(pending, int64(max(d.pending, d.pendingNow)), shard)
-			o.ObserveInt64(unknown, int64(max(d.unknown, d.unknownNow)), shard)
 		}
 		return nil
-	}, pending, unknown)
+	}, pending)
 	if err := errors.Join(errs[:]...); err != nil {
 		j.diags.Logger().Error("Creating the archive deletion sweep's instruments", "shard", j.shard.Index(), "error", err)
 	}
@@ -148,7 +140,7 @@ func (d *DeleteMarked) reset() {
 	d.days, d.at, d.after, d.current, d.currentDay, d.pos = nil, 0, 0, dueRoot{}, 0, chunkPos{}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.pendingNow, d.unknownNow, d.pending, d.unknown, d.observed = 0, 0, 0, 0, false
+	d.pendingNow, d.pending, d.observed = 0, 0, false
 }
 
 // round runs the sweep's batches (sweepRound).
@@ -181,7 +173,7 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 		d.days = d.archive.DaysIn(today-max(d.retentionDays, 0), today+1)
 		d.at, d.after = 0, 0
 		d.mu.Lock()
-		d.pendingNow, d.unknownNow = 0, 0
+		d.pendingNow = 0
 		d.mu.Unlock()
 	}
 	// The next day with marked roots after the position; a day probed empty, dropped or unreadable is passed.
@@ -197,7 +189,6 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 		}
 		if err != nil {
 			d.logError(ctx, "Janitor: finding marked archive trees", "day", d.days[d.at], "error", err)
-			d.count(0, 1)
 			continue
 		}
 		if len(roots) > 0 {
@@ -207,7 +198,7 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 	if d.at >= len(d.days) {
 		d.w.complete()
 		d.mu.Lock()
-		d.pending, d.unknown, d.pendingNow, d.unknownNow, d.observed = d.pendingNow, d.unknownNow, 0, 0, true
+		d.pending, d.pendingNow, d.observed = d.pendingNow, 0, true
 		d.mu.Unlock()
 		return idle
 	}
@@ -241,12 +232,12 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 			return faltered
 		}
 		d.w.hold(ctx, d.j, roots[0], err)
-		d.count(1, 0)
+		d.count(1)
 		d.after = roots[0].flowID
 		return faltered
 	}
 	if deleted < len(cut) {
-		d.count(stillMarked(ctx, h, sfx, cut), 0) // held by another transaction, rather than deleted by another replica
+		d.count(stillMarked(ctx, h, sfx, cut)) // held by another transaction, rather than deleted by another replica
 	}
 	d.after = cut[len(cut)-1]
 	d.w.grow(d.batchRoots)
@@ -256,12 +247,11 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 	return moved
 }
 
-// count adds roots left and days not examined to the sweep under way's counts, which the gauges report at once.
-func (d *DeleteMarked) count(roots, days int) {
+// count adds roots left to the sweep under way's count, which the gauge reports at once.
+func (d *DeleteMarked) count(roots int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.pendingNow += roots
-	d.unknownNow += days
 }
 
 // chunk deletes a chunk of the large tree in progress. The sweep moves past the tree once it is gone, no longer marked,
@@ -282,9 +272,9 @@ func (d *DeleteMarked) chunk(ctx context.Context, h handle, budget limit) outcom
 		done = true
 	case err != nil:
 		d.w.hold(ctx, d.j, d.current, err)
-		d.count(1, 0)
+		d.count(1)
 	case done && deleted.flows == 0:
-		d.count(stillMarked(ctx, h, sfx, []int{d.current.flowID}), 0) // held by another transaction
+		d.count(stillMarked(ctx, h, sfx, []int{d.current.flowID})) // held by another transaction
 	}
 	if err != nil || done {
 		d.after, d.current, d.currentDay, d.pos = d.current.flowID, dueRoot{}, 0, chunkPos{}

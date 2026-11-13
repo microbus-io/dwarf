@@ -180,6 +180,13 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 	if err != nil {
 		return removal{}, errors.Trace(err)
 	}
+	if seams.Enabled() {
+		for _, root := range roots {
+			if seams.IsFault(diagnostics.Join(diagnostics.FaultJanitorLostResponse, strconv.Itoa(root))) {
+				return removal{}, errors.New("injected fault: " + diagnostics.FaultJanitorLostResponse)
+			}
+		}
+	}
 	return removed, nil
 }
 

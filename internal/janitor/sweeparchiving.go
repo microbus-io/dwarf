@@ -55,12 +55,11 @@ type SweepArchiving struct {
 	noQuietMargin bool
 
 	// j is the janitor the job is added to; the instruments are created on its meter, and record under shardAttr.
-	j            *Janitor
-	shardAttr    attribute.KeyValue
-	archived     metric.Int64Counter
-	moveFailures metric.Int64Counter
-	reaped       metric.Int64Counter
-	gauges       metric.Registration
+	j         *Janitor
+	shardAttr attribute.KeyValue
+	archived  metric.Int64Counter
+	reaped    metric.Int64Counter
+	gauges    metric.Registration
 
 	// w is the sweeps' account; end is fast archiving's boundary when the sweep under way began - its position and
 	// residue class - and after the sweep's own position.
@@ -124,26 +123,25 @@ func (s *SweepArchiving) attach(j *Janitor, name string) {
 	s.j = j
 	s.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
-	errs := make([]error, 6)
+	errs := make([]error, 5)
 	s.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
-	s.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures", metric.WithDescription(moveFailuresDescription))
-	s.reaped, errs[2] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
-	gauges, err := newSweepGauges(meter)
-	errs[3] = err
+	s.reaped, errs[1] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
+	gauges, err := newSweepGauge(meter)
+	errs[2] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
-	errs[4] = err
+	errs[3] = err
 	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindClosed))
 	jobShard := metric.WithAttributes(s.shardAttr, attribute.String("job", name))
-	s.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	s.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
 		now := time.Now()
-		gauges.observe(o, s.w.reading(now), kind)
+		gauges.observe(o, &s.w, kind)
 		o.ObserveFloat64(failing, s.failingFor(now).Seconds(), jobShard)
 		return nil
-	}, append(gauges.instruments(), failing)...)
+	}, gauges.held, failing)
 	if err := errors.Join(errs...); err != nil {
 		j.diags.Logger().Error("Creating the sweep archiving job's instruments", "shard", j.shard.Index(), "error", err)
 	}
@@ -242,11 +240,10 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		return idle
 	}
 	if s.end.after.flowID == 0 {
-		s.w.sawFront(false, 0)
 		return complete()
 	}
 	where, args := s.restriction(h.DriverName(), archiving)
-	candidates, oldest, err := scanClosed(ctx, h, seams, s.grace+s.overdue, where, args, s.w.limit(s.batchRoots))
+	candidates, _, err := scanClosed(ctx, h, seams, s.grace+s.overdue, where, args, s.w.limit(s.batchRoots))
 	if err != nil {
 		s.logError(ctx, "Janitor: selecting closed trees to sweep", "error", err)
 		if archiving {
@@ -254,7 +251,6 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		}
 		return idle
 	}
-	s.w.sawFront(len(candidates) > 0, oldest)
 	if len(candidates) == 0 {
 		return complete()
 	}
@@ -295,7 +291,6 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	}
 	if err != nil {
 		if archiving {
-			s.moveFailures.Add(ctx, 1, metric.WithAttributes(s.shardAttr))
 			s.failure(ctx, "sweeping closed trees", err)
 		}
 		if len(cut) != 1 && len(candidates) > 1 {

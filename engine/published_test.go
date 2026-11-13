@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
@@ -464,6 +466,119 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 	assert.Zero(liveFlows(), "the live cleanup finished")
 	_, err = e.Snapshot(ctx, rootKey)
 	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+}
+
+// TestStaged_APurgeBeforeDuringTheLiveCleanup pins PurgeBefore dropping the day that holds a staged tree's published
+// copy while its live copy is still to be removed, on days of two seconds: the tree is listed nowhere, the cleanup
+// still finishes, and the tree is then found nowhere.
+func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := NewEngineUnderTest(t.Name())
+	t.Cleanup(func() { e.Shutdown(context.Background()) })
+	e.SetHost(treeMux())
+	e.archiveGrace = 0
+	e.testArchiveDay = 2 * time.Second
+	assert.NoError(e.SetRetention(100))
+	assert.Must(assert.NoError(e.Startup(ctx)))
+	e.reapStageRows, e.reapBatchRows = 1, 2
+	e.sweepOverdue = 0 // the published live copy, over a batch, is sweep deletion's at once
+	rootKey, _, _, _ := treeKeys(t, e)
+	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	db := sh.DB()
+	liveFlows := func() int {
+		var n int
+		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
+		return n
+	}
+	// A window of a minute: a call reads at most 31 days, a minute of two-second days.
+	listed := func() int {
+		got, err := e.ListClosed(ctx, workflow.Query{IncludeSubgraphs: true, Limit: 100,
+			FromTime: time.Now().Add(-30 * time.Second), ToTime: time.Now().Add(10 * time.Second)})
+		assert.NoError(err)
+		return len(got)
+	}
+	// The live cleanup's chunks fail, so the published tree's live copy is still there.
+	cleanup := diagnostics.FaultReapMidTree + ":" + strconv.Itoa(rootID)
+	e.diags.Seams().InjectN(cleanup, 1000)
+	e.reapDueFlows(ctx)
+	e.diags.Seams().Withdraw(cleanup)
+	assert.Must(assert.True(liveFlows() > 0, "the live copy still there"))
+	a := e.archiveOn(1)
+	published, err := a.Today(ctx)
+	assert.Must(assert.NoError(err))
+	assert.Must(assert.True(listed() > 0, "published"))
+
+	// The published copy's day is at most the day it was published on: once that one is over, PurgeBefore drops it.
+	today := published
+	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	for today == published && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+		today, err = a.Today(ctx)
+		assert.Must(assert.NoError(err))
+	}
+	assert.Must(assert.True(today > published, "the day turned"))
+	assert.NoError(e.PurgeBefore(ctx, a.DayEnds(today-1)))
+	assert.Zero(listed(), "listed nowhere")
+
+	e.reapDueFlows(ctx)
+	assert.Zero(liveFlows(), "the live cleanup finished")
+	_, err = e.Snapshot(ctx, rootKey)
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+}
+
+// TestStaged_ListedUnderItsAttemptsTime pins the listing window of a staged tree: it is listed under its attempt's time,
+// not its publication's, so once published it is in a window around the attempt - one a caller walking forward may
+// have read already - and not in one around the publication.
+func TestStaged_ListedUnderItsAttemptsTime(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	e.reapStageRows, e.reapBatchRows = 1, 2
+	e.sweepOverdue = 0
+	rootKey, _, _, _ := treeKeys(t, e)
+	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	db := sh.DB()
+	today, err := e.archiveOn(1).Today(ctx)
+	assert.Must(assert.NoError(err))
+
+	// The attempt starts, and its chunks fail, so nothing is copied yet; then it is backdated ten minutes, as a copy
+	// that ran that long would leave it.
+	chunk := diagnostics.Join(diagnostics.FaultReapStageChunk, strconv.Itoa(rootID))
+	e.diags.Seams().InjectN(chunk, 1000)
+	e.reapDueFlows(ctx)
+	e.diags.Seams().Withdraw(chunk)
+	var attempted int
+	assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=? AND "+
+		janitor.AttemptedSQL(db.DriverName()), rootID).Scan(&attempted)))
+	assert.Must(assert.Equal(1, attempted, "the attempt started"))
+	_, err = db.ExecContext(ctx, "UPDATE dwarf_flows SET archive_attempt_at=DATE_ADD_MILLIS(archive_attempt_at, -600000) WHERE flow_id=?", rootID)
+	assert.Must(assert.NoError(err))
+	if day, _ := e.archiveOn(1).Today(ctx); day != today || time.Since(e.archiveOn(1).DayEnds(today-1)) < 11*time.Minute {
+		t.Skip("too near midnight for an attempt ten minutes back")
+	}
+
+	published := time.Now()
+	e.reapDueFlows(ctx)
+	listed := func(from, to time.Time) int {
+		got, err := e.ListClosed(ctx, workflow.Query{IncludeSubgraphs: true, Limit: 100, FromTime: from, ToTime: to})
+		assert.NoError(err)
+		n := 0
+		for _, s := range got {
+			if s.RootFlowKey == rootKey {
+				n++
+			}
+		}
+		return n
+	}
+	assert.Equal(2, listed(published.Add(-11*time.Minute), published.Add(-9*time.Minute)), "listed under its attempt's time")
+	assert.Zero(listed(published.Add(-time.Minute), time.Now().Add(time.Minute)), "not under its publication's")
 }
 
 // TestStaged_TheFingerprintHoldsThroughTheLiveCleanup pins Fingerprint of a staged tree while its published live copy

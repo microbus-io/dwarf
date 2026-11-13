@@ -343,10 +343,10 @@ type Engine struct {
 	archiveGrace        time.Duration // how long a closed root stays in the live tables before it is archived (1m)
 	sweepOverdue        time.Duration // how long past due a root waits before a sweep takes it (30s)
 	reapBatch           int           // due roots one janitor batch considers (512)
-	reapBatchRows       int           // about how many rows one janitor batch moves, at least one tree (4096)
+	reapBatchRows       int           // about how many rows one janitor batch moves, at least one tree (8192)
 	reapBatchBytes      int           // about how many payload bytes one janitor batch moves, at least one tree (16 MiB)
-	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
-	reapStageBytes      int           // the tree payload above which archival is staged, when it is; 0, no byte threshold
+	reapStageRows       int           // the tree size above which archival is staged (256k); 0, never
+	reapStageBytes      int           // the tree payload above which archival is staged (128 MiB); 0, no byte threshold
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
 	// keeps an order of magnitude under it.
@@ -411,9 +411,15 @@ func NewEngine() *Engine {
 	e.deletionGrace = 1 * time.Minute
 	e.archiveGrace = 1 * time.Minute
 	e.sweepOverdue = janitor.DefaultSweepOverdue
+	// A batch about 0.25 s at most on a 32 vCPU PostgreSQL under a saturated bench, where a transaction moved about
+	// 13 us a small row and 7.8 ms a MB of payload: 8,192 rows and 16 MiB together take ~0.24 s. A tree past the
+	// staging threshold is copied a batch at a time; one below it moves whole, alone in its batch if it must - up to
+	// ~3.4 s at 256k small rows, ~1 s at 128 MB, neither of which moved the bench's commit latency.
 	e.reapBatch = 512
-	e.reapBatchRows = 4096
+	e.reapBatchRows = 8192
 	e.reapBatchBytes = 16 << 20
+	e.reapStageRows = 256 << 10
+	e.reapStageBytes = 128 << 20
 	e.purgeChunk = 4096
 	e.expireBudget = 30 * time.Second
 	e.expirePage = 256
@@ -1493,9 +1499,7 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) error {
 // still being removed keep reporting its outcome until that copy is gone. Each root is marked for deletion, and its
 // tree's rows are deleted in the background, so its storage is released later, or when its day drops.
 // dwarf_archive_deletions_pending counts marked trees the background deletion found and could not delete yet - held by
-// another transaction, or failing - and dwarf_archive_deletion_days_unknown the archive days it could not examine. A
-// flow awaiting archival is not in ListClosed
-// and Purge leaves it - ListRecentlyClosed lists it, and Delete schedules its removal by key. Open
+// another transaction, or failing. A flow awaiting archival is not in ListClosed and Purge leaves it - ListRecentlyClosed lists it, and Delete schedules its removal by key. Open
 // flows are never touched, and a Query.Status that is not closed is a 400, as is IncludeSubgraphs (a subgraph child is
 // removed with its root).
 //

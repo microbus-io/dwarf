@@ -44,12 +44,8 @@ const (
 	kindRetention = "retention"
 )
 
-// The descriptions of the sweep gauges, the same for every kind.
-const (
-	HeldRootsDescription  = "Roots a sweep failed on singly: the larger of the current sweep's count and the last complete one's. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff."
-	OldestHeldDescription = "Age of the oldest root waiting for the last sweep when it began, increasing until resampled; includes roots not yet attempted. Per shard and kind; aggregate with max."
-	SweepAgeDescription   = "Age of the current sweep, or zero between sweeps. Per shard and kind; aggregate with max."
-)
+// HeldRootsDescription is the sweep gauge's description, the same for every kind.
+const HeldRootsDescription = "Roots a sweep failed on singly: the larger of the current sweep's count and the last complete one's. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff."
 
 // sweep is a sweep job's account of its sweeps: whether one is under way, how many roots its next batch takes, and what
 // its gauges report. The job's goroutine alone touches sweeping, size and front; the rest is under mu, which the gauge
@@ -57,22 +53,18 @@ const (
 type sweep struct {
 	sweeping bool
 	size     int // 1 after a failure, doubling after a batch that failed nothing
-	front    bool
 
 	mu sync.Mutex
-	// started is when the current sweep began, zero between sweeps; failed counts the roots it held, lastFailed the
-	// last complete sweep's. frontSince is when the oldest root at the last sweep's front closed, zero for none.
-	started            time.Time
+	// failed counts the roots the current sweep held, lastFailed the last complete sweep's.
 	failed, lastFailed int
-	frontSince         time.Time
 }
 
 // begin begins a sweep: its first batch takes one root.
 func (w *sweep) begin() {
-	w.sweeping, w.size, w.front = true, 1, true
+	w.sweeping, w.size = true, 1
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.started, w.failed = time.Now(), 0
+	w.failed = 0
 }
 
 // drop ends the sweep under way without completing it: its held roots still count.
@@ -88,21 +80,7 @@ func (w *sweep) complete() {
 	w.sweeping = false
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.lastFailed, w.failed, w.started = w.failed, 0, time.Time{}
-}
-
-// sawFront records, at a sweep's first scan, the age of the oldest root it found - none, when found is false.
-func (w *sweep) sawFront(found bool, oldest time.Duration) {
-	if !w.front {
-		return
-	}
-	w.front = false
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.frontSince = time.Time{}
-	if found {
-		w.frontSince = time.Now().Add(-oldest)
-	}
+	w.lastFailed, w.failed = w.failed, 0
 }
 
 // limit is how many roots the next batch takes, at most batchRoots.
@@ -131,63 +109,36 @@ func (w *sweep) hold(ctx context.Context, j *Janitor, root dueRoot, err error) {
 		"error", err)
 }
 
-// forget forgets every sweep and what the gauges report.
+// forget forgets every sweep and what the gauge reports.
 func (w *sweep) forget() {
-	w.sweeping, w.size, w.front = false, 1, false
+	w.sweeping, w.size = false, 1
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.started, w.failed, w.lastFailed, w.frontSince = time.Time{}, 0, 0, time.Time{}
+	w.failed, w.lastFailed = 0, 0
 }
 
-// sweepReading is what the sweep gauges report at an instant.
-type sweepReading struct {
-	held              int
-	oldestHeld, sweep time.Duration
-}
-
-// reading returns the sweep gauges' values at now.
-func (w *sweep) reading(now time.Time) sweepReading {
+// held is what the sweep gauge reports: the larger of the current sweep's held count and the last complete one's.
+func (w *sweep) held() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	r := sweepReading{held: max(w.failed, w.lastFailed)}
-	if !w.frontSince.IsZero() {
-		r.oldestHeld = max(now.Sub(w.frontSince), 0)
-	}
-	if !w.started.IsZero() {
-		r.sweep = max(now.Sub(w.started), 0)
-	}
-	return r
+	return max(w.failed, w.lastFailed)
 }
 
-// sweepGauges are the three gauges every sweep job reports, under its kind.
-type sweepGauges struct {
-	held   metric.Int64ObservableGauge
-	oldest metric.Float64ObservableGauge
-	age    metric.Float64ObservableGauge
+// sweepGauge is the gauge every sweep job reports, under its kind.
+type sweepGauge struct {
+	held metric.Int64ObservableGauge
 }
 
-// newSweepGauges creates the sweep gauges on meter.
-func newSweepGauges(meter metric.Meter) (g sweepGauges, err error) {
-	var errs [3]error
-	g.held, errs[0] = meter.Int64ObservableGauge("dwarf_archive_held_roots", metric.WithUnit("{root}"),
+// newSweepGauge creates the sweep gauge on meter.
+func newSweepGauge(meter metric.Meter) (g sweepGauge, err error) {
+	g.held, err = meter.Int64ObservableGauge("dwarf_archive_held_roots", metric.WithUnit("{root}"),
 		metric.WithDescription(HeldRootsDescription))
-	g.oldest, errs[1] = meter.Float64ObservableGauge("dwarf_archive_oldest_held_seconds", metric.WithUnit("s"),
-		metric.WithDescription(OldestHeldDescription))
-	g.age, errs[2] = meter.Float64ObservableGauge("dwarf_archive_sweep_seconds", metric.WithUnit("s"),
-		metric.WithDescription(SweepAgeDescription))
-	return g, errors.Join(errs[:]...)
+	return g, errors.Trace(err)
 }
 
-// instruments are the gauges, for RegisterCallback.
-func (g sweepGauges) instruments() []metric.Observable {
-	return []metric.Observable{g.held, g.oldest, g.age}
-}
-
-// observe reports r under attrs, the shard and the kind.
-func (g sweepGauges) observe(o metric.Observer, r sweepReading, attrs metric.ObserveOption) {
-	o.ObserveInt64(g.held, int64(r.held), attrs)
-	o.ObserveFloat64(g.oldest, r.oldestHeld.Seconds(), attrs)
-	o.ObserveFloat64(g.age, r.sweep.Seconds(), attrs)
+// observe reports w's held count under attrs, the shard and the kind.
+func (g sweepGauge) observe(o metric.Observer, w *sweep, attrs metric.ObserveOption) {
+	o.ObserveInt64(g.held, int64(w.held()), attrs)
 }
 
 // outcome is what one batch of a sweep came to.

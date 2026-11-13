@@ -107,16 +107,17 @@ const (
 	FaultPeerBeatErr = "peerBeatErr" // bare and by shard: a shard's registry beat writes nothing, so this replica stops proving its liveness THERE, while running on
 
 	// Reaping and archiving:
-	FaultReapSelectErr      = "reapSelectErr"      // the janitor's due-root SELECT errors
-	FaultReapSizeErr        = "reapSizeErr"        // by root flow_id: sizing a selected root fails
-	FaultReapMidTree        = "reapMidTree"        // bare and by root flow_id: a move or delete fails after its steps, before its flows
-	FaultReapContention     = "reapContention"     // the archive move fails on lock contention (a deadlock victim)
-	FaultReapArchiveErr     = "reapArchiveErr"     // an archive move or staging chunk fails with an error that is not lock contention
-	FaultReapStageChunk     = "reapStageChunk"     // by root flow_id: a staging chunk fails under its root's lock, before it writes
-	FaultReapStageLost      = "reapStageLost"      // by root flow_id: a staging chunk commits, then reports an error, as a lost response
-	FaultArchiveDelete      = "archiveDeleteErr"   // by root flow_id: an archived tree's deletion fails before it commits
-	FaultArchiveMark        = "archiveMarkErr"     // by root flow_id: a Delete's or Purge's mark of an archived root fails
-	FaultArchiveMaintainErr = "archiveMaintainErr" // an archive maintenance pass fails after its work
+	FaultReapSelectErr       = "reapSelectErr"       // the janitor's due-root SELECT errors
+	FaultReapSizeErr         = "reapSizeErr"         // by root flow_id: sizing a selected root fails
+	FaultReapMidTree         = "reapMidTree"         // bare and by root flow_id: a move or delete fails after its steps, before its flows
+	FaultReapContention      = "reapContention"      // the archive move fails on lock contention (a deadlock victim)
+	FaultReapArchiveErr      = "reapArchiveErr"      // an archive move or staging chunk fails with an error that is not lock contention
+	FaultReapStageChunk      = "reapStageChunk"      // by root flow_id: a staging chunk fails under its root's lock, before it writes
+	FaultReapStageLost       = "reapStageLost"       // by root flow_id: a staging chunk commits, then reports an error, as a lost response
+	FaultJanitorLostResponse = "janitorLostResponse" // a move or a deletion chunk commits and its response is lost; targeted at a root
+	FaultArchiveDelete       = "archiveDeleteErr"    // by root flow_id: an archived tree's deletion fails before it commits
+	FaultArchiveMark         = "archiveMarkErr"      // by root flow_id: a Delete's or Purge's mark of an archived root fails
+	FaultArchiveMaintainErr  = "archiveMaintainErr"  // an archive maintenance pass fails after its work
 
 	// The janitors, beside the names above, which their jobs consult too:
 	FaultJanitorConnErr        = "janitorConnErr"        // a janitor's batch cannot take its connection

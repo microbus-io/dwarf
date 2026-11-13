@@ -575,3 +575,32 @@ func TestFast_AHeldRootIsNotWaitedForWhenStamped(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", large).Scan(&stamp))
 	assert.Zero(stamp, "the held root was skipped, not stamped")
 }
+
+// TestFast_ALostMoveResponse pins a move whose commit succeeds and whose response is lost: the round takes it for a
+// failure, the tree is archived once and gone from the live tables, and the next round's probe, finding nothing due,
+// ends the failure episode.
+func TestFast_ALostMoveResponse(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	today, err := r.archive.Today(ctx)
+	assert.Must(assert.NoError(err))
+	root := seedTrees(t, r.db, 1, callShape)[0]
+	flows := treeIDs(t, r, root)
+	r.seams.InjectN(diagnostics.Join(diagnostics.FaultJanitorLostResponse, strconv.Itoa(root)), 1)
+	r.roundOf(ctx, JobFastArchiving)
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the round")
+	}
+	assert.True(r.failing(time.Now().Add(time.Second)) > 0, "the lost response is a failure")
+	f, _, rootThere := rowsOf(t, r, root)
+	assert.True(f == 0 && !rootThere, "the move committed: the tree left the live tables")
+	archived, _, _ := archivedRows(t, r, today, flows)
+	assert.Equal(len(flows), archived, "archived once")
+
+	r.roundOf(ctx, JobFastArchiving)
+	assert.Zero(r.failing(time.Now().Add(time.Second)), "nothing due at the next probe: the episode ends")
+	archived, _, _ = archivedRows(t, r, today, flows)
+	assert.Equal(len(flows), archived, "and still once")
+}

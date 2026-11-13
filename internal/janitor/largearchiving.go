@@ -58,12 +58,11 @@ type LargeArchiving struct {
 	noQuietMargin bool
 
 	// j is the janitor the job is added to; the instruments are created on its meter, and record under shardAttr.
-	j            *Janitor
-	shardAttr    attribute.KeyValue
-	archived     metric.Int64Counter
-	moveFailures metric.Int64Counter
-	staged       metric.Int64Counter
-	gauges       metric.Registration
+	j         *Janitor
+	shardAttr attribute.KeyValue
+	archived  metric.Int64Counter
+	staged    metric.Int64Counter
+	gauges    metric.Registration
 
 	// current is the tree being copied, 0 between trees; after is the last tree the job finished with - published,
 	// failed, held or waiting - which the next is taken after. stages holds each copy's position. probedAt is when the
@@ -121,19 +120,18 @@ func (l *LargeArchiving) attach(j *Janitor, name string) {
 		l.stages = map[int]stagePos{}
 	}
 	meter := j.diags.Meter()
-	errs := make([]error, 6)
+	errs := make([]error, 5)
 	l.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
-	l.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures", metric.WithDescription(moveFailuresDescription))
-	l.staged, errs[2] = meter.Int64Counter("dwarf_archive_staged_rows", metric.WithDescription(stagedRowsDescription))
+	l.staged, errs[1] = meter.Int64Counter("dwarf_archive_staged_rows", metric.WithDescription(stagedRowsDescription))
 	oldest, err := meter.Float64ObservableGauge("dwarf_archive_oldest_attempt_seconds", metric.WithUnit("s"),
 		metric.WithDescription("Per shard: age of the oldest staged archive attempt not yet published, read about once a second while this replica dispatches the shard; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_staged_rows: growing while that moves is a large tree copying, growing while it is flat is a copy that is stuck. A replaced attempt starts its age again. Aggregate with max."))
-	errs[3] = err
+	errs[2] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
-	errs[4] = err
+	errs[3] = err
 	shard := metric.WithAttributes(l.shardAttr)
 	jobShard := metric.WithAttributes(l.shardAttr, attribute.String("job", name))
-	l.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	l.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
@@ -310,9 +308,6 @@ func (l *LargeArchiving) batch(ctx context.Context, h handle, lap map[int]bool) 
 		due, dueArgs := closedDueSQL(0)
 		_, replaced, err := claimAttempt(ctx, h, root, due, dueArgs, d, at)
 		if err != nil {
-			if ctx.Err() == nil {
-				l.moveFailures.Add(ctx, 1, metric.WithAttributes(l.shardAttr))
-			}
 			l.failed(ctx)
 			l.logError(ctx, "Janitor: replacing an archive attempt", "root", root, "error", err)
 		}
@@ -325,9 +320,6 @@ func (l *LargeArchiving) batch(ctx context.Context, h handle, lap map[int]bool) 
 		// pos advanced only if the chunk committed - a lost response - so it is kept either way.
 		finish()
 		l.remember(root, pos)
-		if ctx.Err() == nil {
-			l.moveFailures.Add(ctx, 1, metric.WithAttributes(l.shardAttr))
-		}
 		l.failed(ctx)
 		l.logError(ctx, "Janitor: staging an archive", "root", root, "error", err)
 		return false, root
@@ -465,6 +457,9 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		published, done, at = 0, false, *pos
 		c.copied = 0
+		if err := boundReads(ctx, tx); err != nil {
+			return err
+		}
 		locked, err := lockRoots(ctx, tx, "", true, "flow_id="+id+" AND status IN ("+database.TerminalStatusesSQL+")"+
 			" AND surgraph_flow_id=0 AND delete_after_ms=0 AND archive_attempt_at="+atExpr, atArg)
 		if err != nil {

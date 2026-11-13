@@ -73,8 +73,7 @@ func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
 		if a == nil {
 			return errors.New("shard %d has no archive in this run; the engine is restarting", shard, http.StatusServiceUnavailable)
 		}
-		n, err := a.DropBefore(ctx, day)
-		e.metricArchiveDaysDropped(ctx, shard, n)
+		_, err := a.DropBefore(ctx, day)
 		return errors.Trace(err)
 	}))
 }
@@ -270,11 +269,10 @@ func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
 	return nil
 }
 
-// stageRowsEnv and stageBytesEnv name the environment variables that set the size above which a closed tree is
-// archived in stages rather than in one transaction, for the benchmark rig and the staging-on test runs: in rows, which
-// starts staged archives (0, off), and in payload bytes, a threshold beside it (0, none), each a whole number of at
-// least 0. A rig cannot reach a test-only override, and staged archival is off until its thresholds are qualified.
-// Production leaves them unset.
+// stageRowsEnv and stageBytesEnv name the environment variables that replace the size above which a closed tree is
+// archived in stages rather than in one transaction, for the benchmark rig and the staging-on test runs: in rows (0,
+// never staged), and in payload bytes, a threshold beside it (0, none), each a whole number of at least 0. A rig cannot
+// reach a test-only override. Production leaves them unset, and the defaults stand.
 const (
 	stageRowsEnv  = "DWARF_STAGE_ROWS"
 	stageBytesEnv = "DWARF_STAGE_BYTES"

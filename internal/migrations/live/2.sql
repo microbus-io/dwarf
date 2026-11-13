@@ -142,7 +142,7 @@ CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority,
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
 
 -- DRIVER: pgx
-ALTER TABLE dwarf_steps SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_insert_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0, vacuum_truncate = false, toast.autovacuum_vacuum_scale_factor = 0.01, toast.autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_vacuum_cost_delay = 0, toast.vacuum_truncate = false);
+ALTER TABLE dwarf_steps SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_insert_scale_factor = 0.01, autovacuum_analyze_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 0, vacuum_truncate = false, toast.autovacuum_vacuum_scale_factor = 0.01, toast.autovacuum_vacuum_insert_scale_factor = 0.01, toast.autovacuum_vacuum_cost_delay = 0, toast.vacuum_truncate = false);
 
 -- DRIVER: mssql
 CREATE TABLE dwarf_steps (

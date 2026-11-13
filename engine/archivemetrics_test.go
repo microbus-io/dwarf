@@ -214,8 +214,8 @@ func closedKeys(t *testing.T, e *Engine, n int) []string {
 	return fks
 }
 
-// TestArchiveMetrics_TheDays pins the day readings: the days with tables and the oldest one's age, from the archive's
-// record, a drop counted by retention and by PurgeBefore, and a maintenance pass that fails counted as one.
+// TestArchiveMetrics_TheDays pins the day reading - the oldest day's age, from the archive's record, which follows the
+// drops by retention and by PurgeBefore - and a maintenance pass that fails counted as one.
 func TestArchiveMetrics_TheDays(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -230,9 +230,6 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 	assert.NoError(makeArchiveDay(t, e, today-1))
 	assert.NoError(a.Refresh(ctx))
 	rm := collect(t, reader)
-	days, ok := gaugeAt(rm, "dwarf_archive_days", shard1)
-	assert.True(ok)
-	assert.Equal(float64(5), days, "today-5, yesterday, today and the two days ahead")
 	oldest, ok := gaugeAt(rm, "dwarf_archive_oldest_day_age_seconds", shard1)
 	assert.True(ok)
 	began := time.Since(a.DayEnds(today - 6)).Seconds()
@@ -244,9 +241,10 @@ func TestArchiveMetrics_TheDays(t *testing.T) {
 		t.Skip("midnight passed during the test")
 	}
 	rm = collect(t, reader)
-	assert.Equal(int64(2), sumAt(rm, "dwarf_archive_days_dropped", shard1), "one by retention, one by PurgeBefore")
-	days, _ = gaugeAt(rm, "dwarf_archive_days", shard1)
-	assert.Equal(float64(3), days)
+	oldest, ok = gaugeAt(rm, "dwarf_archive_oldest_day_age_seconds", shard1)
+	assert.True(ok)
+	began = time.Since(a.DayEnds(today - 1)).Seconds()
+	assert.True(oldest <= began && oldest > began-60, "today, the oldest left, began %vs ago, got %v", began, oldest)
 	assert.Zero(sumAt(rm, "dwarf_archive_maintain_failed", shard1))
 
 	e.diags.Seams().InjectN(diagnostics.FaultArchiveMaintainErr, 1)
@@ -340,10 +338,6 @@ func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	n, ok := gaugeAt(rm, "dwarf_archive_held_roots", attrs)
 	assert.True(ok)
 	assert.Equal(float64(3), n, "each root failed alone")
-	age, ok := gaugeAt(rm, "dwarf_archive_oldest_held_seconds", attrs)
-	assert.True(ok)
-	assert.True(age >= 119)
-	assert.True(sumAt(rm, "dwarf_archive_move_failures", map[string]string{"shard": "1"}) >= 4, "fast archiving's batch and the sweep's three")
 	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": janitor.ReasonArchiveFailed}))
 	e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
 	e.reapDueFlows(t.Context())

@@ -31,13 +31,8 @@ import (
 // JobArchiveRetention is the name the engine adds its archive retention job under.
 const JobArchiveRetention = "archive_retention"
 
-// The descriptions of archive retention's counters. The engine counts the days PurgeBefore drops under the same
-// dwarf_archive_days_dropped, word for word the same: two instruments of one name with different descriptions are
-// exported as two streams of that name.
-const (
-	DaysDroppedDescription    = "Counts archive days dropped, by shard: by retention, or by PurgeBefore. At a steady retention it rises by one per shard a day; two dispatchers dropping the same day at once can each count it."
-	maintainFailedDescription = "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run hourly by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted."
-)
+// maintainFailedDescription is archive retention's counter's description.
+const maintainFailedDescription = "Counts archive maintenance passes that failed, by shard: the pass that makes the days ahead and drops the expired days, run hourly by a dispatcher of the shard. One failure is retried by the next pass; a run of them leaves the days ahead unmade, and one to two days of them stop archiving (dwarf_archive_failing_seconds). A pass cut short by Shutdown is not counted."
 
 // ArchiveRetention is the job that keeps a shard's archive days: each round makes the days ahead - archiving into today
 // waits for tomorrow's tables - and drops the days past the retention, with their directory rows, through the archiver
@@ -48,10 +43,9 @@ type ArchiveRetention struct {
 	archive       *archiver.Archive
 	retentionDays int
 
-	// j is the janitor the job is added to; the counters are created on its meter, and record under shardAttr.
+	// j is the janitor the job is added to; the counter is created on its meter, and records under shardAttr.
 	j         *Janitor
 	shardAttr attribute.KeyValue
-	dropped   metric.Int64Counter
 	failed    metric.Int64Counter
 }
 
@@ -60,15 +54,13 @@ func NewArchiveRetention(archive *archiver.Archive, retentionDays int) *ArchiveR
 	return &ArchiveRetention{archive: archive, retentionDays: retentionDays}
 }
 
-// attach creates the job's counters on j's meter.
+// attach creates the job's counter on j's meter.
 func (a *ArchiveRetention) attach(j *Janitor, _ string) {
 	a.j = j
 	a.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
-	meter := j.diags.Meter()
-	var errs [2]error
-	a.dropped, errs[0] = meter.Int64Counter("dwarf_archive_days_dropped", metric.WithDescription(DaysDroppedDescription))
-	a.failed, errs[1] = meter.Int64Counter("dwarf_archive_maintain_failed", metric.WithDescription(maintainFailedDescription))
-	if err := errors.Join(errs[:]...); err != nil {
+	var err error
+	a.failed, err = j.diags.Meter().Int64Counter("dwarf_archive_maintain_failed", metric.WithDescription(maintainFailedDescription))
+	if err != nil {
 		j.diags.Logger().Error("Creating the archive retention job's instruments", "shard", j.shard.Index(), "error", err)
 	}
 }
@@ -107,9 +99,6 @@ func (a *ArchiveRetention) round(ctx context.Context, _ batchFunc) bool {
 	// diagnostics.FaultArchiveMaintainErr fails the pass after its work, as a failed drop or make does.
 	if err == nil && a.j.diags.Seams().IsFault(diagnostics.FaultArchiveMaintainErr) {
 		err = errors.New("injected fault: " + diagnostics.FaultArchiveMaintainErr)
-	}
-	if dropped > 0 {
-		a.dropped.Add(ctx, int64(dropped), metric.WithAttributes(a.shardAttr))
 	}
 	if err != nil && ctx.Err() == nil { // a pass cut short by a stop is no failure
 		a.failed.Add(ctx, 1, metric.WithAttributes(a.shardAttr))

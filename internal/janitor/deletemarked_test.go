@@ -351,9 +351,9 @@ func TestDeleteMarked_AHeldTreeIsPending(t *testing.T) {
 	assert.Equal(1, pending)
 }
 
-// TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneUnknown pins the days a sweep cannot examine: a day whose
-// tables are gone is passed, its trees gone with it; a day whose probe fails is counted unknown.
-func TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneUnknown(t *testing.T) {
+// TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneLogged pins the days a sweep cannot examine: a day whose
+// tables are gone is passed, its trees gone with it, and nothing logged; a day whose probe fails is logged.
+func TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneLogged(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -379,15 +379,14 @@ func TestDeleteMarked_ADroppedDayIsNoErrorAndAnUnreadableOneUnknown(t *testing.T
 	assert.Zero(f, "the day after the dropped one is swept")
 	dm := r.deleteMarked()
 	dm.mu.Lock()
-	assert.Equal([2]int{0, 0}, [2]int{dm.pending, dm.unknown}, "a dropped day is no failure")
+	assert.Zero(dm.pending, "a dropped day is no failure")
 	dm.mu.Unlock()
+	assert.Zero(r.logs.count("Janitor: finding marked archive trees"), "nor logged")
 
 	r.seams.InjectN(diagnostics.FaultJanitorMarkedProbe, 10000)
 	defer r.seams.Withdraw(diagnostics.FaultJanitorMarkedProbe)
 	r.archiveDeletionRounds(ctx)
-	dm.mu.Lock()
-	assert.True(dm.unknown > 0, "a day whose probe failed is unknown: %d", dm.unknown)
-	dm.mu.Unlock()
+	assert.True(r.logs.count("Janitor: finding marked archive trees") > 0, "a day whose probe failed is logged")
 }
 
 // TestDeleteMarked_ADayWithoutTheDeletionIndexIsSwept pins the probe's fallback on MySQL and MariaDB, where it names the
