@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -69,8 +70,9 @@ type FastArchiving struct {
 	stageBytes    int
 	noQuietMargin bool
 
-	// j is the janitor the job is added to; the instruments are created on its meter.
+	// j is the janitor the job is added to; the instruments are created on its meter, and record under shardAttr.
 	j            *Janitor
+	shardAttr    attribute.KeyValue
 	archived     metric.Int64Counter
 	moveFailures metric.Int64Counter
 	reaped       metric.Int64Counter
@@ -143,40 +145,33 @@ const (
 // attach creates the job's instruments on j's meter, and registers its gauges.
 func (f *FastArchiving) attach(j *Janitor) {
 	f.j = j
+	f.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
-	var errs []error
-	f.archived = counter(meter, archivedName, archivedDescription, &errs)
-	f.moveFailures = counter(meter, moveFailuresName, moveFailuresDesc, &errs)
-	f.reaped = counter(meter, reapedName, reapedDescription, &errs)
+	errs := make([]error, 6)
+	f.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived",
+		metric.WithDescription("Counts flows moved from the live tables into the archive, by shard: each root and every subgraph flow of its tree. Its rate plus dwarf_flows_reaped's, against dwarf_flows_closed, is archiving keeping up - a closed root waits the archive grace (a minute) in the live tables, so the two track each other a minute apart."))
+	f.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures",
+		metric.WithDescription("Failed archive attempts, including sizing, contention and deadlines; counts attempts, not distinct trees."))
+	f.reaped, errs[2] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
 	lag, err := meter.Float64ObservableGauge("dwarf_archive_lag_seconds", metric.WithUnit("s"),
 		metric.WithDescription("Per shard: how long past the archive grace the shard's oldest closed root not yet archived has waited - every replica's, and one being archived in stages - read about once a second while this replica dispatches the shard. Aggregate with max."))
-	if err != nil {
-		errs = append(errs, errors.Trace(err))
-	}
+	errs[3] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription("Per shard: time since archiving began failing, cleared by a later move that archives something, or once every root due at the last failure has left the live tables. Retained trees remain live. Aggregate with max."))
-	if err != nil {
-		errs = append(errs, errors.Trace(err))
-	}
-	if lag != nil && failing != nil {
-		shard := metric.WithAttributes(shardAttr(j.shard.Index()))
-		f.gauges, err = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
-			if !j.isActive() {
-				return nil
-			}
-			if l, ok := f.lagReading(); ok {
-				o.ObserveFloat64(lag, l.Seconds(), shard)
-			}
-			o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), shard)
+	errs[4] = err
+	shard := metric.WithAttributes(f.shardAttr)
+	f.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+		if !j.isActive() {
 			return nil
-		}, lag, failing)
-		if err != nil {
-			errs = append(errs, errors.Trace(err))
 		}
-	}
-	if len(errs) > 0 {
-		j.diags.Logger().Error("Creating the fast archiving job's instruments", "shard", j.shard.Index(),
-			"error", errors.Join(errs...))
+		if l, ok := f.lagReading(); ok {
+			o.ObserveFloat64(lag, l.Seconds(), shard)
+		}
+		o.ObserveFloat64(failing, f.failingFor(time.Now()).Seconds(), shard)
+		return nil
+	}, lag, failing)
+	if err := errors.Join(errs...); err != nil {
+		j.diags.Logger().Error("Creating the fast archiving job's instruments", "shard", j.shard.Index(), "error", err)
 	}
 }
 
@@ -217,7 +212,7 @@ func (f *FastArchiving) round(ctx context.Context, batch batchFunc) (progress bo
 // batch scans, sizes and removes one batch of closed trees on h, and reports whether it made progress: removed a tree,
 // or passed roots that are not this job's.
 func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
-	shard, seams := f.j.shard.Index(), f.j.diags.Seams()
+	seams := f.j.diags.Seams()
 	archiving := f.retentionDays > 0
 	var d *filingDay
 	refreshed := true
@@ -276,10 +271,12 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
 	switch {
-	case err == nil && archiving:
-		add(ctx, f.archived, removed.flows, shardAttr(shard))
-	case err == nil:
-		add(ctx, f.reaped, removed.unarchived, shardAttr(shard), attribute.String("reason", ReasonNoRetention))
+	case err != nil:
+	case archiving && removed.flows > 0:
+		f.archived.Add(ctx, int64(removed.flows), metric.WithAttributes(f.shardAttr))
+	case !archiving && removed.unarchived > 0:
+		f.reaped.Add(ctx, int64(removed.unarchived),
+			metric.WithAttributes(f.shardAttr, attribute.String("reason", ReasonNoRetention)))
 	}
 	if ctx.Err() != nil {
 		return false // stopped: no failure, and the position stays
@@ -287,7 +284,7 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	f.after = candidates[last]
 	switch {
 	case err != nil && archiving:
-		add(ctx, f.moveFailures, 1, shardAttr(shard))
+		f.moveFailures.Add(ctx, 1, metric.WithAttributes(f.shardAttr))
 		f.failed(ctx, "archiving closed trees", err)
 		return false
 	case err != nil:

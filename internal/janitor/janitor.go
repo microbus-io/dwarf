@@ -51,6 +51,7 @@ package janitor
 import (
 	"context"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,6 +59,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -97,11 +99,14 @@ type runningJob struct {
 // logged and records nothing.
 func New(shard *database.Shard, d *diagnostics.Diags) *Janitor {
 	j := &Janitor{shard: shard, diags: d}
-	h, err := newBatchSeconds(d.Meter())
+	var err error
+	j.batchSeconds, err = d.Meter().Float64Histogram("dwarf_janitor_batch_seconds",
+		metric.WithUnit("s"),
+		metric.WithDescription("Time one batch of a janitor's job took, by shard, job and part: turn is the wait for a turn on the shard's connections, which the batch shares with dispatch; acquire is the wait for its one connection from the pool; work is its statements, every one on that connection. A job falling behind with most of its time in turn or acquire is held back by the shard's load; with most in work, by its statements."),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60))
 	if err != nil {
 		d.Logger().Error("Creating the janitor's instruments", "shard", shard.Index(), "error", err)
 	}
-	j.batchSeconds = h
 	return j
 }
 
@@ -344,5 +349,24 @@ func (j *Janitor) batch(name string) batchFunc {
 		err = fn(ctx, conn)
 		j.recordBatch(ctx, name, turned.Sub(start), acquired.Sub(turned), time.Since(acquired))
 		return err
+	}
+}
+
+// The parts of a batch's time, the part attribute of dwarf_janitor_batch_seconds.
+const (
+	partTurn    = "turn"    // waiting for a turn on the shard's connections
+	partAcquire = "acquire" // waiting for the batch's connection from the pool
+	partWork    = "work"    // the batch's statements
+)
+
+// recordBatch records one batch's time in its parts; a negative work, for a batch that could not take its connection,
+// records none.
+func (j *Janitor) recordBatch(ctx context.Context, job string, turn, acquire, work time.Duration) {
+	shard := attribute.String("shard", strconv.Itoa(j.shard.Index()))
+	name := attribute.String("job", job)
+	j.batchSeconds.Record(ctx, turn.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partTurn)))
+	j.batchSeconds.Record(ctx, acquire.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partAcquire)))
+	if work >= 0 {
+		j.batchSeconds.Record(ctx, work.Seconds(), metric.WithAttributes(shard, name, attribute.String("part", partWork)))
 	}
 }

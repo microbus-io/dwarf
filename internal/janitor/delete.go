@@ -19,6 +19,7 @@ package janitor
 import (
 	"context"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/diagnostics"
@@ -35,6 +36,11 @@ const JobFastDeletion = "fast_deletion"
 // ReasonDeleted is the reason a stamped tree is deleted, the reason attribute of dwarf_flows_reaped.
 const ReasonDeleted = "deleted"
 
+// reapedDescription is dwarf_flows_reaped's description. Both jobs create the counter, and internal/reaper creates it
+// too, with this text word for word: two instruments of one name and different descriptions are exported as two
+// streams of that name.
+const reapedDescription = "Counts flows deleted from the live tables WITHOUT archiving them, by shard and by reason: deleted (a tree Delete or DeleteOnCompletion scheduled for deletion, or a tree a retention of 0 stamped for deletion as too large for one transaction), no_retention (a retention of 0 keeps no archive), and archive_failed (an unarchived tree reached its retention cutoff). archive_failed is records LOST from the archive and must stay zero; dwarf_archive_failing_seconds says since when it has been failing, and the logs say why."
+
 // FastDeletion is the job that deletes the stamped trees - a Delete's, a DeleteOnCompletion's, a published tree's live
 // copy - as they come due: one batch a round, the stamped roots after its position in flow_id order, the position then
 // past them whatever became of them. It passes a tree too large for a batch, left to the deletion in chunks, and the
@@ -44,9 +50,10 @@ type FastDeletion struct {
 	batchRows  int
 	batchBytes int
 
-	// j is the janitor the job is added to; the counter is created on its meter.
-	j      *Janitor
-	reaped metric.Int64Counter
+	// j is the janitor the job is added to; the counter is created on its meter, and records under shardAttr.
+	j         *Janitor
+	shardAttr attribute.KeyValue
+	reaped    metric.Int64Counter
 
 	// after is the position: the flow id of the last root a round was done with. count, ordinal and partitioned are
 	// the residue class the position was walked in; a round in another starts over.
@@ -72,11 +79,11 @@ func (f *FastDeletion) SetBatch(roots, rows, bytes int) {
 // attach creates the job's counter on j's meter.
 func (f *FastDeletion) attach(j *Janitor) {
 	f.j = j
-	var errs []error
-	f.reaped = counter(j.diags.Meter(), reapedName, reapedDescription, &errs)
-	if len(errs) > 0 {
-		j.diags.Logger().Error("Creating the fast deletion job's instruments", "shard", j.shard.Index(),
-			"error", errors.Join(errs...))
+	f.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
+	var err error
+	f.reaped, err = j.diags.Meter().Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
+	if err != nil {
+		j.diags.Logger().Error("Creating the fast deletion job's instruments", "shard", j.shard.Index(), "error", err)
 	}
 }
 
@@ -107,7 +114,7 @@ func (f *FastDeletion) round(ctx context.Context, batch batchFunc) (progress boo
 // batch scans, sizes and deletes one batch of stamped trees on h, and reports whether it made progress: deleted a
 // tree, or passed one too large for a batch.
 func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
-	shard, seams := f.j.shard.Index(), f.j.diags.Seams()
+	seams := f.j.diags.Seams()
 	where, whereArgs := f.restriction()
 	candidates, err := scanStamped(ctx, h, seams, where, whereArgs, max(f.batchRoots, 1))
 	if err != nil {
@@ -129,9 +136,10 @@ func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 	if err == nil && !passed {
 		removed, err = move(ctx, h, seams, cut, stampedDueSQL, nil, nil)
 	}
-	if err == nil {
+	if err == nil && removed.unarchived > 0 {
 		// Counted before the stop check: a batch that committed as the job was stopped still counts.
-		add(ctx, f.reaped, removed.unarchived, shardAttr(shard), attribute.String("reason", ReasonDeleted))
+		f.reaped.Add(ctx, int64(removed.unarchived),
+			metric.WithAttributes(f.shardAttr, attribute.String("reason", ReasonDeleted)))
 	}
 	if ctx.Err() != nil {
 		return false // stopped: no failure, and the position stays
