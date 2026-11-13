@@ -71,11 +71,14 @@ expiration's included.
   do; a transaction holds one until it ends. **Do not take a connection for the batch** (a `sequel.Conn` for all its
   statements): it exempts the job's later statements from the pool's queue, a priority no other caller has (user).
   Its reads run before its transaction begins: SQLite needs a transaction to open with a write, and on MySQL a read
-  inside it would pin its snapshot for the batch.
+  inside it would pin its snapshot for the batch. **On PostgreSQL the sizing reads run in a short transaction of their
+  own** (`cutTrees`, `sizingReads`), committed before the batch's, for the bounded reads below - three round trips a
+  batch.
 - **Inside a transaction every statement runs on its `Tx`, and a query's rows are read to the end before the next
   statement.** A statement on the DB meanwhile takes a second connection while one is held - hold-and-wait: enough of
   them at once take every connection of the pool and wait forever. The archive's statements run on the shard's DB,
-  so a call of it that reads or writes - its clock, `Maintain` - is made outside any transaction.
+  so a call of it that reads or writes - its clock, `Maintain` - is made outside any transaction. Pinned by
+  `TestJanitor_EveryJobRunsOnAPoolOfOne`, every job on a pool of one connection.
 - **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `work` the
   batch's statements, their waits for the pool included. They attribute a job's shortfall to its own waits, which the
   pool-wide counters cannot.
@@ -485,6 +488,14 @@ transaction, and then never finishes: the delete wall.
   (`plan_cache_mode`): every chunk statement is bound and prepared once per connection, and PostgreSQL may move a
   prepared statement to a generic plan after five runs, planned without the values and not replanned when the
   transaction turns bitmap scans off.
+- **The sizing reads are bounded the same way** (`cutTrees` runs every caller's sizing through `sizingReads`, a
+  transaction of its own on PostgreSQL with `boundReads`' settings). Left to the planner, a flow's step read in the
+  sizing statement is a bitmap scan of the flow's whole index whatever its limit - without statistics, and with
+  statistics once a flow is estimated at a few hundred rows or more, as a custom plan or a cached generic one (measured
+  on a flow of 1M steps sized up to 8,193 rows: 47 ms against 2 ms). **Do not order the step read instead**
+  (`ORDER BY step_id` in the LATERAL): with no statistics the planner sorts the whole flow (measured up to 1 s). The
+  other dialects' step read stops at its limit by its plan. Pinned by `TestSize_TheSizingReadStopsAtItsLimit`, with
+  and without statistics, custom and cached generic.
 - **A budget is rows and bytes, and a chunk stops at whichever it reaches first** (`limit`, `size.go`), the byte counts
   read from the `*_bytes` columns, so no payload is read to size it. **A chunk takes at least one step only while it
   has taken nothing** (`stepsWithin`'s `fresh`): a step over the whole budget then goes alone, and a chunk that already

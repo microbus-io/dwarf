@@ -171,12 +171,7 @@ func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidat
 		cutLimit = cutLimit.tighter(stage)
 		firstRows = max(firstRows, stage.rows+1)
 	}
-	cut, first, err := cutWithin(eligible, cutLimit, firstRows, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
-			return nil, err
-		}
-		return treesSizesUpTo(ctx, h, "", group, limits)
-	})
+	cut, first, err := cutTrees(ctx, h, seams, "", eligible, cutLimit, firstRows)
 	switch {
 	case err != nil:
 		return nil, routeMove, err

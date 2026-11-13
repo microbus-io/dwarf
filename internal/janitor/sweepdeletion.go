@@ -167,12 +167,7 @@ func (s *SweepDeletion) batch(ctx context.Context, h handle) outcome {
 		s.w.complete()
 		return idle
 	}
-	cut, first, err := cutWithin(rootIDs(candidates), budget, budget.rows+1, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
-			return nil, err
-		}
-		return treesSizesUpTo(ctx, h, "", group, limits)
-	})
+	cut, first, err := cutTrees(ctx, h, seams, "", rootIDs(candidates), budget, budget.rows+1)
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
 		last = slices.IndexFunc(candidates, func(c dueRoot) bool { return c.flowID == cut[len(cut)-1] })

@@ -200,12 +200,7 @@ func (d *DeleteMarked) batch(ctx context.Context, h handle) outcome {
 	}
 	day := d.days[d.at]
 	sfx := daySuffix(day)
-	cut, first, err := cutWithin(rootIDs(roots), budget, budget.rows+1, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
-			return nil, err
-		}
-		return treesSizesUpTo(ctx, h, sfx, group, limits)
-	})
+	cut, first, err := cutTrees(ctx, h, seams, sfx, rootIDs(roots), budget, budget.rows+1)
 	if err == nil && len(cut) == 1 && budget.over(first) {
 		// A tree too large for a batch: deleted in chunks, one tree at a time, from the next batch on.
 		d.current, d.currentDay, d.pos = roots[0], day, chunkPos{} // the cut's one root is the first

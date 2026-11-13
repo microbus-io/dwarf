@@ -146,12 +146,7 @@ func (f *FastDeletion) batch(ctx context.Context, h handle) bool {
 		return false
 	}
 	batchLimit := capOf(f.batchRows, f.batchBytes)
-	cut, first, err := cutWithin(candidates, batchLimit, batchLimit.rows+1, func(group, limits []int) ([]size, error) {
-		if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
-			return nil, err
-		}
-		return treesSizesUpTo(ctx, h, "", group, limits)
-	})
+	cut, first, err := cutTrees(ctx, h, seams, "", candidates, batchLimit, batchLimit.rows+1)
 	passed := err == nil && len(cut) == 1 && batchLimit.over(first)
 	var removed removal
 	if err == nil && !passed {

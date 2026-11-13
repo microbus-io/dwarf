@@ -23,7 +23,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 )
 
@@ -201,6 +203,38 @@ func cutWithin(roots []int, batch limit, firstRows int, sizes func(group, limits
 		i += len(group)
 	}
 	return roots, first, nil
+}
+
+// cutTrees is cutWithin over the trees of roots in the tables of sfx, sized by treesSizesUpTo; FaultReapSizeErr,
+// targeted at a root, fails the sizing of its group. On PostgreSQL the sizing runs in a transaction of its own whose
+// reads are bounded (boundReads): left to its planner, a flow's step read there is a bitmap scan of the flow's whole
+// index, whatever the limit, with statistics or without, custom plan or generic. It commits before the batch's own
+// transaction begins.
+func cutTrees(ctx context.Context, h handle, seams *seamster.Seamster, sfx string, roots []int, batch limit, firstRows int) (cut []int, first size, err error) {
+	err = sizingReads(ctx, h, func(q sequel.Executor) (err error) {
+		cut, first, err = cutWithin(roots, batch, firstRows, func(group, limits []int) ([]size, error) {
+			if err := targetedFault(seams, diagnostics.FaultReapSizeErr, group...); err != nil {
+				return nil, err
+			}
+			return treesSizesUpTo(ctx, q, sfx, group, limits)
+		})
+		return err
+	})
+	return cut, first, errors.Trace(err)
+}
+
+// sizingReads runs fn, reads that size trees, on h: on PostgreSQL in a transaction of their own whose reads are
+// bounded (boundReads), elsewhere on h itself.
+func sizingReads(ctx context.Context, h handle, fn func(q sequel.Executor) error) error {
+	if h.DriverName() != "pgx" {
+		return fn(h)
+	}
+	return h.Transact(ctx, func(tx *sequel.Tx) error {
+		if err := boundReads(ctx, tx); err != nil {
+			return err
+		}
+		return fn(tx)
+	})
 }
 
 // The groups cutWithin sizes in one call: a small first one, since its first tree may be large and the batch then
