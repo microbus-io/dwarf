@@ -1217,6 +1217,27 @@ func TestStage_PublishedCleanupNotUnarchived(t *testing.T) {
 	}
 }
 
+// TestStage_APublishedLiveCopyDeletedInChunksIsNotReaped pins the published accounting on the chunked path: a published
+// tree's live copy too large for a batch is deleted by sweep deletion in chunks, and none of its flows is counted reaped -
+// they were archived.
+func TestStage_APublishedLiveCopyDeletedInChunksIsNotReaped(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t) // a batch of 4 rows
+	reader := sdkmetric.NewManualReader()
+	r.meter = sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+	r.settings.overdue = 0
+	root := seedWideTree(t, r.db, 3, 10, 3) // 44 rows
+	r.pass(ctx)                             // copied, published, its live copy passed by fast deletion and deleted by sweep deletion in chunks
+	f, _, _ := rowsOf(t, r, root)
+	assert.Zero(f, "the live copy is deleted")
+	var rm metricdata.ResourceMetrics
+	assert.Must(assert.NoError(reader.Collect(ctx, &rm)))
+	assert.Equal(int64(11), counterSum(rm, "dwarf_flows_archived"))
+	assert.Zero(counterSum(rm, "dwarf_flows_reaped"), "archived, so not reaped")
+}
+
 // TestSize_AStagingChunkKeepsToItsBytes pins the staged copy's byte budget: a tree staged by its bytes is copied over
 // several chunks, each within the batch's bytes, and published whole.
 func TestSize_AStagingChunkKeepsToItsBytes(t *testing.T) {

@@ -353,6 +353,7 @@ func TestStaged_ATreeArchivedInStagesReadsAsOne(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.reapStageRows, e.reapBatchRows = 1, 2
+	e.sweepOverdue = 0 // the published live copy, over a batch, is sweep deletion's at once
 	rootKey, childKey, rootStep, childStep := treeKeys(t, e)
 
 	// listed counts the archived flows of this tree; a fork's tree is archived too, once it ends.
@@ -431,6 +432,7 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.reapStageRows, e.reapBatchRows = 1, 2
+	e.sweepOverdue = 0 // the published live copy, over a batch, is sweep deletion's at once
 	rootKey, childKey, _, _ := treeKeys(t, e)
 	_, _, rootID, _, _ := keys.ParseFlowKey(rootKey)
 	sh, err := e.db.Shard(1)
@@ -474,6 +476,7 @@ func TestStaged_TheFingerprintHoldsThroughTheLiveCleanup(t *testing.T) {
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
 	e.reapStageRows, e.reapBatchRows = 1, 1 // a tree of two rows: its live cleanup takes chunks
+	e.sweepOverdue = 0                      // the published live copy is sweep deletion's at once
 	rootKey, _, _, _ := treeKeys(t, e)
 	before, _, err := e.Fingerprint(ctx, rootKey)
 	assert.Must(assert.NoError(err))

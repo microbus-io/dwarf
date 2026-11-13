@@ -126,8 +126,6 @@ func TestArchiveMetrics_TheReaperCountsWhatItMoves(t *testing.T) {
 	lag, ok := gaugeAt(rm, "dwarf_archive_lag_seconds", shard1)
 	assert.True(ok)
 	assert.Zero(lag, "the last probe found nothing due")
-	passes, _ := histCount(rm, "dwarf_reap_pass_seconds", shard1)
-	assert.Equal(uint64(1), passes)
 	failing, ok := failingAt(rm, "1")
 	assert.True(ok)
 	assert.Zero(failing)
@@ -365,6 +363,9 @@ func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	}
 }
 
+// TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce pins dwarf_flows_reaped for a tree archiving never moved
+// within its retention: live retention counts its flows under archive_failed once, when it stamps it, however many
+// passes follow, and the deletion of stamped trees counts them under deleted as it deletes them. Nothing is archived.
 func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -376,8 +377,9 @@ func TestArchiveMetrics_UnarchivedRetentionDeletionCountsOnlyOnce(t *testing.T) 
 	e.reapDueFlows(t.Context())
 	rm := collect(t, reader)
 	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonArchiveFailed}))
-	assert.Zero(sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
+	assert.Equal(int64(2), sumAt(rm, "dwarf_flows_reaped", map[string]string{"shard": "1", "reason": reaper.ReasonDeleted}))
 	assert.Zero(sumAt(rm, "dwarf_flows_archived", map[string]string{"shard": "1"}))
+	assert.False(live(t, e, root))
 }
 
 // TestArchiveMetrics_ATransientFailureEndsWhenNothingDueAtItRemains pins that one failure on a shard with nothing left

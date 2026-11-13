@@ -356,7 +356,6 @@ type Engine struct {
 	reapStageRows       int           // the tree size above which archival is staged; 0, never, until it is qualified
 	reapStageBytes      int           // the tree payload above which archival is staged, when it is; 0, no byte threshold
 	reapAttempt         time.Duration // one database attempt (30s)
-	reapSlice           time.Duration // one walker before yielding (5s)
 	reapBudget          time.Duration // healthy backlog work per pass (30s)
 	// purgeChunk is how many roots one Purge statement names, a field so a test can drive several chunks. A literal
 	// IN list in the tens of thousands of terms can fail to plan outright on SQL Server (errors 8623 / 8632); 4,096
@@ -430,7 +429,6 @@ func NewEngine() *Engine {
 	e.archiveGrace = 1 * time.Minute
 	e.sweepOverdue = janitor.DefaultSweepOverdue
 	e.reapAttempt = 30 * time.Second
-	e.reapSlice = 5 * time.Second
 	e.reapBudget = 30 * time.Second
 	e.reapBatch = 512
 	e.reapBatchRows = 4096

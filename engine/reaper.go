@@ -58,11 +58,9 @@ func (e *Engine) reaperLoop(ctx context.Context) {
 	}
 }
 
-// reapDueFlows is what a test drives to reap what is due: the janitors' jobs run until they make no progress, then a
-// reaper pass that does not expire.
+// reapDueFlows is what a test drives to reap what is due: the janitors' jobs run until they make no progress.
 func (e *Engine) reapDueFlows(ctx context.Context) {
 	e.drainJanitors(ctx, e.archiveGrace)
-	e.reapPass(ctx, e.archiveGrace, false)
 }
 
 // reaperConfig is one pass's settings, from the engine's fields, read anew for every pass since tests change them
@@ -77,7 +75,6 @@ func (e *Engine) reaperConfig(ctx context.Context, grace time.Duration) reaper.C
 		StageRows:     e.reapStageRows,
 		StageBytes:    e.reapStageBytes,
 		Attempt:       e.reapAttempt,
-		Slice:         e.reapSlice,
 		Budget:        e.reapBudget,
 		Grace:         grace,
 		StealGrace:    2 * e.reapInterval,
@@ -96,10 +93,10 @@ func (e *Engine) reaperConfig(ctx context.Context, grace time.Duration) reaper.C
 	return cfg
 }
 
-// reapPass removes, per shard this replica dispatches, every due tree, archiving the closed roots that ended grace ago
-// - the archive grace, or 0 for a test archiving what it just ended (accessors.ArchiveNow) - and, with periodic,
-// then deletes the marked archive trees left and runs the expiration pass. Each shard's pass is one turn: the
-// reaper's pass, then the periodic stages, one after the other. dwarf_reap_pass_seconds times the reaper's pass alone.
+// reapPass, with periodic, deletes the marked archive trees left and runs the expiration pass, per shard this replica
+// dispatches, in one turn each; with or without, it forgets what it recorded about the shards this replica no longer
+// dispatches. Janitor step 7: every walk of the live tables is the janitor's, so the reaper's own pass runs nothing and
+// is not called; grace goes into the configuration DeleteMarked reads.
 func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic bool) {
 	r := e.reaper.Load()
 	cfg := e.reaperConfig(ctx, grace)
@@ -110,19 +107,21 @@ func (e *Engine) reapPass(ctx context.Context, grace time.Duration, periodic boo
 			e.forgetReaping(shard)
 			return nil // see reaperLoop
 		}
+		if !periodic {
+			return nil
+		}
 		// This pass takes a turn on the shard it is about to read, so a background sweep queues for its
 		// connections like any other caller instead of taking them from work already under way.
 		ctx, doneTurn := e.dbTurn(ctx, shard)
 		defer doneTurn()
 		a := e.archiveOn(shard)
-		r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
-			return e.partitionOn(shard)
-		}})
-		if periodic {
-			r.DeleteMarked(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a})
-			if e.flowExpiration > 0 {
-				e.expireOn(ctx, db, shard)
-			}
+		// Janitor step 7: the reaper's pass runs nothing. Kept, commented out, as the reference.
+		// r.Pass(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a, Residency: func() (int, int, bool) {
+		// 	return e.partitionOn(shard)
+		// }})
+		r.DeleteMarked(ctx, cfg, reaper.Shard{Index: shard, DB: db, Archive: a})
+		if e.flowExpiration > 0 {
+			e.expireOn(ctx, db, shard)
 		}
 		return nil
 	})

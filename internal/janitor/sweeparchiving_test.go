@@ -44,8 +44,8 @@ func (r *rig) sweepRounds(ctx context.Context) (n int) {
 	return n
 }
 
-// failFast arms a fault failing the move of each of roots, so fast archiving passes them; the returned func withdraws
-// them.
+// failFast arms a fault failing the move or deletion of each of roots, so the fast jobs pass them; the returned func
+// withdraws them.
 func failFast(r *rig, roots ...int) (withdraw func()) {
 	var faults []string
 	for _, id := range roots {
@@ -192,8 +192,8 @@ func TestSweep_CompletesUnderContinuousArrivals(t *testing.T) {
 		arrivals = append(arrivals, arrival)
 	}
 	assert.True(rounds < 10, "the sweep completed")
-	assert.False(r.sweep().sweeping, "the sweep completed")
-	assert.Zero(r.sweep().reading(time.Now()).sweep, "between sweeps")
+	assert.False(r.sweep().w.sweeping, "the sweep completed")
+	assert.Zero(r.sweep().w.reading(time.Now()).sweep, "between sweeps")
 	if now, _ := r.archive.Today(ctx); now != today {
 		t.Skip("midnight passed")
 	}
@@ -355,7 +355,7 @@ func TestSweep_AtRetentionZeroAConnectionErrorIsNoArchiveFailure(t *testing.T) {
 		r := newRig(t, retention)
 		r.seams.InjectN(diagnostics.FaultJanitorConnErr, 1)
 		assert.False(r.roundOf(ctx, JobSweepArchiving))
-		failing := r.sweep().reading(time.Now()).failing
+		failing := r.sweep().failingFor(time.Now())
 		if retention == 0 {
 			assert.Zero(failing, "nothing is archived at a retention of 0")
 			assert.Equal(1, r.logs.count("Janitor: taking a connection"), "logged instead")
@@ -431,9 +431,9 @@ func TestSweep_HeldRootsAndTheFailureEpisode(t *testing.T) {
 	r.seams.InjectN(targeted, 10000)
 	r.pass(ctx)
 
-	reading := r.sweep().reading(time.Now())
+	reading := r.sweep().w.reading(time.Now())
 	assert.Equal(1, reading.held, "the root that failed alone is held")
-	assert.True(reading.failing > 0, "the sweep is failing")
+	assert.True(r.sweep().failingFor(time.Now()) > 0, "the sweep is failing")
 	assert.Zero(reading.sweep, "between sweeps")
 	assert.True(reading.oldestHeld >= 10*time.Minute, "the front's oldest due root: %v", reading.oldestHeld)
 	var rm metricdata.ResourceMetrics
@@ -446,9 +446,9 @@ func TestSweep_HeldRootsAndTheFailureEpisode(t *testing.T) {
 
 	r.seams.Withdraw(targeted)
 	r.pass(ctx)
-	reading = r.sweep().reading(time.Now())
+	reading = r.sweep().w.reading(time.Now())
 	assert.Zero(reading.held, "a clean sweep holds nothing")
-	assert.Zero(reading.failing, "a sweep that failed nothing ends the episode")
+	assert.Zero(r.sweep().failingFor(time.Now()), "a sweep that failed nothing ends the episode")
 	assert.Zero(reading.oldestHeld, "nothing due at the last sweep's front")
 }
 
@@ -479,7 +479,7 @@ func TestSweep_PassingAStuckAttemptIsNoProgress(t *testing.T) {
 		t.Fatal("the drain did not return: passing the stuck attempt counted as progress")
 	}
 	assert.Zero(r.sweepRounds(ctx), "a sweep makes no progress on the root")
-	reading := r.sweep().reading(time.Now())
+	reading := r.sweep().w.reading(time.Now())
 	assert.Zero(reading.held, "a root with an attempt is not the sweep's to hold")
 	assert.Zero(reading.oldestHeld, "nor in its scan: large-tree archiving's while its copy runs")
 }
@@ -513,7 +513,7 @@ func TestSweep_NothingMovesWhileTomorrowIsNotWhole(t *testing.T) {
 		flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", id)
 		assert.Equal(2, flows, "tree %d stays live", id)
 	}
-	assert.True(r.sweep().reading(time.Now().Add(time.Second)).failing > 0, "an archive failure")
+	assert.True(r.sweep().failingFor(time.Now().Add(time.Second)) > 0, "an archive failure")
 }
 
 // TestSweep_StealsAnotherClasssOverdueRoot pins the steal: a sweep takes another class's root once it is overdue by
@@ -565,12 +565,12 @@ func TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes(t *testing.T) {
 	defer r.seams.Withdraw(diagnostics.FaultReapArchiveErr)
 	r.fastRounds(ctx)
 	assert.False(r.roundOf(ctx, JobSweepArchiving), "a round of failures makes no progress")
-	reading := r.sweep().reading(time.Now())
+	reading := r.sweep().w.reading(time.Now())
 	assert.Equal(sweepFailureLimit, reading.held, "held as they fail")
 	assert.True(reading.sweep > 0, "the sweep is under way")
 
 	r.roundOf(ctx, JobSweepArchiving)
-	reading = r.sweep().reading(time.Now())
+	reading = r.sweep().w.reading(time.Now())
 	assert.Equal(sweepFailureLimit+1, reading.held, "the last complete sweep's count")
 	assert.Zero(reading.sweep, "complete")
 	assert.Equal(heldLogLimit, r.logs.count("Janitor: a sweep could not remove a tree"), "the first of a sweep logged")

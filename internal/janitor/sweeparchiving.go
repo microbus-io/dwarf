@@ -25,7 +25,6 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
-	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -33,29 +32,6 @@ import (
 
 // JobSweepArchiving is the name the engine adds its sweep archiving job under.
 const JobSweepArchiving = "sweep_archiving"
-
-// DefaultSweepOverdue is how long past its due time a closed root waits before sweep archiving takes it: the steal
-// grace, long enough for what failed a root - a Fork holding it, contention, a connection lost - to have cleared.
-const DefaultSweepOverdue = 30 * time.Second
-
-// kindClosed is the kind attribute of the sweep gauges for closed trees.
-const kindClosed = "closed"
-
-// sweepFailureLimit is how many batches a round may fail before it gives way to the job's idle wait.
-const sweepFailureLimit = 8
-
-// heldLogLimit is how many held roots a sweep logs; the gauge counts the rest. A sweep through an archive outage holds
-// every root it takes, up to sweepFailureLimit a second.
-const heldLogLimit = 8
-
-// The descriptions of the sweep gauges, which the engine also reports, for the kinds of trees the janitor does not
-// sweep yet, word for word the same: two instruments of one name and different descriptions are exported as two streams
-// of that name.
-const (
-	HeldRootsDescription  = "Roots a sweep failed on singly: the larger of the current sweep's count and the last complete one's. Per replica, shard and kind; aggregate with max, not sum. Resets at restart or handoff."
-	OldestHeldDescription = "Age of the oldest root waiting for the last sweep when it began, increasing until resampled; includes roots not yet attempted. Per shard and kind; aggregate with max."
-	SweepAgeDescription   = "Age of the current sweep, or zero between sweeps. Per shard and kind; aggregate with max."
-)
 
 // SweepArchiving is the job that archives the closed roots fast archiving left behind: one it failed on, found held or
 // could not start an attempt for, one whose close committed late behind its position, one of a slow peer's class. Each
@@ -86,21 +62,13 @@ type SweepArchiving struct {
 	reaped       metric.Int64Counter
 	gauges       metric.Registration
 
-	// sweeping is whether a sweep is under way: end is fast archiving's boundary when it began - its position and
-	// residue class - after the sweep's own position, size how many roots its next batch takes - 1 after a failure,
-	// doubling after a success - and front whether its first scan is still to come.
-	sweeping bool
-	end      boundary
-	after    dueRoot
-	size     int
-	front    bool
+	// w is the sweeps' account; end is fast archiving's boundary when the sweep under way began - its position and
+	// residue class - and after the sweep's own position.
+	w     sweep
+	end   boundary
+	after dueRoot
 
 	mu sync.Mutex
-	// started is when the current sweep began, zero between sweeps; failed counts the roots it held, lastFailed the
-	// last complete sweep's. frontSince is when the oldest due root at the last sweep's front closed, zero for none.
-	started            time.Time
-	failed, lastFailed int
-	frontSince         time.Time
 	// failSince is when the job began failing to archive, zero while it is not; sweepFailed is whether the current
 	// sweep failed: a sweep that completes without failing ends the episode.
 	failSince   time.Time
@@ -120,7 +88,7 @@ func NewSweepArchiving(fast *FastArchiving, archive *archiver.Archive, retention
 		batchRoots:    defaultBatchRoots,
 		batchRows:     defaultBatchRows,
 		batchBytes:    defaultBatchBytes,
-		size:          1,
+		w:             sweep{size: 1},
 	}
 }
 
@@ -156,35 +124,26 @@ func (s *SweepArchiving) attach(j *Janitor, name string) {
 	s.j = j
 	s.shardAttr = attribute.String("shard", strconv.Itoa(j.shard.Index()))
 	meter := j.diags.Meter()
-	errs := make([]error, 8)
+	errs := make([]error, 6)
 	s.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
 	s.moveFailures, errs[1] = meter.Int64Counter("dwarf_archive_move_failures", metric.WithDescription(moveFailuresDescription))
 	s.reaped, errs[2] = meter.Int64Counter("dwarf_flows_reaped", metric.WithDescription(reapedDescription))
-	held, err := meter.Int64ObservableGauge("dwarf_archive_held_roots", metric.WithUnit("{root}"),
-		metric.WithDescription(HeldRootsDescription))
+	gauges, err := newSweepGauges(meter)
 	errs[3] = err
-	oldest, err := meter.Float64ObservableGauge("dwarf_archive_oldest_held_seconds", metric.WithUnit("s"),
-		metric.WithDescription(OldestHeldDescription))
-	errs[4] = err
-	age, err := meter.Float64ObservableGauge("dwarf_archive_sweep_seconds", metric.WithUnit("s"),
-		metric.WithDescription(SweepAgeDescription))
-	errs[5] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
-	errs[6] = err
+	errs[4] = err
 	kind := metric.WithAttributes(s.shardAttr, attribute.String("kind", kindClosed))
 	jobShard := metric.WithAttributes(s.shardAttr, attribute.String("job", name))
-	s.gauges, errs[7] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
+	s.gauges, errs[5] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
 			return nil
 		}
-		r := s.reading(time.Now())
-		o.ObserveInt64(held, int64(r.held), kind)
-		o.ObserveFloat64(oldest, r.oldestHeld.Seconds(), kind)
-		o.ObserveFloat64(age, r.sweep.Seconds(), kind)
-		o.ObserveFloat64(failing, r.failing.Seconds(), jobShard)
+		now := time.Now()
+		gauges.observe(o, s.w.reading(now), kind)
+		o.ObserveFloat64(failing, s.failingFor(now).Seconds(), jobShard)
 		return nil
-	}, held, oldest, age, failing)
+	}, append(gauges.instruments(), failing)...)
 	if err := errors.Join(errs...); err != nil {
 		j.diags.Logger().Error("Creating the sweep archiving job's instruments", "shard", j.shard.Index(), "error", err)
 	}
@@ -206,82 +165,40 @@ func (s *SweepArchiving) idleWait() time.Duration {
 // reset forgets where the job stood and what it observed: a replica that sweeps the shard again saw nothing of what
 // happened meanwhile.
 func (s *SweepArchiving) reset() {
-	s.sweeping, s.end, s.after, s.size, s.front = false, boundary{}, dueRoot{}, 1, false
+	s.w.forget()
+	s.end, s.after = boundary{}, dueRoot{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.started, s.failed, s.lastFailed, s.frontSince = time.Time{}, 0, 0, time.Time{}
 	s.failSince, s.sweepFailed = time.Time{}, false
 }
 
-// sweepReading is what the sweep gauges report at an instant.
-type sweepReading struct {
-	held                       int
-	oldestHeld, sweep, failing time.Duration
-}
-
-// reading returns the sweep gauges' values at now.
-func (s *SweepArchiving) reading(now time.Time) sweepReading {
+// failingFor is how long the job has been failing to archive at now, 0 while it is not.
+func (s *SweepArchiving) failingFor(now time.Time) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r := sweepReading{held: max(s.failed, s.lastFailed)}
-	if !s.frontSince.IsZero() {
-		r.oldestHeld = max(now.Sub(s.frontSince), 0)
+	if s.failSince.IsZero() {
+		return 0
 	}
-	if !s.started.IsZero() {
-		r.sweep = max(now.Sub(s.started), 0)
-	}
-	if !s.failSince.IsZero() {
-		r.failing = max(now.Sub(s.failSince), 0)
-	}
-	return r
+	return max(now.Sub(s.failSince), 0)
 }
 
-// outcome is what one batch of a sweep came to.
-type outcome int
-
-const (
-	idle     outcome = iota // nothing done: nothing to take, the day closed to archiving, or a read failed
-	moved                   // progress: trees moved, deleted, stamped or given an attempt
-	passed                  // roots passed and nothing done: each held, or with an attempt - the round takes another
-	faltered                // a batch failed: the round takes another at once, up to sweepFailureLimit
-)
-
-// round runs the sweep's batches until one makes progress, the sweep finds nothing to do, or sweepFailureLimit
-// batches have failed. Passing roots is not progress, though the round goes on past them: a root whose copy waits or
-// fails keeps its attempt behind fast archiving's position, and every sweep passes it again.
+// round runs the sweep's batches (sweepRound).
 func (s *SweepArchiving) round(ctx context.Context, batch batchFunc) bool {
 	archiving := s.retentionDays > 0
 	if archiving && s.archive == nil {
 		return false // closed roots stay live: there is nowhere to archive them
 	}
-	for failures := 0; failures < sweepFailureLimit; {
-		var o outcome
-		err := batch(ctx, func(ctx context.Context, h handle) error {
-			o = s.batch(ctx, h)
-			return nil
-		})
-		if err != nil {
-			// The batch did not run: its connection could not be taken. An archive failure only where there is an
-			// archive: at a retention of 0 the job deletes.
-			if archiving {
-				s.failure(ctx, "taking a connection", err)
-			} else {
-				s.logError(ctx, "Janitor: taking a connection", "error", err)
-			}
-			return false
-		}
-		if ctx.Err() != nil {
-			return false
-		}
-		switch o {
-		case faltered:
-			failures++
-		case passed:
-		default:
-			return o == moved
+	progress, err := sweepRound(ctx, batch, s.batch)
+	if err != nil {
+		// The batch did not run: its connection could not be taken. An archive failure only where there is an
+		// archive: at a retention of 0 the job deletes.
+		if archiving {
+			s.failure(ctx, "taking a connection", err)
+		} else {
+			s.logError(ctx, "Janitor: taking a connection", "error", err)
 		}
 	}
-	return false
+	return progress
 }
 
 // batch takes one batch of the sweep on h, beginning a sweep when none is under way.
@@ -290,19 +207,12 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	if !ok {
 		return idle // fast archiving has not run a round: there is no boundary yet
 	}
-	if s.sweeping && (end.count != s.end.count || end.ordinal != s.end.ordinal || end.partitioned != s.end.partitioned) {
-		// Fast archiving started over in another residue class, and so does the sweep. The dropped sweep's held roots
-		// still count, and it ends no failure episode: it did not complete.
-		s.sweeping = false
-		s.mu.Lock()
-		s.lastFailed = max(s.lastFailed, s.failed)
-		s.mu.Unlock()
+	if s.w.sweeping && !end.sameClass(s.end) {
+		s.w.drop() // fast archiving started over in another residue class, and so does the sweep; it ends no episode
 	}
-	if !s.sweeping {
-		s.sweeping, s.end, s.after, s.size, s.front = true, end, dueRoot{}, 1, true
-		s.mu.Lock()
-		s.started, s.failed = time.Now(), 0
-		s.mu.Unlock()
+	if !s.w.sweeping {
+		s.w.begin()
+		s.end, s.after = end, dueRoot{}
 	}
 	seams := s.j.diags.Seams()
 	archiving := s.retentionDays > 0
@@ -322,10 +232,9 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	// failed nothing ends a failure episode - but only where it could archive: a closed day fails every round, and
 	// ending its episode in between would report it as starting anew each time.
 	complete := func() outcome {
-		s.sweeping = false
+		s.w.complete()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.lastFailed, s.failed, s.started = s.failed, 0, time.Time{}
 		if !s.sweepFailed && refreshed && (d == nil || d.startable()) {
 			s.failSince = time.Time{}
 		}
@@ -333,13 +242,11 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		return idle
 	}
 	if s.end.after.flowID == 0 {
-		s.mu.Lock()
-		s.frontSince = time.Time{}
-		s.mu.Unlock()
+		s.w.sawFront(false, 0)
 		return complete()
 	}
 	where, args := s.restriction(h.DriverName(), archiving)
-	candidates, oldest, err := scanClosed(ctx, h, seams, s.grace+s.overdue, where, args, max(min(s.size, s.batchRoots), 1))
+	candidates, oldest, err := scanClosed(ctx, h, seams, s.grace+s.overdue, where, args, s.w.limit(s.batchRoots))
 	if err != nil {
 		s.logError(ctx, "Janitor: selecting closed trees to sweep", "error", err)
 		if archiving {
@@ -347,15 +254,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		}
 		return idle
 	}
-	if s.front {
-		s.front = false
-		s.mu.Lock()
-		s.frontSince = time.Time{}
-		if len(candidates) > 0 {
-			s.frontSince = time.Now().Add(-oldest)
-		}
-		s.mu.Unlock()
-	}
+	s.w.sawFront(len(candidates) > 0, oldest)
 	if len(candidates) == 0 {
 		return complete()
 	}
@@ -379,7 +278,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		case routeStart:
 			_, did, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
 		case routeStamp:
-			did, err = stampClosed(ctx, h, cut[0], s.grace)
+			did, err = stampClosed(ctx, h, cut[0], due, dueArgs)
 		}
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
@@ -400,16 +299,16 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 			s.failure(ctx, "sweeping closed trees", err)
 		}
 		if len(cut) != 1 && len(candidates) > 1 {
-			s.size = 1 // taken again a root at a time, from the same position
+			s.w.size = 1 // taken again a root at a time, from the same position
 			return faltered
 		}
-		// A root that fails alone is held: counted, logged and passed, with the roots before it that had an attempt.
-		s.held(ctx, candidates[last], err)
+		// A root that fails alone is held: counted, logged and passed.
+		s.w.hold(ctx, s.j, candidates[last], err)
 		s.after = candidates[last]
 		return faltered
 	}
 	s.after = candidates[last]
-	s.size = min(2*s.size, max(s.batchRoots, 1)) // nothing failed
+	s.w.grow(s.batchRoots)
 	if !did {
 		return passed
 	}
@@ -455,20 +354,6 @@ func (s *SweepArchiving) failure(ctx context.Context, what string, err error) {
 		s.j.diags.Logger().ErrorContext(ctx, "Janitor: "+what+" failed; retained trees stay in the live tables",
 			"shard", s.j.shard.Index(), "error", err)
 	}
-}
-
-// held counts a root the sweep failed on alone, which it passes; the next sweep comes back to it. The first
-// heldLogLimit of a sweep are logged, by the token-free correlation id, never by a flow key.
-func (s *SweepArchiving) held(ctx context.Context, root dueRoot, err error) {
-	s.mu.Lock()
-	s.failed++
-	n := s.failed
-	s.mu.Unlock()
-	if n > heldLogLimit {
-		return
-	}
-	s.logError(ctx, "Janitor: a sweep could not remove a tree; the next sweep takes it again",
-		"correlation_id", keys.CorrelationID(s.j.shard.Index(), root.createdHour, root.flowID), "error", err)
 }
 
 // logError logs a failed statement - unless ctx ended, which means the job was stopped on purpose.

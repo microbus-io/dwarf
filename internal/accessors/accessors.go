@@ -45,9 +45,10 @@ var Seams func(eng any) *seamster.Seamster
 // closed flows not archived yet - with ListOpen's rules otherwise, for a test that must see a flow it just closed.
 var ListLive func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error)
 
-// ArchiveNow runs one reaper pass that archives every closed root, however recently it closed, and removes the roots
-// scheduled for deletion whose time has come (not a DeleteOnCompletion root inside its grace), for a test that lists
-// or purges what it just closed.
+// ArchiveNow runs the janitors' jobs until they make no progress, with no archive grace: every closed root is archived,
+// however recently it closed, and the roots scheduled for deletion whose time has come are removed - but for one whose
+// stamp came due behind fast deletion's position, which waits for sweep deletion's window - for a test that lists or
+// purges what it just closed.
 var ArchiveNow func(eng any, ctx context.Context)
 
 // ArchiveDays reads the archive days whose tables exist on a shard, ascending, for a benchmark that counts or sizes

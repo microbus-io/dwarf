@@ -500,6 +500,7 @@ func TestFault_ReapMidTree(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	shortenDeletion(e, time.Millisecond, time.Hour) // due immediately; the test drives reaps
+	e.sweepOverdue = 0                              // the tree fast deletion failed on and passed is the sweep's at once
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	waitDone := awaitNextStop(t, e) // rendezvous on completion instead of polling status

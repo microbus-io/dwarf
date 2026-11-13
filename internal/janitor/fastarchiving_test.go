@@ -347,7 +347,7 @@ func TestFast_AtRetentionZeroATreeTooLargeForABatchIsStamped(t *testing.T) {
 	small := seedTrees(t, r.db, 1, callShape)[0] // 4 rows
 	large := chunkTree(t, r.db)                  // 9 rows
 	ascendingCloses(t, r, []int{large, small})
-	r.pass(ctx)
+	r.fastRounds(ctx) // fast archiving alone: sweep deletion would go on to delete the stamped tree in chunks
 	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", small)
 	assert.Zero(flows)
 	flows, steps := treeCount(t, r, "dwarf_flows", "dwarf_steps", large)

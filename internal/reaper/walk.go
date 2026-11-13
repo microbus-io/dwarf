@@ -44,20 +44,20 @@ func (p *pass) attemptCtx(ctx context.Context) (context.Context, context.CancelF
 func (p *pass) run(ctx context.Context) {
 	start := time.Now()
 	defer func() { p.r.metrics.reapPass(ctx, p.shard.Index, time.Since(start)) }()
-	// Retention cleanup is independent of archive table health and runs once per pass.
-	p.retained(ctx)
-	for {
-		// Janitor step 6: the repair walk of closed trees is the janitor's sweep archiving job (internal/janitor), so
-		// only the stamped trees are walked here. Kept, commented out, as the reference.
-		// moreClosed := p.closed(ctx)
-		// Janitor step 3: the fast walk of stamped trees is the janitor's fast deletion job (internal/janitor), so only
-		// the repair walk runs here. The fast walk is kept, commented out, as the reference.
-		// moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
-		moreDeleted := p.walk(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted, true)
-		if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || !moreDeleted {
-			return
-		}
-	}
+	// Janitor step 7: the retention cleanup is the janitor's live retention job, and the repair walk of stamped trees
+	// its sweep deletion job (internal/janitor), so a pass runs nothing; the engine no longer calls it. Kept, commented
+	// out, as the reference.
+	// p.retained(ctx)
+	// for {
+	// 	// Janitor step 6: the repair walk of closed trees is the janitor's sweep archiving job (internal/janitor).
+	// 	// moreClosed := p.closed(ctx)
+	// 	// Janitor step 3: the fast walk of stamped trees is the janitor's fast deletion job (internal/janitor).
+	// 	// moreDeleted := p.due(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted)
+	// 	moreDeleted := p.walk(ctx, deletionDue(p.cfg.StealGrace), func() (*filingDay, bool) { return nil, true }, ReasonDeleted, true)
+	// 	if ctx.Err() != nil || time.Since(start) >= p.cfg.Budget || !moreDeleted {
+	// 		return
+	// 	}
+	// }
 }
 
 // closed archives the closed roots into today, or deletes them at a retention of 0.

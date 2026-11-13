@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
@@ -28,7 +29,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted pins the readers of a live tree the reaper deletes in chunks:
+// TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted pins the readers of a live tree the janitor deletes in chunks:
 // a child of a stamped tree is neither summarized nor listed; once its root's stamp is due, a multi-statement read
 // (Step, History) of what is left is a 404 rather than a partial result; Snapshot and Fingerprint of the root still
 // serve it, the root going last; a repeated Delete is success and a Fork a 409.
@@ -37,6 +38,8 @@ func TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e := archiveEngine(t, treeMux(), 30)
+	e.reapBatchRows = 1 // a chunk a row: fast deletion passes the tree, and sweep deletion deletes it in chunks
+	e.sweepOverdue = 0  // at once
 	fk, err := e.Create(ctx, "arch/parent", nil, nil)
 	assert.Must(assert.NoError(err))
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusCompleted, time.Minute)
@@ -67,9 +70,14 @@ func TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted(t *testing.T) {
 	assert.Zero(list(), "neither the root nor its child is listed")
 
 	_, _, rootID, _, _ := keys.ParseFlowKey(fk)
-	e.reapBatchRows = 1
-	e.reapSlice, e.reapBudget = 0, 0
-	e.reapDueFlows(ctx)
+	// The drain is held after the first chunk, which leaves the tree part deleted.
+	e.diags.Seams().Break(diagnostics.CheckpointReapChunkDone)
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		e.reapDueFlows(ctx)
+	}()
+	assert.Must(assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointReapChunkDone, 10*time.Second*enginetest.TimeoutScale())))
 	flows, steps := treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
 	assert.Must(assert.True(flows >= 1 && flows+steps < 4, "part of the tree is gone: %d flows, %d steps", flows, steps))
 	_, err = e.Step(ctx, rootStep)
@@ -85,8 +93,8 @@ func TestChunkedDeletion_APartlyDeletedTreeReadsAsDeleted(t *testing.T) {
 	_, err = e.Fork(ctx, rootStep, nil)
 	assert.Equal(http.StatusConflict, errors.StatusCode(err), "a tree marked for deletion is not forked")
 
-	e.reapSlice, e.reapBudget = time.Hour, time.Hour
-	e.reapDueFlows(ctx)
+	e.diags.Seams().Resume(diagnostics.CheckpointReapChunkDone)
+	<-drained
 	flows, steps = treeCount(t, e, "dwarf_flows", "dwarf_steps", rootID)
 	assert.Zero(flows + steps)
 	_, err = e.Snapshot(ctx, fk)

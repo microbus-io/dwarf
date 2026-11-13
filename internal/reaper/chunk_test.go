@@ -66,6 +66,7 @@ func stepsOf(t *testing.T, r *rig, flows []int) int {
 // batch is deleted over several transactions, each about a batch of rows, its root stamped from the first and deleted
 // last, and no step outlives its flow.
 func TestChunk_ALargeTreeIsDeletedInChunksRootLast(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestChunk_ALargeTreeIsDeletedInChunksRootLast")
 	t.Parallel()
 	for _, kind := range []string{KindDeleted, KindClosed, KindRetention} {
 		t.Run(kind, func(t *testing.T) {
@@ -118,6 +119,7 @@ func TestChunk_ALargeTreeIsDeletedInChunksRootLast(t *testing.T) {
 // with it, leaving the tree stamped and whole, and the next pass deletes it. The tree is stamped as a retention of 0
 // leaves it, by the janitor.
 func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestChunk_AFaultedChunkRollsBackWhole")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -142,6 +144,7 @@ func TestChunk_AFaultedChunkRollsBackWhole(t *testing.T) {
 // - a restart, or another replica - finds the stamped tree and deletes the rest. The tree is stamped as a retention of
 // 0 leaves it, by the janitor.
 func TestChunk_ARestartResumesTheDeletion(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestChunk_ARestartResumesTheDeletion")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -167,6 +170,7 @@ func TestChunk_ARestartResumesTheDeletion(t *testing.T) {
 // TestChunk_TwoReapersShareATree pins concurrent chunked deletion of one tree, as two dispatchers of a shard can run:
 // the root lock serializes their chunks, and the tree is deleted once, whole.
 func TestChunk_TwoReapersShareATree(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestChunk_TwoJanitorsShareATree")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -344,6 +348,7 @@ func toString(v any) string {
 // TestChunk_AFailingLargeTreeDoesNotHoldBackTheRest pins that a large tree whose chunks keep failing is passed like any
 // failed batch: the trees behind it are deleted, repair counts it held, and it is deleted once the failure clears.
 func TestChunk_AFailingLargeTreeDoesNotHoldBackTheRest(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestChunk_AFailingLargeTreeDoesNotHoldBackTheRest")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

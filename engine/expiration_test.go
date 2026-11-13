@@ -441,7 +441,7 @@ func TestExpiration_AHandoffForgetsThePosition(t *testing.T) {
 	e, _, _ := expiryEngine(t, time.Hour)
 	e.expirePositions.set(1, 42)
 	setRole(e, 1, false)
-	e.reapDueFlows(t.Context())
+	e.reapPass(t.Context(), e.archiveGrace, false)
 	setRole(e, 1, true)
 	assert.Equal(0, e.expirePositions.of(1))
 }

@@ -79,7 +79,7 @@ func TestDeleteLive_WaitsForTheRoot(t *testing.T) {
 }
 
 // TestDeleteLive_TakesPrecedenceOverTheGrace pins Delete of a root in DeleteOnCompletion's grace: it is made due at once
-// and counted, rather than left readable until the grace ends.
+// and counted, rather than left readable until the grace ends. The deletion itself is the janitor's.
 func TestDeleteLive_TakesPrecedenceOverTheGrace(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -94,10 +94,11 @@ func TestDeleteLive_TakesPrecedenceOverTheGrace(t *testing.T) {
 	var stamp int
 	assert.NoError(r.db.QueryRowContext(ctx, "SELECT delete_after_ms FROM dwarf_flows WHERE flow_id=?", root).Scan(&stamp))
 	assert.Equal(1, stamp, "due at once")
-	r.pass(ctx)
-	_, _, there := rowsOf(t, r, root)
-	assert.False(there, "deleted on the next pass")
-	result, err = r.reaper.DeleteLive(ctx, r.db, archiver.DefaultDayLength, root)
+	var due int
+	assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?"+
+		" AND DATE_ADD_MILLIS(updated_at, delete_after_ms)<=DATE_ADD_MILLIS(NOW_UTC(), 1000)", root).Scan(&due))
+	assert.Equal(1, due, "its stamp is due within a second, not after its minute's grace")
+	result, err = r.reaper.DeleteLive(ctx, r.db, archiver.DefaultDayLength, root+1000)
 	assert.NoError(err)
-	assert.False(result.Found, "gone")
+	assert.False(result.Found, "a root not there")
 }

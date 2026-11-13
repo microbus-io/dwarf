@@ -1106,6 +1106,7 @@ func TestStage_APreferenceWaitsForItsRoot(t *testing.T) {
 // by a commit whose response was lost. The deletion forgets it, and a full set of preferences makes room by dropping
 // those whose trees are gone - never one still pending.
 func TestStage_APreferenceIsHarmlessOnceItsTreeIsGone(t *testing.T) {
+	t.Skip("janitor step 7: the pass runs nothing, and preferences go with the attempt deadline")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

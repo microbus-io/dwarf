@@ -3183,18 +3183,24 @@ same site as its error log; the flows it does repair count in `dwarf_steps_recov
 and the two persist alarms `dwarf_steps_write_retried` / `dwarf_steps_write_failed` (detailed under "Persisting
 a step's outcome"). The inline helpers no-op when `e.metrics == nil` (before Startup).
 
-**Archive instruments cost no extra statement:** counters record completed work and gauges read walker state.
-`dwarf_flows_archived` and `dwarf_flows_reaped{reason}` count flow rows only after a successful transaction result.
-Reasons are `deleted`, `no_retention`, and `archive_failed` (an unarchived tree deleted at its retention cutoff).
+**Archive instruments read what the jobs read anyway, but for three statements of their own:** fast archiving's lag
+probe and large-tree archiving's oldest-attempt probe, each at most once a second while busy and once a round while
+idle, and live retention's count of the flows of the trees it stamps (a `GROUP BY` over the batch's roots, before its
+transaction). Counters record completed work and gauges read job state. `dwarf_flows_archived` and
+`dwarf_flows_reaped{reason}` count flow rows only after a successful transaction result. Reasons are `deleted`,
+`no_retention`, and `archive_failed` - the flows of an unarchived tree past its retention, counted when live retention
+**stamps** it, the moment its records are given up. Its deletion then counts the same flows again under `deleted`, so
+for these trees the two reasons overlap and the reasons do not sum to the flows removed (user; the janitor's
+`CLAUDE.md`, "Live retention").
 `dwarf_archive_move_failures` counts failed attempts, not distinct trees. `dwarf_archive_lag_seconds` is the fast
 archiving job's probe of the shard's oldest due closed root (`internal/janitor/CLAUDE.md`).
 
 A sweep publishes `dwarf_archive_held_roots{shard,kind}` as the maximum of the running and last completed sweep's
 failed-single count, `dwarf_archive_oldest_held_seconds{shard,kind}` as the age of its last observed front (including
-not-yet-attempted roots), and `dwarf_archive_sweep_seconds{shard,kind}` as the current sweep's age. Kind is `closed` -
-the janitor's sweep archiving, which registers its own series under the descriptions the engine's share
-(`janitor.HeldRootsDescription` and its siblings) - or `deleted` or `retention`, which the engine reads from the
-reaper's repair walks. These are per-replica observations: aggregate with max, never sum as distinct roots.
+not-yet-attempted roots), and `dwarf_archive_sweep_seconds{shard,kind}` as the current sweep's age. Kind is the
+janitor job's: `closed` sweep archiving, `deleted` sweep deletion, `retention` live retention, each registering its own
+series (`internal/janitor/CLAUDE.md`, "The sweeps"). These are per-replica observations: aggregate with max, never sum
+as distinct roots.
 The age grows between observations. A completed healthy sweep can leave a conservative front age until the next
 sweep samples it; collection does not query the database. Running failure counts are published between attempts,
 so a long sweep does not hide accumulated failures until completion.
@@ -3555,9 +3561,9 @@ report that the pass found no remaining deletions.
 
 **On the live side, deletion is deferred: mark, then reap.** No path deletes live rows inline. `DeleteOnCompletion`
 and `Delete` **stamp `delete_after_ms`** on the target **root** flow (`0`=keep; `>0`=reap at `updated_at + delete_after_ms`);
-a dedicated **reaper** goroutine (`reaperLoop`, 15 s ticker) later removes the whole tree, keyed on `root_flow_id`:
-in one transaction with other small trees, or, for a tree larger than a batch, in chunks with the root last
-(`internal/reaper/CLAUDE.md`). A retention of 0 and the retention cleanup stamp such a tree before its first chunk.
+the janitor's deletion jobs later remove the whole tree, keyed on `root_flow_id`: fast deletion in one transaction
+with other small trees, or sweep deletion, for a tree larger than a batch, in chunks with the root last
+(`internal/janitor/CLAUDE.md`). A retention of 0 and live retention stamp such a tree before its first chunk.
 Only a closed root is ever stamped, so no rows are deleted where a lifecycle op could interleave
 (see "Deletion race gate" below), and a disposable flow's **outcome is observable** during its grace window.
 
@@ -3636,20 +3642,21 @@ wiring (`janitor.go`):
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
 - **The jobs are built from the engine's fields** (`addJanitorJobs`: fast archiving, sweep archiving behind it and
-  large-tree archiving into the shard's archive, and fast deletion), at Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
+  large-tree archiving into the shard's archive; fast deletion and sweep deletion behind it; live retention), at
+  Startup. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
-  jobs are rebuilt with the engine's own grace, and the reaper's pass runs with 0.
+  jobs are rebuilt with the engine's own grace.
 - **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like the reaper's
   gauges. The archive lag is fast archiving's own, the attempt gauge large-tree archiving's, the held-root and sweep
-  gauges of closed trees (`kind="closed"`) sweep archiving's, and each archiving job reports its series of the failing
-  gauge, labelled by job. The held-root and sweep gauges of the other kinds, and the deletion gauges, still come from
-  the reaper. Closed trees, and the attempts of large ones, are the janitor's alone; the reaper's pass runs the repair
-  walk of stamped trees, chunked deletion, retention and the periodic stages. `sweepOverdue` (30 s) is the sweep's
-  window: a test that wants the sweep to take what fast archiving passed sets it to 0 before its first drain, since a
-  change rebuilds the jobs and starts fast archiving over.
-- **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), then the reaper's
-  pass. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
+  gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge,
+  labelled by job. The archive deletion gauges still come from the reaper. **Every walk of the live tables is the
+  janitor's**, so the reaper's own pass is not called (and `dwarf_reap_pass_seconds` records nothing); `reaperLoop`
+  runs only its periodic stages - `DeleteMarked` and expiration - each `expireInterval`. `sweepOverdue` (30 s) is the
+  window of both sweeps behind a fast job: a test that wants a sweep to take what its fast job passed sets it to 0
+  before its first drain, since a change rebuilds the jobs and starts the fast jobs over.
+- **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`); `reapPass` with
+  `periodic` runs the reaper's periodic stages, and without it only forgets the shards this replica stopped dispatching. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
   (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the
   live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
   written against a reaper whose first tick came 15 s in. A test of the background running sets it false
@@ -3724,15 +3731,15 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `created_at` is the column default - Fork's clone writes none (it lists its columns), and `Continue` is a Create.
   Keep it so: a flow insert that copied an older `created_at` would sit past a young row and never expire. **Do not
   add a `(status, created_at)` index for it**: one more index entry, and its WAL, on every flow insert and every
-  flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over closed flows waiting for the reaper and subgraph children (ended with their
-  root), a page (`expirePage`, 256) at a time. It is a stage of the reaper's pass, after the reap, on any tick
-  `expireInterval` (5 min) after the last that expired, per shard on its dispatchers, on the pass's turn; **its time budget**
-  (`expireBudget`, 30 s, checked before every page after the first and every termination after the first, so a pass
-  always progresses) is what keeps a first-time backlog - expiration turned on over months of abandoned flows,
-  thousands of tree transactions - from holding back archiving: the rest waits for the next pass, which logs once per
-  pass that hits it. **The budget binds a pass that terminates nothing**, and **each pass resumes where the shard's
+  flow-row update (none is HOT, since nearly every one sets the indexed `updated_at`). The walk passes over closed flows waiting for archiving and subgraph children (ended with their
+  root), a page (`expirePage`, 256) at a time. It is a periodic stage of the reaper's loop, after `DeleteMarked`, on
+  any tick `expireInterval` (5 min) after the last that expired, per shard on its dispatchers, on the stage's turn;
+  **its time budget** (`expireBudget`, 30 s, checked before every page after the first and every termination after
+  the first, so a pass always progresses) is what keeps a first-time backlog - expiration turned on over months of
+  abandoned flows, thousands of tree transactions - from holding the turn unbounded: the rest waits for the next pass,
+  which logs once per pass that hits it. **The budget binds a pass that terminates nothing**, and **each pass resumes where the shard's
   last one stopped** (`expirePositions`, in memory, forgotten on a restart or a handoff): a prefix of closed flows held
-  in the live tables (an archive outage) longer than one budget would otherwise either hold back the reaper unbounded
+  in the live tables (an archive outage) longer than one budget would otherwise either hold the turn unbounded
   or, walked from the oldest every pass, cost each pass its whole budget and never reach an expired root behind it. A
   stop before a root leaves the position just short of it, never past the rest of its page. A walk that reaches a row
   that has not expired, or a short page, has swept the shard; the next pass starts from the oldest again. `dwarf_flows_expired` counts

@@ -310,6 +310,7 @@ func TestMove_ABatchThatMeetsContentionWaitsForTheNextPass(t *testing.T) {
 // wait in the live tables, neither archived nor deleted, while the stamped ones are still deleted: they need no
 // archive. Repeated failures never authorize deletion of the retained trees.
 func TestMove_NoClosedTreeMovesWhileTomorrowIsNotWhole(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestMove_NoClosedTreeMovesWhileTomorrowIsNotWhole and TestDelete_AStampedTreeIsDeletedWhileTomorrowIsNotWhole")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

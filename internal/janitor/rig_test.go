@@ -37,8 +37,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// rig is a Manual, active Janitor with its fast archiving, sweep archiving, large-tree archiving and fast deletion jobs
-// over one shard's own isolated,
+// rig is a Manual, active Janitor with every job the engine adds - fast, sweep and large-tree archiving, fast and sweep
+// deletion, live retention - over one shard's own isolated,
 // migrated database and its archive. Its janitor is made at its first use, so a test sets what it needs before; the
 // settings and the residue class are set on the jobs and the shard before every pass, so a test changes them between
 // passes.
@@ -60,6 +60,8 @@ type rig struct {
 	sa        *SweepArchiving
 	la        *LargeArchiving
 	fd        *FastDeletion
+	sd        *SweepDeletion
+	lr        *LiveRetention
 }
 
 // rigSettings are the jobs' settings a test sets on the rig.
@@ -130,10 +132,14 @@ func (r *rig) janitor() *Janitor {
 		r.sa = NewSweepArchiving(r.fa, r.archive, r.retention)
 		r.la = NewLargeArchiving(r.archive, r.retention)
 		r.fd = NewFastDeletion()
+		r.sd = NewSweepDeletion(r.fd)
+		r.lr = NewLiveRetention(r.archive, r.retention)
 		r.j.AddJob(JobFastArchiving, r.fa)
 		r.j.AddJob(JobSweepArchiving, r.sa)
 		r.j.AddJob(JobLargeArchiving, r.la)
 		r.j.AddJob(JobFastDeletion, r.fd)
+		r.j.AddJob(JobSweepDeletion, r.sd)
+		r.j.AddJob(JobLiveRetention, r.lr)
 		r.j.SetManual(true)
 		r.j.Start(r.t.Context())
 		r.j.Resume()
@@ -152,6 +158,10 @@ func (r *rig) janitor() *Janitor {
 	r.la.SetBatch(s.batchRows, s.batchBytes)
 	r.la.SetQuietMargin(!s.noQuietMargin)
 	r.fd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	r.sd.SetOverdue(s.overdue)
+	r.sd.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
+	r.lr.SetGrace(s.grace)
+	r.lr.SetBatch(s.batchRoots)
 	r.shard.SetResidency(r.count, r.ordinal, r.inClass, time.Now().Add(time.Hour))
 	return r.j
 }
@@ -214,6 +224,18 @@ func (r *rig) copier() func(ctx context.Context) bool {
 	j.Resume()
 	r.t.Cleanup(j.Stop)
 	return func(ctx context.Context) bool { return j.round(ctx, j.jobs[0]) }
+}
+
+// sweepDel is the rig's sweep deletion job.
+func (r *rig) sweepDel() *SweepDeletion {
+	r.janitor()
+	return r.sd
+}
+
+// liveRetention is the rig's live retention job.
+func (r *rig) liveRetention() *LiveRetention {
+	r.janitor()
+	return r.lr
 }
 
 // del is the rig's fast deletion job.

@@ -266,7 +266,8 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 			due, dueArgs := closedDueSQL(f.grace)
 			_, _, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
 		case routeStamp:
-			_, err = stampClosed(ctx, h, cut[0], f.grace)
+			due, dueArgs := closedDueSQL(f.grace)
+			_, err = stampClosed(ctx, h, cut[0], due, dueArgs)
 		}
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
@@ -404,12 +405,18 @@ func (f *FastArchiving) reset() {
 	f.failSince, f.failLast = time.Time{}, time.Time{}
 }
 
-// boundary is where fast archiving stood at the end of a round - its position, the last root it was done with - and the
-// residue class its scan was restricted to. The roots at or behind it in close order are sweep archiving's.
+// boundary is where a fast job stood at the end of a round - its position, the last root it was done with - and the
+// residue class its scan was restricted to. The roots at or behind it are its sweep's: in close order for fast
+// archiving, in flow_id order (after.flowID alone) for fast deletion.
 type boundary struct {
 	after          dueRoot
 	count, ordinal int
 	partitioned    bool
+}
+
+// sameClass reports whether b was taken in the residue class of o.
+func (b boundary) sameClass(o boundary) bool {
+	return b.count == o.count && b.ordinal == o.ordinal && b.partitioned == o.partitioned
 }
 
 // position returns where fast archiving stood at the end of its last round; ok is false before a round and after a

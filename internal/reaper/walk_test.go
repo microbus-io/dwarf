@@ -105,6 +105,7 @@ func TestWalk_ABlockedAttemptIsAFailureAndAStopIsNot(t *testing.T) {
 
 // Poisoned deletes and failed sizing must not trap their healthy batch-mates in either population.
 func TestWalk_PassesFailedTrees(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestSweep_PassesFailedTrees, TestSweepDeletion_PassesFailedTrees and TestLiveRetention_PassesFailedRoots")
 	t.Parallel()
 	for _, kind := range []string{"closed", "deleted", "retention", "sizing"} {
 		t.Run(kind, func(t *testing.T) {
@@ -584,6 +585,7 @@ func TestWalk_AStopIsNotAFailure(t *testing.T) {
 // TestWalk_TheResidencyCallbackRestrictsAPass pins that a pass reads the shard's Residency: with two dispatchers, a
 // pass takes only its own residue class of the freshly stamped roots, and the other class's once nothing restricts it.
 func TestWalk_TheResidencyCallbackRestrictsAPass(t *testing.T) {
+	t.Skip("janitor step 7: stamped trees are deleted by the janitor's fast and sweep deletion, and trees past their retention by its live retention; see internal/janitor TestDelete_ResidencySplitsTheStampedRoots and TestSweepDeletion_FollowsFastDeletionsResidueClass")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

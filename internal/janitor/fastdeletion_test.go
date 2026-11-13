@@ -178,9 +178,9 @@ func TestDelete_ResidencySplitsTheStampedRoots(t *testing.T) {
 	assert.NoError(err)
 	selectWith := func(steal time.Duration, ordinal int) []int {
 		where, args := stampedResidency(2, ordinal, true, steal)
-		roots, err := scanStamped(ctx, r.db, r.seams, where, args, 512)
+		roots, _, err := scanStamped(ctx, r.db, r.seams, where, args, 512)
 		assert.NoError(err)
-		return roots
+		return rootIDs(roots)
 	}
 	deadline := time.Now().Add(5 * time.Second * timeoutScale)
 	for !slices.Contains(selectWith(0, 1-root%2), root) && time.Now().Before(deadline) {

@@ -107,7 +107,6 @@ func init() {
 	accessors.ArchiveNow = func(eng any, ctx context.Context) {
 		e := eng.(*Engine)
 		e.drainJanitors(ctx, 0)
-		e.reapPass(ctx, 0, false)
 	}
 	accessors.FlowsClosed = func(eng any) int64 { return eng.(*Engine).flowsClosedCount.Load() }
 	accessors.ArchiveDays = func(eng any, ctx context.Context, shard int) ([]int, error) {

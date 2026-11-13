@@ -46,7 +46,6 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	// and DWARF_STAGE_ROWS would stage every tree.
 	e.reapStageRows = 0
 	e.sweepOverdue = 0
-	e.reapSlice = 0
 	e.reapBatch = 1
 	e.diags.Seams().InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	defer e.diags.Seams().Withdraw(diagnostics.FaultReapArchiveErr)
@@ -274,6 +273,7 @@ func TestReaperContract_ANonDispatcherTakesNoTurn(t *testing.T) {
 // held for half a second after it is not counted in it. The bound is the whole call's time less the hold, not the hold
 // itself: a pass on a loaded SQL Server took 0.6 s alone, which a bound of the hold read as the hold counted.
 func TestReaperContract_ThePassTimeExcludesExpiration(t *testing.T) {
+	t.Skip("janitor step 7: the reaper's pass runs nothing and is not called, and dwarf_reap_pass_seconds goes with it")
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()

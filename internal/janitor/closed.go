@@ -185,16 +185,15 @@ func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidat
 	return cut, routeMove, nil
 }
 
-// stampClosed marks a closed root for deletion, due at once, if it is still a closed root due grace after its close:
-// what a retention of 0 does with a tree too large to delete in one batch, leaving it to the deletion of stamped trees
-// in chunks. The stamp clears any archive attempt, as every stamp but a publication does. The root is locked first as a
-// move locks it, so a root another transaction holds - a Fork cloning the tree - is skipped on PostgreSQL and MySQL
-// rather than waited for. It reports whether it stamped it.
-func stampClosed(ctx context.Context, h handle, root int, grace time.Duration) (stamped bool, err error) {
+// stampClosed marks a closed root for deletion, due at once, if it still matches due (and its arguments) - a closed
+// root due for deletion: what a retention of 0, and live retention, do with a tree too large to delete in one batch,
+// which is then deleted in chunks, each authorized by the stamp. The stamp clears any archive attempt, as every stamp
+// but a publication does. The root is locked first as a move locks it, so a root another transaction holds - a Fork
+// cloning the tree - is skipped on PostgreSQL and MySQL rather than waited for. It reports whether it stamped it.
+func stampClosed(ctx context.Context, h handle, root int, due string, dueArgs []any) (stamped bool, err error) {
 	id := strconv.Itoa(root)
 	err = h.Transact(ctx, func(tx *sequel.Tx) error {
 		stamped = false
-		due, dueArgs := closedDueSQL(grace)
 		locked, err := lockRoots(ctx, tx, true, "flow_id="+id+" AND "+due, dueArgs...)
 		if err != nil || len(locked) == 0 {
 			return errors.Trace(err)

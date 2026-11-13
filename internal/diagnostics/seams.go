@@ -119,7 +119,8 @@ const (
 	FaultArchiveMaintainErr = "archiveMaintainErr" // an archive maintenance pass fails after its work
 
 	// The janitors, beside the reaper's names above, which their jobs consult too:
-	FaultJanitorConnErr = "janitorConnErr" // a janitor's batch cannot take its connection
+	FaultJanitorConnErr        = "janitorConnErr"        // a janitor's batch cannot take its connection
+	FaultJanitorRetentionStamp = "janitorRetentionStamp" // by root flow_id: live retention's stamp fails under its roots' locks
 )
 
 // --- Execution checkpoints ---

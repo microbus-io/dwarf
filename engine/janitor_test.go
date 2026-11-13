@@ -271,7 +271,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 4, "fast archiving, sweep archiving, large-tree archiving and fast deletion are reported")
+	assert.Len(got, 6, "fast, sweep and large-tree archiving, fast and sweep deletion, and live retention are reported")
 	assert.True(got[janitor.JobFastArchiving] >= 0.1 && got[janitor.JobFastArchiving] < 10, "age %v", got)
 
 	setRole(e, 1, false)
@@ -414,8 +414,8 @@ func TestJanitor_TheSweepStartsWhatFastArchivingLeftBehind(t *testing.T) {
 			backdate(t, e, root, janitor.DefaultSweepOverdue+time.Minute) // overdue by the sweep's window
 			e.drainJanitors(ctx, 0)
 			assert.Equal(2, archived(root), "the sweep started its attempt, and large-tree archiving copied and published it")
-			// Its stamp is behind fast deletion's position, which passed the other tree's higher flow_id: a sweep's.
-			e.reapPass(ctx, 0, false)
+			// In the same drain: its stamp is behind fast deletion's position, which passed the other tree's higher
+			// flow_id, and due since its close, past sweep deletion's window.
 			assert.False(live(t, e, root), "and its live copy is removed")
 		})
 	}
