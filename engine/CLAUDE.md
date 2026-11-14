@@ -1452,7 +1452,7 @@ two distinct mechanisms, and each is useless against the other's case:
   not enough: it only shapes per-key counts, while phase 3 returns the ids workers claim.
 - **Intra-peer.** A claim issued but not committed still reads `pending`, so this replica's own next pass
   re-selects a step it is mid-claim on. Handled by the `claims` tracker (`internal/claimstracker`, which owns
-  the 1-2s window, the two-generation roll and the `(shard, stepID)` key): `TryClaim` in the worker loop,
+  the 2-4s window, the two-generation roll and the `(shard, stepID)` key): `TryClaim` in the worker loop,
   before `processStep`.
 
 Both are **advisory**: the claim CAS remains the only thing that grants a step, so a stale or missing entry

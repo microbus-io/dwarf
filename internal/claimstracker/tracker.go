@@ -25,7 +25,7 @@ limitations under the License.
 // entry costs a wasted round trip or a deferred dispatch, never correctness. It is safe for concurrent
 // use.
 //
-// A reservation EXPIRES ON ITS OWN, between one and two seconds after it was taken - long enough to
+// A reservation EXPIRES ON ITS OWN, between two and four seconds after it was taken - long enough to
 // outlast the interval between candidate scans, far short of the lease margin. Nothing has to release
 // one, and RelinquishClaim exists only for a caller that knows a step is settled sooner than that and
 // wants the entry gone now. Any path that re-offers a step to THIS replica must call it, or the replica
@@ -46,23 +46,27 @@ type key struct {
 	stepID int
 }
 
+// generation is how long one generation of the in-flight set lasts. An entry lives between one and two
+// generations, depending on where in its generation it landed.
+const generation = 2 * time.Second
+
 // Tracker is the two-generation in-flight set. Safe for concurrent use.
 type Tracker struct {
 	mu    sync.Mutex
-	curr  map[key]bool // this second's claims
-	prev  map[key]bool // last second's, still checked until the next roll drops them
-	stamp int64        // the whole-second the maps currently represent (Unix seconds)
+	curr  map[key]bool // this generation's claims
+	prev  map[key]bool // the last generation's, still checked until the next roll drops them
+	stamp int64        // the generation the maps currently represent (Unix time in generations)
 	now   func() time.Time
 }
 
-// New returns an empty Tracker anchored at the current second.
+// New returns an empty Tracker anchored at the current generation.
 func New() *Tracker {
 	t := &Tracker{
 		curr: map[key]bool{},
 		prev: map[key]bool{},
 		now:  time.Now,
 	}
-	t.stamp = t.now().Unix()
+	t.stamp = generationOf(t.now())
 	return t
 }
 
@@ -93,25 +97,30 @@ func (t *Tracker) RelinquishClaim(shard, stepID int) {
 	t.mu.Unlock()
 }
 
-// rollMaps advances the two generations to the current whole second. Caller holds t.mu.
+// generationOf is the generation an instant falls in.
+func generationOf(at time.Time) int64 {
+	return at.UnixNano() / int64(generation)
+}
+
+// rollMaps advances the two generations to the current one. Caller holds t.mu.
 //
-//   - same second as the stamp: nothing to do.
-//   - exactly one second later: rotate - current becomes previous (its entries still get one more second
-//     of coverage), a fresh current is allocated, the previous is dropped. O(1).
-//   - more than one second later, OR the clock stepped backwards (neither same nor +1): both generations
-//     are stale, so clear both. A backwards wall clock lands here and clears, which is the safe advisory
-//     direction (it only forgets in-flight steps, costing at most a wasted round trip).
+//   - same generation as the stamp: nothing to do.
+//   - exactly the next generation: rotate - current becomes previous (its entries still get one more
+//     generation of coverage), a fresh current is allocated, the previous is dropped. O(1).
+//   - later than the next, OR the clock stepped backwards (neither same nor +1): both generations are stale,
+//     so clear both. A backwards wall clock lands here and clears, which is the safe advisory direction (it
+//     only forgets in-flight steps, costing at most a wasted round trip).
 func (t *Tracker) rollMaps() {
-	nowSec := t.now().Unix()
+	now := generationOf(t.now())
 	switch {
-	case nowSec == t.stamp:
+	case now == t.stamp:
 		return
-	case nowSec == t.stamp+1:
+	case now == t.stamp+1:
 		t.prev = t.curr
 		t.curr = map[key]bool{}
 	default:
 		t.prev = map[key]bool{}
 		t.curr = map[key]bool{}
 	}
-	t.stamp = nowSec
+	t.stamp = now
 }

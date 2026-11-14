@@ -25,7 +25,7 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// clockAt builds a tracker whose clock the test drives by hand, anchored at an arbitrary whole second.
+// clockAt builds a tracker whose clock the test drives by hand, anchored at the start of a generation.
 func clockAt(base time.Time) (*Tracker, *atomic.Int64) {
 	var offset atomic.Int64
 	t := &Tracker{
@@ -33,7 +33,7 @@ func clockAt(base time.Time) (*Tracker, *atomic.Int64) {
 		prev: map[key]bool{},
 		now:  func() time.Time { return base.Add(time.Duration(offset.Load())) },
 	}
-	t.stamp = t.now().Unix()
+	t.stamp = generationOf(t.now())
 	return t, &offset
 }
 
@@ -57,47 +57,68 @@ func TestRelinquish_FreesBothGenerations(t *testing.T) {
 	tr, off := clockAt(time.Unix(1000, 0))
 
 	assert.True(tr.TryClaim(1, 7))
-	off.Store(int64(time.Second)) // roll once: the entry is now in prev
+	off.Store(int64(generation)) // roll once: the entry is now in prev
 	assert.False(tr.TryClaim(1, 7), "still held from the previous generation")
 
 	tr.RelinquishClaim(1, 7)
 	assert.True(tr.TryClaim(1, 7), "relinquish must clear it from prev too")
 }
 
-// TestRollWindow pins the lifetime: an entry survives exactly one roll (still seen after +1s) and is gone
-// after two (dropped at +2s). This is the whole safety argument - a reservation can only ever delay a
-// re-claim by a bounded window, never strand a step.
+// TestRollWindow pins the lifetime: an entry survives exactly one roll (still seen a generation later) and is
+// gone after two. This is the whole safety argument - a reservation can only ever delay a re-claim by a
+// bounded window, never strand a step.
 func TestRollWindow(t *testing.T) {
 	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
 	assert.True(tr.TryClaim(1, 7))
 
-	off.Store(int64(time.Second))
-	assert.False(tr.TryClaim(1, 7), "still covered one second later (lives in prev)")
+	off.Store(int64(generation))
+	assert.False(tr.TryClaim(1, 7), "still covered a generation later (lives in prev)")
 
-	off.Store(int64(2 * time.Second))
+	off.Store(int64(2 * generation))
 	assert.True(tr.TryClaim(1, 8), "an unrelated claim rolls the maps again")
-	// 7 was inserted at t0; at t0+1 it moved to prev; the t0+2 roll dropped that prev.
-	assert.True(tr.TryClaim(1, 7), "gone two seconds later")
+	// 7 was inserted in g0; in g1 it moved to prev; the g2 roll dropped that prev.
+	assert.True(tr.TryClaim(1, 7), "gone two generations later")
 }
 
-func TestRoll_WithinSameSecondDoesNotExpire(t *testing.T) {
+// TestRollWindow_TwoToFourSeconds pins the window in seconds rather than generations: a reservation must
+// outlast a slow supply cycle, and a refiller fetch measured at ~0.5 s with longer tails let duplicates outlive
+// a one-to-two-second window and lose their claim. An entry taken as a generation ends still covers two seconds;
+// one taken as it starts is gone at four.
+func TestRollWindow_TwoToFourSeconds(t *testing.T) {
+	assert := testarossa.For(t)
+	tr, off := clockAt(time.Unix(1000, 0))
+
+	off.Store(int64(1900 * time.Millisecond))
+	assert.True(tr.TryClaim(1, 7), "taken late in its generation")
+	off.Store(int64(3800 * time.Millisecond))
+	assert.False(tr.TryClaim(1, 7), "still covered 1.9 s later")
+
+	tr, off = clockAt(time.Unix(1000, 0))
+	assert.True(tr.TryClaim(1, 8), "taken as its generation starts")
+	off.Store(int64(3900 * time.Millisecond))
+	assert.False(tr.TryClaim(1, 8), "still covered 3.9 s later")
+	off.Store(int64(4 * time.Second))
+	assert.True(tr.TryClaim(1, 8), "gone at 4 s")
+}
+
+func TestRoll_WithinSameGenerationDoesNotExpire(t *testing.T) {
 	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
 	assert.True(tr.TryClaim(1, 7))
-	off.Store(int64(900 * time.Millisecond)) // same whole second
-	assert.False(tr.TryClaim(1, 7), "a sub-second advance must not expire the entry")
+	off.Store(int64(generation - 100*time.Millisecond)) // same generation
+	assert.False(tr.TryClaim(1, 7), "an advance within the generation must not expire the entry")
 }
 
-// TestRoll_LargeJumpClearsBoth covers a gap of more than one second and a backwards clock - both must
+// TestRoll_LargeJumpClearsBoth covers a gap of more than one generation and a backwards clock - both must
 // leave the maps clean rather than rotate a stale generation into coverage.
 func TestRoll_LargeJumpClearsBoth(t *testing.T) {
 	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))
 	assert.True(tr.TryClaim(1, 7))
 
-	off.Store(int64(5 * time.Second))
-	assert.True(tr.TryClaim(1, 7), "a multi-second gap clears both generations")
+	off.Store(int64(5 * generation / 2))
+	assert.True(tr.TryClaim(1, 7), "a gap past the next generation clears both")
 
 	// Backwards clock: also treated as stale, cleared, still functional.
 	assert.True(tr.TryClaim(1, 8))
@@ -120,7 +141,7 @@ func TestConcurrent(t *testing.T) {
 					tr.RelinquishClaim(1, k)
 				}
 				if i%128 == 0 {
-					off.Add(int64(time.Second))
+					off.Add(int64(generation))
 				}
 			}
 		}()

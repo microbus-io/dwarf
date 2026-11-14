@@ -23,12 +23,16 @@ skipped candidate that the next pass re-selects. Neither is a correctness questi
 this from becoming a distributed lock. Same posture as the candidate cache holding *hints, not
 ownership*.
 
-## The window is 1–2s, and BOTH bounds were established by breaking them
+## The window is 2–4s, and BOTH bounds were established by breaking them
 
 - **Too short — releasing when the CAS returns.** Built, measured, and barely worked (claim miss 7.3% →
   5.7%). The gap to span runs from **selection to pop**, not the round trip between them: the refiller
   selects a step whose claim is uncommitted, the entry sits in the cache, and by pop time a CAS-scoped
-  reservation is long gone. The window must outlast the maximum interval between supply cycles (~1s).
+  reservation is long gone. The window must outlast the maximum interval between supply cycles, and that
+  interval is the fetch's duration once the fetch outruns its pace. Measured on a local PostgreSQL whose
+  128 MB buffer cache made a ~1M-step backlog disk-bound: the fetch averaged 518 ms with longer tails, and
+  of 671,000 duplicate pops 124,000 outlived a 1–2s window and lost their claim CAS. Hence two-second
+  generations (`TestRollWindow_TwoToFourSeconds`).
 - **Too long — holding for the whole step.** Worse. A worker parked in a long `ExecuteTask` keeps its
   reservation for the entire task, so if that step's lease expires meanwhile (an overrun, a DB clock
   step) **no sibling worker can re-claim it and single-replica lease recovery stops working**. It only
@@ -46,13 +50,13 @@ Do not use one map plus a per-entry timestamp and a sweep. That fails under a **
 pool at high throughput (`SetWorkers(512)` at thousands of steps/s): the live population outgrows any
 size gate, and the sweep walks the whole map on every claim, under one lock.
 
-Two maps hold the current whole-second bucket and the previous one; a lookup checks both. Once a second
-the maps **roll** — current becomes previous, previous is dropped, a fresh current is allocated — which
+Two maps hold the current two-second generation and the previous one; a lookup checks both. Once a
+generation the maps **roll** — current becomes previous, previous is dropped, a fresh current is allocated — which
 is three pointer assignments, not a walk. There is **no timestamp per entry and no scan**, and the only
 cost paid at expiry is garbage-collecting a map reference.
 
-The consequence to keep in mind: an entry lives **between one and two seconds** depending on where in the
-second it landed. The window is a range, not a constant, and both ends of that range are inside the
+The consequence to keep in mind: an entry lives **between two and four seconds** depending on where in its
+generation it landed. The window is a range, not a constant, and both ends of that range are inside the
 bounds above.
 
 **A backwards wall clock lands in the `default` arm and clears both generations.** That is the safe
@@ -69,7 +73,7 @@ A struct key is hashable and collision-free, unlike packing the two ints into on
 The window is sized to outlive a *scan*, so it necessarily outlives a step's own dispatch — which means a
 step re-armed and re-offered to this replica still carries the reservation its previous dispatch took.
 Left in place, every worker that pops the step is turned away and the supply cycle keeps re-selecting it
-for up to the full ~2s. **Every path that re-offers a step to this replica must `RelinquishClaim` first.**
+for up to the full ~4s. **Every path that re-offers a step to this replica must `RelinquishClaim` first.**
 The call sites and the measured cost of missing one are in `engine/CLAUDE.md`; a relinquish for a step id
 this replica never reserved is a harmless no-op, which is why the guard belongs at the shared entry point
 rather than at each caller.

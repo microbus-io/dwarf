@@ -981,7 +981,7 @@ func (e *Engine) initRuntime() error {
 	// The worker pool. Its callback is the claim skip plus processStep - NOT the host's ExecuteTask, which
 	// runs deep inside processStep and would drag the whole execution core into the pool if it were the
 	// boundary. The skip is checked HERE rather than inside processStep so it does not pay for that setup:
-	// a sibling worker in this replica reserved the step within the last ~second, its claim CAS may still
+	// a sibling worker in this replica reserved the step within the last few seconds, its claim CAS may still
 	// be in flight, and the piston re-selected it because an uncommitted claim still reads `pending`, so
 	// issuing our own claim would cost a round trip to be told we lost.
 	crew, perr := workers.New(&e.cache, e.db.Gate(), func(ctx context.Context, shard, stepID int, release func()) error {

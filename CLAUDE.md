@@ -151,7 +151,7 @@ matching one before working there:**
   matched to how reversible each decision is (hold the count and the cut, fail the work divisor open, make the hygiene
   delete wait).
 - **`internal/claimstracker/CLAUDE.md`** - the intra-replica in-flight claim set: why the window is bounded
-  (1-2s) rather than tied to a step, and the two-generation roll that costs no per-entry work.
+  (2-4s) rather than tied to a step, and the two-generation roll that costs no per-entry work.
 - **`internal/diagnostics/CLAUDE.md`** - what the engine's components report through (`Diags`: logger, meter and
   tracer and their providers, seams): one per engine, and nil-safe getters; and the seam catalogue - why seams are
   inert in production, why consults are inline, the arm-then-receive rendezvous, and the `Enabled()` guard on every
