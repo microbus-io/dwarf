@@ -1374,9 +1374,16 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
 - **A waiter keeps its lease alive, so each stripe is a FIFO lock with an explicit queue (`cohortStripe`), not a
   `sync.Mutex`.** A parked arrival's step is already `completed` and flagged `advancing`, so a queue that outlasts
   its lease lets the orphan sweep take it back: correct (the waiter's transition is fenced, the step replayed) but
-  the queue's work is done twice. So a waiter wakes every `min(leaseMargin, extension)/2` - derived from both, since
-  the tick must land before the extension it last made runs out - and extends its lease (`extendLease`, on a turn
-  of its own), abandoning as fenced if the extension finds the step taken back.
+  the queue's work is done twice. So a waiter extends its lease (`extendLease`, on a turn of its own) when the lease
+  has a LEAD left - `min(leaseMargin, extension)/2`, 15s - abandoning as fenced if the extension finds the step taken
+  back. The first tick is timed from the lease the claim set (`leaseDeadline`: the local time before the claim was
+  sent, plus the step's budget and the margin, a lower bound since the database stamps it later), and each later one
+  comes `extension - lead` (45s) after the previous tick began.
+  - *Do not tick on a fixed interval from parking.* Every extension is an UPDATE - a dead tuple and its WAL, on
+    the database the queued arrivals are waiting for - and a fast task parks with nearly its whole budget left
+    (2m30s by default), so a fixed 15s tick extends a lease that did not need it. The waiter at place i waits about
+    i arrival transactions, so a fixed tick's extensions grow with the SQUARE of the cohort's width; measured on
+    PostgreSQL 16 with one 150,000-branch `forEach`: 340,758 extensions on the fixed tick, 0 timed from the claim.
   - *Why not the obvious locks.* A `sync.Mutex` has no timed acquire. A one-slot channel has one, but a waiter that
     leaves its send queue to extend rejoins at the BACK, so with a queue longer than one interval the oldest
     waiters are pushed back forever. And the extension cannot run on a helper goroutine while the waiter stays
@@ -1389,11 +1396,11 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
     resetting to `NOW + extension` would cut it short. Its UPDATE matches only a lease that needs extending (so the
     value always changes and MySQL's `RowsAffected` stays honest), and only a zero-row match pays a read to tell
     "taken back" from "already long enough".
-  - *The first tick comes one interval after parking*, so a waiter that parks with less lease than that left - a
-    task that overran its budget - can still lapse before it. The orphan sweep then takes the step back and it is
-    replayed: correct, the waiter's own transition fenced and redone once. Lease recovery can likewise take a
-    `running` step waiting in `failStep`. Ticking on arrival would close it at one more UPDATE on every
-    contended arrival, on the width-64 hot path; declined.
+  - *A waiter that parks with less than the lead left ticks at once* - a task that overran its budget, or a persist
+    that retried. Only those pay an UPDATE on parking; an arrival with time left pays none. A tick that errors keeps
+    the lease it has and tries again a lead later, so a database outage costs each waiter one attempt per lead, never
+    a loop. A tick held longer than the lead (a turn wait) can still let the lease lapse; the orphan sweep then takes
+    the step back and it is replayed - correct, the waiter's own transition fenced and redone once.
   - *Cost.* The uncontended path allocates nothing; a waiter allocates a channel and a timer. A handoff admits no
     barging, but `sync.Mutex` hands off too once a waiter has blocked past 1ms (starvation mode), which millisecond
     transaction holds reach routinely - so the width measurements above, taken with `sync.Mutex`, were very likely

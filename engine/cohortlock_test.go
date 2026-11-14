@@ -68,12 +68,12 @@ func TestCohortStripe_FIFOAcrossTicks(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			var ticks int
-			assert.True(s.lock(2*time.Millisecond, func() bool {
+			assert.True(s.lock(2*time.Millisecond, func() (time.Duration, bool) {
 				ticks++
 				if ticks == 2 {
 					ticked <- struct{}{}
 				}
-				return true
+				return 2 * time.Millisecond, true
 			}))
 			orderMu.Lock()
 			order = append(order, i)
@@ -107,7 +107,7 @@ func TestCohortStripe_Abandon(t *testing.T) {
 		var s cohortStripe
 		assert.True(s.lock(time.Hour, nil))
 		quitter := make(chan bool, 1)
-		go func() { quitter <- s.lock(time.Millisecond, func() bool { return false }) }()
+		go func() { quitter <- s.lock(time.Millisecond, func() (time.Duration, bool) { return 0, false }) }()
 		assert.False(<-quitter, "an abandoning waiter acquired the stripe")
 		follower := make(chan bool, 1)
 		go func() { follower <- s.lock(time.Hour, nil) }()
@@ -125,7 +125,7 @@ func TestCohortStripe_Abandon(t *testing.T) {
 		release := make(chan struct{})
 		quitter := make(chan bool, 1)
 		go func() {
-			quitter <- s.lock(time.Millisecond, func() bool { close(inTick); <-release; return false })
+			quitter <- s.lock(time.Millisecond, func() (time.Duration, bool) { close(inTick); <-release; return 0, false })
 		}()
 		<-inTick
 		s.unlock() // hands the stripe to the quitter, which is out ticking
@@ -151,7 +151,7 @@ func TestCohortStripe_TickPanic(t *testing.T) {
 	recovered := make(chan any, 1)
 	go func() {
 		defer func() { recovered <- recover() }()
-		s.lock(time.Millisecond, func() bool { panic("tick") })
+		s.lock(time.Millisecond, func() (time.Duration, bool) { panic("tick") })
 	}()
 	assert.Equal("tick", <-recovered, "the panic did not propagate")
 	follower := make(chan bool, 1)
@@ -168,10 +168,12 @@ func TestCohortStripe_TickPanic(t *testing.T) {
 }
 
 // TestCohortStripe_QueuedArrivalsKeepTheirLeases pins that a cohort member queued on its stripe keeps its lease alive,
-// so the orphan sweep leaves it to its worker. The test holds the cohort's stripe itself, so both branches complete
-// and queue behind it with their steps `completed` and flagged - the stranded shape. Their leases are lapsed, as a
-// long queue would lapse them; the waiters' ticks (every half leaseMargin, shortened here) must extend them again
-// before the sweep runs, and the sweep must take nothing back. With the extension removed, both are rewound.
+// so the orphan sweep leaves it to its worker, and that it extends nothing while the lease its claim set still has more
+// than the lead left. The test holds the cohort's stripe itself, so both branches complete and queue behind it with
+// their steps `completed` and flagged - the stranded shape. A short flow budget makes the claim's lease end about
+// 3.2 s after the claim (budget plus the shortened margin); the waiters must not extend early, must extend before that
+// lease ends, and the sweep run after it must take nothing back. With the extension removed, the wait for it fails;
+// with a tick on a fixed interval from parking, the early check does.
 func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -199,11 +201,11 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
-	e.leaseMargin = 200 * time.Millisecond // waiters tick every 100ms
+	e.leaseMargin = 200 * time.Millisecond // the lead is 100ms
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
-	fk, err := e.Create(ctx, "queue/g", nil, nil)
+	fk, err := e.Create(ctx, "queue/g", nil, &workflow.FlowOptions{TimeBudget: 3 * time.Second})
 	assert.NoError(err)
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return started.Load() == 2 }), "branches never started")
 	shard, _, flowID, _, err := keys.ParseFlowKey(fk)
@@ -223,13 +225,19 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	waitQueued(t, stripe, 2)
 	var seqBefore int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqBefore))
+	var claimLeftMs float64
+	assert.NoError(db.QueryRowContext(ctx, "SELECT MAX(DATE_DIFF_MILLIS(lease_expires, NOW_UTC())) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&claimLeftMs))
+	claimEnds := time.Now().Add(time.Duration(claimLeftMs) * time.Millisecond)
 
-	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
-	assert.NoError(err)
-	// The waiters' ticks must push both leases back into the future before the sweep looks.
-	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
-		return enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2') AND lease_expires > NOW_UTC()", flowID) == 2
-	}), "the queued waiters never extended their leases")
+	// An extension puts a lease a full minute out, so a lease within 10s is still the claim's.
+	extended := "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2') AND lease_expires > DATE_ADD_MILLIS(NOW_UTC(), 10000)"
+	time.Sleep(time.Second) // ten lead intervals: a tick on a fixed interval from parking would have extended by now
+	if time.Now().Before(claimEnds.Add(-500 * time.Millisecond)) {
+		assert.Equal(0, enginetest.CountRows(t, e, shard, extended, flowID), "a waiter extended while its claim's lease had time left")
+	}
+	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return enginetest.CountRows(t, e, shard, extended, flowID) == 2 }),
+		"the queued waiters never extended their leases")
+	time.Sleep(time.Until(claimEnds.Add(200 * time.Millisecond))) // the claim's lease is over before the sweep looks
 	e.recoverOrphanedFlows(ctx, db, shard, true)
 	var seqAfter int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqAfter))

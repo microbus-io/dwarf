@@ -59,6 +59,10 @@ type dispatch struct {
 	// captures it; every post-execution write to the step is fenced on it. complete re-reads row.flowCancelReason.
 	row     claimRow
 	claimed bool
+	// leaseFrom is the local time just before the claim was sent. The claim sets the lease on the database clock to
+	// its own NOW plus the step's budget and the lease margin, so leaseFrom plus the same is a lower bound on when
+	// the lease runs out (leaseDeadline). Nothing between the claim and the transition shortens a lease.
+	leaseFrom time.Time
 
 	// Set by load: the step's graph, its resolved input, and the carrier the task runs on.
 	graph         *workflow.Graph
@@ -293,6 +297,7 @@ func (e *Engine) claim(ctx context.Context, d *dispatch) (done bool, err error) 
 	// Lease = the step's own time_budget_ms (added in the claim UPDATE below) + a fixed margin, so it always
 	// outlasts the ExecuteTask deadline. Only the margin is bound; the per-step budget comes from the column.
 	leaseMarginMs := int(e.leaseMargin.Milliseconds())
+	d.leaseFrom = time.Now()
 
 	// Claim the step and read its data in one round-trip where the driver supports RETURNING. The flow row's
 	// columns come back too on Postgres, joined in: one round trip instead of two on every step. The other
@@ -1465,7 +1470,7 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 		// out of. Yielding restores the property the stripe is for.
 		held := false
 		yieldTurn(ctx, &d.pass, func() {
-			held = e.lockCohortStripe(ctx, stripe, d.db, d.shard, d.stepID, d.row.leaseSeq)
+			held = e.lockCohortStripe(ctx, stripe, d)
 		})
 		if !held {
 			return nil // the step was taken back while it waited; its new owner replays it

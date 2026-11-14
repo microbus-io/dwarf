@@ -135,7 +135,7 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 		stripe := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
 		held := false
 		yieldHeldTurn(ctx, func() {
-			held = e.lockCohortStripe(ctx, stripe, db, shardNum, stepID, leaseSeq)
+			held = e.lockCohortStripe(ctx, stripe, d)
 		})
 		if !held {
 			return true, nil
