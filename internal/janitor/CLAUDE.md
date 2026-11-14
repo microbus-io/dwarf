@@ -221,6 +221,14 @@ move - its root locks and the rechecks under them, the directory rows and the ar
 
 A batch of trees leaves the live tables in one transaction: moved into a day's archive tables, or deleted.
 
+- **Keep a statement under about 5,000 rows a table on SQL Server.** Past that, SQL Server may escalate the
+  statement's row locks to a lock on the whole table, and on `dwarf_steps` or `dwarf_flows` that holds every
+  dispatch until the transaction ends. The batch (4,000 rows), a chunk and Purge's marks (2,000 roots) stay under it.
+  **The exception, unverified:** a tree larger than a batch and under the staging threshold moves alone in one
+  transaction, up to 262,144 rows. Whether that escalates is not measured: move a tree of ~100,000 rows on SQL Server
+  under dispatch load and read `sys.dm_tran_locks` for an `OBJECT` lock on the live tables. If it does, disable
+  escalation on them (`LOCK_ESCALATION = DISABLE`, in the migration) or stage every tree over a batch there. Do not
+  raise the batch past ~5,000 rows without that check.
 - **The root lock is two-sided.** Every transaction that removes a tree, live or archived, locks its root first with
   the strength a `DELETE` takes (`lockRoots`: `FOR UPDATE`, or the `touch` flip), skipping a held root on PostgreSQL
   and MySQL. The engine's Fork locks its source root `FOR NO KEY UPDATE`, which conflicts with it, so a Fork and a
