@@ -152,12 +152,12 @@ func TestArchiver_EnsureMakesTheDayLikeTheLiveTables(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM "+migrations.StepsTable(today)+" WHERE step_id=4242").Scan(&flowID))
 	assert.Equal(17, flowID)
 
-	// Every live flows index has its archive counterpart, so a flow lookup is planned alike on either side - but one on
-	// archive_attempt_at, a column only the live table has: the large-tree archiving's index of the roots it copies.
+	// The live lookup indexes have archive counterparts. Attempts and the close-ordered roots awaiting archiving
+	// belong only to the live tables; the archive lists roots in archive order instead.
 	if indexes := indexesOf(t, db, "dwarf_flows"); indexes != nil {
 		archived := indexesOf(t, db, migrations.FlowsTable(today))
 		for _, name := range indexes {
-			if name == "idx_dwarf_flows_attempt" {
+			if name == "idx_dwarf_flows_attempt" || name == "idx_dwarf_flows_closed_roots" {
 				continue
 			}
 			want := strings.Replace(name, "idx_dwarf_flows_", "idx_"+migrations.FlowsTable(today)+"_", 1)

@@ -1012,7 +1012,7 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	r := stageRig(t)
 	big := seedWideTree(t, r.db, 3, 30, 3) // 124 rows
 	small := seedTrees(t, r.db, 1, callShape)[0]
-	cut, via, err := cutClosed(ctx, r.db, r.seams, []int{big, small}, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, via, err := cutClosed(ctx, r.db, r.seams, closedCandidates(t, r, big, small), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal([]int{big}, cut, "over the threshold: alone")
 	assert.Equal(routeStart, via)
@@ -1021,11 +1021,11 @@ func TestStage_SizingCountsOnlyWhatItDecides(t *testing.T) {
 	fault := diagnostics.Join(diagnostics.FaultReapSizeErr, strconv.Itoa(big))
 	r.seams.Inject(fault)
 	defer r.seams.Withdraw(fault)
-	cut, via, err = cutClosed(ctx, r.db, r.seams, []int{big, small}, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, via, err = cutClosed(ctx, r.db, r.seams, closedCandidates(t, r, big, small), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err, "a root with an attempt is not sized")
 	assert.Equal([]int{small}, cut)
 	assert.Equal(routeMove, via)
-	cut, via, err = cutClosed(ctx, r.db, r.seams, []int{big}, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, via, err = cutClosed(ctx, r.db, r.seams, closedCandidates(t, r, big), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Zero(len(cut), "only a root with an attempt: passed")
 	assert.Equal(routePass, via)

@@ -332,7 +332,7 @@ func TestShare_EachFastArchivingJobReportsItsLag(t *testing.T) {
 }
 
 // TestShare_TheScansWalkTheirIndexes pins the share's SQL on PostgreSQL, in a populated table with statistics: with a
-// share and a residue class, the closed scan walks idx_dwarf_flows_status in order on one process, and the stamped scan
+// share and a residue class, the closed scan walks idx_dwarf_flows_closed_roots in order on one process, and the stamped scan
 // walks idx_dwarf_flows_delete_after in order. Written as a range, the share is estimated at 0.5% of the rows: the
 // closed scan then starts parallel workers, and the stamped scan reads and sorts every stamped root.
 func TestShare_TheScansWalkTheirIndexes(t *testing.T) {
@@ -367,8 +367,8 @@ func TestShare_TheScansWalkTheirIndexes(t *testing.T) {
 		return b.String()
 	}
 	where, args := closedResidency(2, 0, true, share{2, 2}, time.Minute, stealGrace)
-	got := plan(closedScanSQL(time.Minute, where, args, defaultBatchRoots))
-	assert.Contains(got, "Index Scan using idx_dwarf_flows_status", got)
+	got := plan(closedScanSQL(r.db.DriverName(), time.Minute, where, args, defaultBatchRoots))
+	assert.Contains(got, "Index Scan using idx_dwarf_flows_closed_roots", got)
 	assert.False(strings.Contains(got, "Gather") || strings.Contains(got, "Bitmap"), "one process, in index order: %s", got)
 	where, args = stampedResidency(2, 0, true, share{2, 2}, stealGrace)
 	got = plan(stampedScanSQL(r.db.DriverName(), where, args, defaultBatchRoots))

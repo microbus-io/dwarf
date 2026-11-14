@@ -159,6 +159,10 @@ move - its root locks and the rechecks under them, the directory rows and the ar
   tree too large for a batch, which the job stamps for deletion - due at once - and the deletion of stamped trees
   removes in chunks. Passing them counts as progress. The stamp locks the root as a move does, so a root a Fork holds
   is skipped on PostgreSQL and MySQL rather than waited for (`TestFast_AHeldRootIsNotWaitedForWhenStamped`).
+- **The closed scan carries each root's attempt flag** (`dueRoot.attempted`), so `cutClosed` passes attempted roots
+  without another query. It is only a hint: an attempt started since the scan is rechecked under the move's lock,
+  and a retention of zero ignores it (`TestClosed_AScannedAttemptIsAHint`). Fast and sweep archiving execute their
+  routes through `removeClosed`, keeping their own rules for whether passing a cut made progress.
 - **The residue class is read every round, and a change starts the walk over.** The shard reports every reading that
   restricts nothing alike (`internal/database/CLAUDE.md`), so a lone replica's dispatcher count arriving, or a class
   lapsing at its expiry, is no change here (`TestFast_AReadingThatRestrictsNothingKeepsThePosition`). When a peer leaves, the roots of its
@@ -175,7 +179,8 @@ move - its root locks and the rechecks under them, the directory rows and the ar
   while its janitor is active, and unregistered when it is removed or the janitor stops. The engine reads nothing of
   it.
 - **A probe reads the oldest due closed root of the job's share** - one `LIMIT 1` per terminal status on
-  `idx_dwarf_flows_status`, restricted to the share alone: every replica's class, behind the position or ahead of it. It
+  `idx_dwarf_flows_closed_roots` on PostgreSQL (`idx_dwarf_flows_status` elsewhere), restricted to the share alone:
+  every replica's class, behind the position or ahead of it. It
   runs at most once a second while the job is busy, and in every round whose scan finds nothing, which the idle wait
   paces. A probe's scan consults no fault, or it would consume one a test armed for a round's scan.
 - **The lag is the probe's**: how long archiving is behind - how long past the grace the oldest due root has waited, a
@@ -185,7 +190,7 @@ move - its root locks and the rechecks under them, the directory rows and the ar
   whole stall when the job is blocked. Pinned by
   `TestFast_TheLagIsTheShardsOldestDueRootPastTheGrace`.
 - **The failure episode** (`dwarf_archive_failing_seconds`) begins at an archive failure - a day not readable or not
-  whole, a failed scan, attempt read, sizing or move - and ends at a later move that archives something, or at a probe
+  whole, a failed scan, sizing or move - and ends at a later move that archives something, or at a probe
   that finds no due root of its share without an archive attempt, or finds the oldest came due more than `endMargin` (1
   s) after the last failure: everything due then has left the live tables. A staged tree in progress is not a failure,
   so it holds no episode open. The probe's ages are the database's and the failure's time is this process's, compared as
@@ -496,6 +501,10 @@ transaction, and then never finishes: the delete wall.
   (`plan_cache_mode`): every chunk statement is bound and prepared once per connection, and PostgreSQL may move a
   prepared statement to a generic plan after five runs, planned without the values and not replanned when the
   transaction turns bitmap scans off.
+- **The descendant walks need the tree's flow-id order**: PostgreSQL's live and archive root indexes are keyed on
+  `(root_flow_id, flow_id)`. A root-only key makes a 256-row page read and sort the whole tree when statistics are
+  missing, even with bitmap scans disabled. The other dialects' root indexes already carry the primary key in order.
+  `TestChunk_DescendantReadsWalkTheTreeIndex` covers both directions, live and archived, with and without statistics.
 - **The sizing reads are bounded the same way** (`cutTrees` runs every caller's sizing through `sizingReads`, a
   transaction of its own on PostgreSQL with `boundReads`' settings). Left to the planner, a flow's step read in the
   sizing statement is a bitmap scan of the flow's whole index whatever its limit - without statistics, and with

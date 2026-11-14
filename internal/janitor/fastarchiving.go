@@ -248,24 +248,14 @@ func (f *FastArchiving) batch(ctx context.Context, h handle) bool {
 	}
 
 	start := time.Now()
-	cut, via, err := cutClosed(ctx, h, seams, rootIDs(candidates), archiving, f.batchRows, f.batchBytes, f.stageRows, f.stageBytes)
+	cut, via, err := cutClosed(ctx, h, seams, candidates, archiving, f.batchRows, f.batchBytes, f.stageRows, f.stageBytes)
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
 		last = slices.IndexFunc(candidates, func(c dueRoot) bool { return c.flowID == cut[len(cut)-1] })
 	}
 	var removed removal
 	if err == nil {
-		switch via {
-		case routeMove:
-			due, dueArgs := closedDueSQL(f.grace)
-			removed, err = move(ctx, h, seams, cut, due, dueArgs, d)
-		case routeStart:
-			due, dueArgs := closedDueSQL(f.grace)
-			_, _, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
-		case routeStamp:
-			due, dueArgs := closedDueSQL(f.grace)
-			_, err = stampClosed(ctx, h, cut[0], due, dueArgs)
-		}
+		removed, _, err = removeClosed(ctx, h, seams, cut, via, f.grace, d)
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
 	switch {

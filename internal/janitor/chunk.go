@@ -35,12 +35,14 @@ import (
 // treeChunk is how many of a tree's descendant flows one read of them returns.
 const treeChunk = 256
 
+// descendantsAfterSQL is the staged copy's ordered read of a tree's next descendants.
+const descendantsAfterSQL = "SELECT flow_id, " + flowBytesSQL + ", CASE WHEN status IN (" + database.TerminalStatusesSQL + ") THEN 0 ELSE 1 END" +
+	" FROM dwarf_flows WHERE root_flow_id=? AND flow_id<>? AND flow_id>? ORDER BY flow_id LIMIT_OFFSET(?, 0)"
+
 // descendantsAfter returns up to treeChunk of root's live descendants after the flow after, in flow_id order, with their
 // payload bytes, and whether any of them is not closed.
 func descendantsAfter(ctx context.Context, tx *sequel.Tx, root, after int) (children, bytes []int, open bool, err error) {
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL+", CASE WHEN status IN ("+database.TerminalStatusesSQL+") THEN 0 ELSE 1 END"+
-		" FROM dwarf_flows WHERE root_flow_id=? AND flow_id<>? AND flow_id>? ORDER BY flow_id LIMIT_OFFSET(?, 0)",
-		root, root, after, treeChunk)
+	rows, err := tx.QueryContext(ctx, descendantsAfterSQL, root, root, after, treeChunk)
 	if err != nil {
 		return nil, nil, false, errors.Trace(err)
 	}
@@ -378,12 +380,8 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 // descendantsBelow returns up to treeChunk of root's live descendants below the flow below - all of them, when below is
 // 0 - newest first, with their payload bytes.
 func descendantsBelow(ctx context.Context, tx *sequel.Tx, sfx string, root, below int) (children, bytes []int, err error) {
-	cond, args := "", []any{root, root}
-	if below > 0 {
-		cond, args = " AND flow_id<?", append(args, below)
-	}
-	rows, err := tx.QueryContext(ctx, "SELECT flow_id, "+flowBytesSQL+" FROM dwarf_flows"+sfx+" WHERE root_flow_id=?"+
-		" AND flow_id<>?"+cond+" ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", append(args, treeChunk)...)
+	stmt, args := descendantsBelowSQL(sfx, root, below)
+	rows, err := tx.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
@@ -396,6 +394,16 @@ func descendantsBelow(ctx context.Context, tx *sequel.Tx, sfx string, root, belo
 		children, bytes = append(children, id), append(bytes, b)
 	}
 	return children, bytes, errors.Trace(rows.Err())
+}
+
+// descendantsBelowSQL is a deletion chunk's ordered read, on the live tables or an archive day.
+func descendantsBelowSQL(sfx string, root, below int) (string, []any) {
+	cond, args := "", []any{root, root}
+	if below > 0 {
+		cond, args = " AND flow_id<?", append(args, below)
+	}
+	return "SELECT flow_id, " + flowBytesSQL + " FROM dwarf_flows" + sfx + " WHERE root_flow_id=?" +
+		" AND flow_id<>?" + cond + " ORDER BY flow_id DESC LIMIT_OFFSET(?, 0)", append(args, treeChunk)
 }
 
 // deleteStepsFrom deletes live steps of flow after the step after, in step_id order, up to budget - at least one,

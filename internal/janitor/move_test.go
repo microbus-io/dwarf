@@ -245,7 +245,7 @@ func TestMove_TheScanMergesTheStatusesInCloseOrder(t *testing.T) {
 	assert.Equal([]int{c, a}, rootIDs(roots), "a short fetch is the first of the merged order")
 
 	r.settings.batchRows = 4 // two trees of a flow and a step each
-	cut, via, err := cutClosed(ctx, db, r.seams, rootIDs(roots), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, via, err := cutClosed(ctx, db, r.seams, roots, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal([]int{c, a}, cut, "the trim keeps the traversal order")
 	assert.Equal(routeMove, via)
@@ -755,7 +755,7 @@ func TestMove_TheLockRechecksEveryRoot(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 4, callShape)
 	ascendingCloses(t, r, roots)
-	cut, via, err := cutClosed(ctx, db, r.seams, roots, true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, via, err := cutClosed(ctx, db, r.seams, closedCandidates(t, r, roots...), true, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.Must(assert.NoError(err))
 	assert.Equal(roots, cut, "the batch takes all four")
 	assert.Equal(routeMove, via)

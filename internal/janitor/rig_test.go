@@ -576,3 +576,25 @@ func stampTree(t *testing.T, db *sequel.DB, root int) {
 		t.Fatal(err)
 	}
 }
+
+// closedCandidates reads the named closed roots in the supplied order for a test that sizes a cut directly.
+func closedCandidates(t *testing.T, r *rig, ids ...int) []dueRoot {
+	t.Helper()
+	ph, args := database.IDList(ids)
+	found, _, err := scanClosed(t.Context(), r.db, r.seams, 0, " AND flow_id IN ("+ph+")", args, len(ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[int]dueRoot, len(found))
+	for _, root := range found {
+		byID[root.flowID] = root
+	}
+	out := make([]dueRoot, len(ids))
+	for i, id := range ids {
+		var ok bool
+		if out[i], ok = byID[id]; !ok {
+			t.Fatalf("closed root %d missing from the scan", id)
+		}
+	}
+	return out
+}

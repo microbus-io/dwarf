@@ -126,7 +126,7 @@ func TestWalk_TreeEnvelope(t *testing.T) {
 				assert.Must(assert.NoError(refreshDay(t.Context(), r.archive, true, day)))
 			}
 			start := time.Now()
-			cut, _, err := cutClosed(t.Context(), db, r.seams, []int{root}, retention > 0, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+			cut, _, err := cutClosed(t.Context(), db, r.seams, closedCandidates(t, r, root), retention > 0, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 			assert.Must(assert.NoError(err))
 			sized := time.Since(start)
 			start = time.Now()
@@ -189,11 +189,11 @@ func TestWalk_EveryFlowAndStepIsARow(t *testing.T) {
 	db := r.db
 	roots := seedTrees(t, db, 2, treeShape{rootSteps: 2, childSteps: 0})
 	r.settings.batchRows = 7
-	cut, _, err := cutClosed(ctx, db, r.seams, roots, false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, _, err := cutClosed(ctx, db, r.seams, closedCandidates(t, r, roots...), false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal(roots[:1], cut, "four rows a tree: the root, its two steps and the child of none")
 	r.settings.batchRows = 8
-	cut, _, err = cutClosed(ctx, db, r.seams, roots, false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
+	cut, _, err = cutClosed(ctx, db, r.seams, closedCandidates(t, r, roots...), false, r.settings.batchRows, r.settings.batchBytes, r.settings.stageRows, r.settings.stageBytes)
 	assert.NoError(err)
 	assert.Equal(roots, cut)
 

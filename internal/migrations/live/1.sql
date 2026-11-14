@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS dwarf_flows (
 CREATE INDEX idx_dwarf_flows_status ON dwarf_flows (status, updated_at);
 
 -- DRIVER: pgx
+CREATE INDEX idx_dwarf_flows_closed_roots ON dwarf_flows (status, updated_at, flow_id) WHERE surgraph_flow_id=0 AND delete_after_ms=0;
+
+-- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_workflow_url ON dwarf_flows (workflow_url);
 
 -- DRIVER: pgx
@@ -117,7 +120,7 @@ CREATE INDEX idx_dwarf_flows_surgraph ON dwarf_flows (surgraph_flow_id) WHERE su
 CREATE INDEX idx_dwarf_flows_surgraph_step ON dwarf_flows (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id);
+CREATE INDEX idx_dwarf_flows_root ON dwarf_flows (root_flow_id, flow_id);
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_flows_delete_after ON dwarf_flows (flow_id) WHERE delete_after_ms > 0;

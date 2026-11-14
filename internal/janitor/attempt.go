@@ -46,27 +46,6 @@ func AttemptedSQL(driver string) string {
 	return "archive_attempt_at>'2000-01-01 00:00:00'"
 }
 
-// attemptsAmong returns the roots among roots that have an archive attempt: one primary-key read of the roots.
-func attemptsAmong(ctx context.Context, q sequel.Executor, roots []int) (map[int]bool, error) {
-	none, arg := NoAttemptSQL(q.DriverName())
-	ph, args := database.IDList(roots)
-	rows, err := q.QueryContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE flow_id IN ("+ph+")"+
-		" AND archive_attempt_at>"+none, append(args, arg)...)
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	defer rows.Close()
-	attempted := map[int]bool{}
-	for rows.Next() {
-		var id int
-		if err := rows.Scan(&id); err != nil {
-			return nil, errors.Trace(err)
-		}
-		attempted[id] = true
-	}
-	return attempted, errors.Trace(rows.Err())
-}
-
 // errNotToday rolls back an attempt whose new time fell outside the filing day: past midnight, which the quiet margin
 // keeps rare.
 var errNotToday = errors.New("the attempt's time is not in today's archive day")

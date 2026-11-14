@@ -37,8 +37,8 @@ day's tables and nothing else: a live table in it would be changed once per day.
 (`catalog`), returning the days with both tables and those with one; maintenance alone calls it - `ensure`'s check,
 `MigrateDays`, the drops - and never a read path (below). The table is sequel's own,
 its schema differs by dialect, and a sequel release may change it. Two consequences:
-- **A dropped day keeps its migration records**, one row per archive migration per day (about 730 a year with the two
-  archive migrations), so it can never be made again: its records say its migrations so far are done, so its migration
+- **A dropped day keeps its migration records**, one row per archive migration per day, so it can never be made again:
+  its records say its migrations so far are done, so its migration
   makes nothing; `ensure` then looks for both tables in the catalog and fails naming the day, rather than report a day
   that is not there (`EnsureToday`, and so Startup, for today). The same holds for tables dropped by hand, or a restore
   that left them out but kept `sequel_migrations`: the fix is to delete the day's rows from `sequel_migrations`, which

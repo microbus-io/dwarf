@@ -116,7 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph ON dwarf_flows_archi
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_surgraph_step ON dwarf_flows_archive (surgraph_step_id) WHERE surgraph_step_id > 0;
 
 -- DRIVER: pgx
-CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id);
+CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_root ON dwarf_flows_archive (root_flow_id, flow_id);
 
 -- DRIVER: pgx
 CREATE INDEX IF NOT EXISTS idx_dwarf_flows_archive_archived ON dwarf_flows_archive (archived_at);

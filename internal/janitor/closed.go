@@ -43,6 +43,7 @@ type dueRoot struct {
 	updatedAt   time.Time
 	flowID      int
 	createdHour int
+	attempted   bool // at the closed scan; eligibility is rechecked under the root lock
 }
 
 // rootIDs returns the flow ids of roots, in their order.
@@ -80,16 +81,16 @@ func closedResidency(count, ordinal int, ok bool, s share, grace, steal time.Dur
 // fragment and its arguments; empty for none), in close order - (updated_at, flow_id) - and returns the age of the
 // oldest it read, 0 for none. It returns fewer than limit only when it saw every due root.
 //
-// One branch per terminal status, each a range of idx_dwarf_flows_status (status, updated_at) that stops at the limit:
+// One branch per terminal status, each a range in status and close order that stops at the limit:
 // one scan over all four statuses has no index order, so it would read and sort every due root on every batch,
 // O(backlog) per batch. The status is inlined, never bound: a bound status defeats the filtered indexes and the
 // estimates. Each root's age comes with it, from the row the scan reads anyway: the first of each branch is that
 // status's oldest due root. flow_id breaks ties of updated_at, so the order is total: the index carries the primary key
-// after updated_at on MySQL, SQL Server and SQLite, and PostgreSQL sorts only each tie group (an incremental sort). The
-// branches are merged here: their first limit are exactly the order's first, since each branch holds its own first
+// after updated_at on MySQL, SQL Server and SQLite; PostgreSQL's closed-roots index names it and excludes descendants.
+// The branches are merged here: their first limit are exactly the order's first, since each branch holds its own first
 // limit.
 func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster, grace time.Duration, where string, whereArgs []any, limit int) (roots []dueRoot, oldest time.Duration, err error) {
-	stmt, args := closedScanSQL(grace, where, whereArgs, limit)
+	stmt, args := closedScanSQL(q.DriverName(), grace, where, whereArgs, limit)
 	rows, err := q.QueryContext(ctx, stmt, args...)
 	// diagnostics.FaultReapSelectErr fails the scan, so a test proves a round logs and goes on without removing anything.
 	if err == nil && seams.IsFault(diagnostics.FaultReapSelectErr) {
@@ -104,9 +105,11 @@ func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster
 		var r dueRoot
 		// float64: DATE_DIFF_MILLIS is fractional on SQLite, where an int64 scan fails.
 		var ageMs float64
-		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs, &r.createdHour); err != nil {
+		var attempted int
+		if err := rows.Scan(&r.flowID, &r.updatedAt, &ageMs, &r.createdHour, &attempted); err != nil {
 			return nil, 0, errors.Trace(err)
 		}
+		r.attempted = attempted != 0
 		// The position is bound back as this instant (restriction): a MySQL driver with a DSN loc other than UTC places
 		// the stored wall clock in that location, and binding it as found would seek hours off.
 		r.updatedAt = database.StoredTime(r.updatedAt)
@@ -126,12 +129,13 @@ func scanClosed(ctx context.Context, q sequel.Executor, seams *seamster.Seamster
 }
 
 // closedScanSQL is scanClosed's statement.
-func closedScanSQL(grace time.Duration, where string, whereArgs []any, limit int) (stmt string, args []any) {
+func closedScanSQL(driver string, grace time.Duration, where string, whereArgs []any, limit int) (stmt string, args []any) {
 	for i, status := range database.TerminalStatuses {
 		if i > 0 {
 			stmt += " UNION ALL "
 		}
-		stmt += "SELECT flow_id, updated_at, age_ms, created_hour FROM (SELECT flow_id, updated_at, created_hour," +
+		stmt += "SELECT flow_id, updated_at, age_ms, created_hour, attempted FROM (SELECT flow_id, updated_at, created_hour," +
+			" CASE WHEN " + AttemptedSQL(driver) + " THEN 1 ELSE 0 END AS attempted," +
 			" DATE_DIFF_MILLIS(NOW_UTC(), updated_at) AS age_ms" +
 			" FROM dwarf_flows WHERE status='" + status + "'" +
 			" AND updated_at<=DATE_ADD_MILLIS(NOW_UTC(), ?) AND surgraph_flow_id=0 AND delete_after_ms=0" +
@@ -148,17 +152,15 @@ func closedScanSQL(grace time.Duration, where string, whereArgs []any, limit int
 // rows, bytes and flows - and always the first: the first sized up to what decides its path - over a batch, and over
 // the staging threshold when staging - and each later one up to what is left of the batch. Sizing is a batching hint;
 // the move locks only the roots it takes. A cut empty of roots means every candidate had an attempt.
-func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidates []int, archiving bool, batchRows, batchBytes, stageRows, stageBytes int) (cut []int, via route, err error) {
-	eligible := candidates
-	if archiving {
-		attempted, err := attemptsAmong(ctx, h, candidates)
-		if err != nil {
-			return nil, routeMove, err
+func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidates []dueRoot, archiving bool, batchRows, batchBytes, stageRows, stageBytes int) (cut []int, via route, err error) {
+	eligible := make([]int, 0, len(candidates))
+	for _, root := range candidates {
+		if !archiving || !root.attempted {
+			eligible = append(eligible, root.flowID)
 		}
-		eligible = slices.DeleteFunc(slices.Clone(candidates), func(root int) bool { return attempted[root] })
-		if len(eligible) == 0 {
-			return nil, routePass, nil
-		}
+	}
+	if len(eligible) == 0 {
+		return nil, routePass, nil
 	}
 	batch := capOf(batchRows, batchBytes)
 	cutLimit := batch
@@ -183,6 +185,22 @@ func cutClosed(ctx context.Context, h handle, seams *seamster.Seamster, candidat
 		return cut, routeStamp, nil
 	}
 	return cut, routeMove, nil
+}
+
+// removeClosed executes the cut's route, rechecking eligibility under the root lock. changed says whether a tree
+// moved, was stamped or holds an attempt; each job decides for itself whether passing the cut made progress.
+func removeClosed(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, via route, grace time.Duration, d *filingDay) (removed removal, changed bool, err error) {
+	due, args := closedDueSQL(grace)
+	switch via {
+	case routeMove:
+		removed, err = move(ctx, h, seams, roots, due, args, d)
+		changed = removed.flows > 0
+	case routeStart:
+		_, changed, err = claimAttempt(ctx, h, roots[0], due, args, d, time.Time{})
+	case routeStamp:
+		changed, err = stampClosed(ctx, h, roots[0], due, args)
+	}
+	return removed, changed, err
 }
 
 // stampClosed marks a closed root for deletion, due at once, if it still matches due (and its arguments) - a closed

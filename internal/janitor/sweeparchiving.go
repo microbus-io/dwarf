@@ -248,7 +248,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 		return idle
 	}
 
-	cut, via, err := cutClosed(ctx, h, seams, rootIDs(candidates), archiving, s.batchRows, s.batchBytes, s.stageRows, s.stageBytes)
+	cut, via, err := cutClosed(ctx, h, seams, candidates, archiving, s.batchRows, s.batchBytes, s.stageRows, s.stageBytes)
 	last := len(candidates) - 1 // a cut that could not be read passes every candidate
 	if len(cut) > 0 {
 		last = slices.IndexFunc(candidates, func(c dueRoot) bool { return c.flowID == cut[len(cut)-1] })
@@ -256,16 +256,7 @@ func (s *SweepArchiving) batch(ctx context.Context, h handle) outcome {
 	var removed removal
 	did := false // a tree moved, deleted, stamped or given its attempt
 	if err == nil {
-		due, dueArgs := closedDueSQL(s.grace)
-		switch via {
-		case routeMove:
-			removed, err = move(ctx, h, seams, cut, due, dueArgs, d)
-			did = removed.flows > 0
-		case routeStart:
-			_, did, err = claimAttempt(ctx, h, cut[0], due, dueArgs, d, time.Time{})
-		case routeStamp:
-			did, err = stampClosed(ctx, h, cut[0], due, dueArgs)
-		}
+		removed, did, err = removeClosed(ctx, h, seams, cut, via, s.grace, d)
 	}
 	// Counted before the stop check: a batch that committed as the job was stopped still counts.
 	switch {
