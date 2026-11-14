@@ -42,10 +42,36 @@ there: after a process was killed and before its replacement starts, whose start
 | One durable advancement per obligation | `completed step still advancing on an open flow`, `successor inserted twice by one transition`, `cohort converged more than once` | `lostcommit_test.go` |
 | Cohort accounting | `cohort counter overshoot`, `cohort converged before it resolved, or with a loss` | `cohortbatch_test.go`, `cohortlock_test.go` |
 | A park is settled by the child that owns it | `waiting caller without an open child owning its park`, `open child whose caller does not hold its park`, `step neither waiting nor terminal still naming a park owner` | `subgraphspawn_test.go`, `ownershipfence_test.go` |
-| A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go` |
+| A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go`, `histories_test.go` |
 | A closed outcome stays reachable while its tree moves to the archive | `AssertOutcomesKept`'s removed flows, each read again by key | `archivereach_test.go` |
 | A process's death strands no obligation: a replacement finishes each with its own recovery, waiting steps keep their deadlines, an interrupted step waits for Resume | the checker and `CaptureOutcomesIn` at the kill, read by the test's own connection before the replacement starts | `processkill_test.go` |
+| An operation leaves what the reference model says, wherever it lands: which executions run, what each contributes, the outcome and its reason | the model, after every event of a generated history | `histories_test.go` |
 | Generation ownership: a write by a worker that lost its lease changes nothing | not checkable at rest - a fenced write leaves no trace, so a snapshot cannot tell it from one never attempted | `leasefence_test.go`, `terminatefence_test.go`, `interruptfence_test.go`, `ownershipfence_test.go` |
+
+## Generated histories
+
+`engine/histories_test.go` draws short histories from seeds and drives an engine through each in lockstep with a
+reference model (`engine/historymodel_test.go`): a task's next execution and what it does (complete, sleep, retry,
+interrupt, fail), an operation landing at a point of that execution, or an operation on the flow at rest. The model
+predicts where the flow stands after every event; at the end the outcome, the step rows and the executions must be
+its, no closed outcome may move, through later operations and every recovery detector, and the checker must find
+nothing.
+
+- **Every execution waits at the task handler's door until the driver admits it.** That makes the order the engine
+  runs things in the history's order rather than the scheduler's, so a seed replays the same schedule, and an
+  execution the model did not predict is caught at the door rather than inferred from timing. An operation lands at
+  its point by a hold: inside the task, at `CheckpointBeforeTransitionTx`, at `CheckpointBeforeRetryRewind`; at rest
+  the flow is interrupted, closed, or its next step asleep (a sleep long enough for the operation to land first).
+- **The model is a set of rules over the shapes it knows, never a second engine.** Its header states the accepted
+  contribution and cancellation policies. A disagreement is an engine defect or a policy the model failed to state;
+  settle which before changing either. Extend it a rule at a time.
+- **Record the closed outcome where a Terminate closed it, under the held execution**, as a lost-reply test records
+  its baseline before the retry. Measured: with the retry rewind's `status='running'` guard removed, every seed
+  passed while the record was taken after the held dispatch returned, because the rewind had already rewritten the
+  terminated step by then.
+- A failure prints the history as JSON; `DWARF_HISTORY` replays it on whichever database `SEQUEL_TESTING_DSN`
+  selects. The test logs the situations its histories reached - each event kind in the state it landed on, each way a
+  flow closed - because a seed count says nothing about breadth.
 
 ## The mutation inventory
 
