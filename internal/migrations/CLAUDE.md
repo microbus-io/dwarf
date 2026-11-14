@@ -11,24 +11,46 @@ records progress per **sequence name** in `sequel_migrations(seq_name, seq_num, 
 runs only the files numbered **above the highest completed `seq_num`** for that name. Every rule below follows
 from that watermark.
 
+**Before v1.0.0 only the first rule below is upheld.** Through v0.x shipped files are edited in place and any
+release may change the schema, because there are no production databases to protect: an upgrade is a maintenance
+window, and a database made by an earlier release does not pick up an edit. The other rules are written down now so
+that a change which breaks one is recognized as breaking every existing database. When a change does, tell the user,
+and give the statements an existing database needs by hand in the release notes, as
+[Upgrading](https://docs.dwarf.run/operating/upgrading/)'s "Upgrading From v0.14.0" does.
+
 - **`sequenceName` (`"github.com/microbus-io/dwarf"`) never changes, and is never derived from the module
   path.** A new name reads a watermark of 0 and replays `1.sql` against a database whose tables already exist -
   at best a failed open, at worst a half-applied re-run. That includes a future `/v2` module path: the literal
   stays as it is.
-- **A file that has shipped in a tagged release is immutable from v1.0 on.** An edit never runs on a database
-  already past that number, so editing it forks the schema - new installs get the edit, upgraded ones do not,
-  and nothing reports the difference. A change is a new `N+1.sql`. (Through v0.x, shipped files have been
-  edited in place by policy - there were no production databases to protect. That ends at v1.0.)
+- **A file that has shipped in a tagged release is immutable.** An edit never runs on a database already past
+  that number, so editing it forks the schema - new installs get the edit, upgraded ones do not, and nothing
+  reports the difference. A change is a new `N+1.sql`. A file has shipped when the latest tag carries it:
+  `git ls-tree --name-only $(git describe --tags --abbrev=0) internal/migrations/live/ internal/migrations/archive/`.
 - **Numbers only append.** The watermark is a `MAX`, not a set, so a file numbered at or below an applied number
   (a skipped number filled in later, a `2a.sql` slotted between) is silently never run on an existing database.
 - **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
   [Upgrading](https://docs.dwarf.run/operating/upgrading/)). A PATCH must run side by side with the earlier patches of its minor version during a
   rolling deploy, so it carries no migration - and no change to what replicas write to or expect from the
   shared tables either, such as a new meaning for an existing column or status. A MINOR may change the
-  database and may need a maintenance window; the release notes say whether it does.
+  database and may need a maintenance window; the release notes say whether it does. Replicas of two versions
+  share a database only where the policy says so - patches of one minor, and a MINOR whose release notes say it
+  can roll; no other mix needs to work. Before a PATCH is tagged,
+  `git diff <its minor's .0 tag> -- internal/migrations` shows nothing.
 - **One `N.sql` per change, covering every dialect.** The file is split on `;\n`; a statement carrying a
   `-- DRIVER: <names>` line runs only on those drivers, an untagged one runs on all. A dialect's statement
   missing from a shipped file cannot be added later by editing that file; it needs the next number.
+- **A new file runs on populated tables that a released version made.** A column it adds carries a default every
+  existing row can take, and that the engine reads correctly on a row written before the upgrade. Check it by
+  opening, under the new code, a database the previous tag made and filled - running, interrupted and archived
+  flows - and driving those flows on: every fixture makes a fresh database, so the suites cannot see this.
+- **A new file can run again from its first statement.** `sequel` runs each statement on its own, outside any
+  transaction, and marks the file complete only after the last: a statement that fails leaves the earlier ones
+  applied, and the next open runs the file again from the top. Guard each statement (`IF NOT EXISTS`; a
+  `sys.indexes` or `COL_LENGTH` check on SQL Server), and where a dialect has no guard (MySQL 8 has no
+  `IF NOT EXISTS` for `ADD COLUMN` or `CREATE INDEX`), make it that dialect's only statement in the file. A runner
+  that dies between that statement and the mark still leaves a hand repair. The shipped `live/` files are not
+  guarded: they have only run on fresh databases, where a failed first open is dropped and made again. The
+  `archive/` files are (below).
 
 ## Schema Column Catalog
 
