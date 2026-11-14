@@ -122,9 +122,10 @@ func TestRecoveryJobs_ADrainRecoversLeases(t *testing.T) {
 }
 
 // TestRecoveryJobs_ExpiredLeaseRecoveredInTheBackground pins the job end to end: a claimed step whose lease lapses is
-// re-dispatched within an interval, with no call from the test. The interval is shortened to 2s, and the wait for
-// recovery is 6s: long enough for one interval, too short for the wedge sweep's five. An upper bound on a reaction, so
-// it runs in the serial phase, not t.Parallel().
+// re-dispatched by the background lease recovery, with no call from the test. Lease recovery is the only repair that
+// resets an expired running lease, so the step completing at all shows the job ran; its pace, a pass an interval after
+// the last one ended, is pinned against an injected clock by internal/janitor's TestRecovery_ThePace. So the wait is
+// the scaled bound of the other tests here, not a wall-clock bound on the pace, which a loaded machine misses.
 func TestRecoveryJobs_ExpiredLeaseRecoveredInTheBackground(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -139,7 +140,7 @@ func TestRecoveryJobs_ExpiredLeaseRecoveredInTheBackground(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	fk := expireRunningLease(t, e, "recoverybg/g", entered)
 
-	awaitCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e.Await(awaitCtx, fk)
 	if assert.NoError(err) {

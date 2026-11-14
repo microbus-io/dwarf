@@ -88,8 +88,12 @@ func TestWideflow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		// The root rests interrupted at the first leaf's interrupt, so wait for every one of them.
-		awaitPropagatedInterrupts(t, eng, flowKey, width)
+		// The root rests interrupted at the first leaf's interrupt, so wait for every one of them. They do not
+		// arrive one after another: every Call step and every leaf's Wait share one fairness key, and the fetch is
+		// oldest-first, so the Waits queue behind the Calls and nearly every interrupt lands after the last child
+		// is spawned. The gap before the second is that whole spawn phase - ~10s alone, past a minute on MariaDB
+		// under ~20 such trees at once (2026-11-14) - so the per-propagation ceiling is sized to it.
+		awaitPropagatedInterrupts(t, eng, flowKey, width, 5*time.Minute)
 		trees, err := enginetest.ListAll(ctx, eng, workflow.Query{WorkflowURL: "wideflow.verify:428/tree", IncludeSubgraphs: true})
 		if !assert.NoError(err) || !assert.Len(trees, 1) {
 			return

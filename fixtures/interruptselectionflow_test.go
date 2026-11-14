@@ -46,9 +46,11 @@ import (
 // the channel, and one landing between the two lines by the channel, since the waiter is already registered.
 // Waiter is one-shot, hence the loop - it is a rendezvous per propagation, not a spin on an observation.
 //
-// The minute is a "did it hang" ceiling, not a timing contract: an interrupt that never propagates never will,
-// so nothing is traded away by leaving generous room for a loaded server and for -race.
-func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string, want int) {
+// gap bounds the wait for each next propagation. It is a "did it hang" ceiling, not a timing contract: an
+// interrupt that never propagates never will, so nothing is traded away by leaving generous room for a loaded
+// server and for -race. A minute covers a tree whose interrupts arrive one after another; a tree whose interrupts
+// all wait behind one long phase needs that phase's length.
+func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string, want int, gap time.Duration) {
 	t.Helper()
 	seams := accessors.Seams(eng)
 	for {
@@ -59,7 +61,7 @@ func awaitPropagatedInterrupts(t *testing.T, eng *engine.Engine, flowKey string,
 		}
 		select {
 		case <-reached:
-		case <-time.After(time.Minute * enginetest.TimeoutScale()):
+		case <-time.After(gap * enginetest.TimeoutScale()):
 			// The flow's own state tells a stalled tree from one that ended before its interrupts arrived.
 			snap, err := eng.Snapshot(context.Background(), flowKey)
 			if err != nil {
@@ -146,11 +148,11 @@ func TestInterruptSnapshotMatchesResume(t *testing.T) {
 	assert.NoError(err)
 
 	// A interrupts; B is still gated (running, not interrupted).
-	awaitPropagatedInterrupts(t, eng, flowKey, 1)
+	awaitPropagatedInterrupts(t, eng, flowKey, 1, time.Minute)
 	assert.Equal(1, interruptedStepCount(t, eng, flowKey))
 	close(gateB)
 	// Now B interrupts too - both interrupted, A's updated_at strictly earlier.
-	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+	awaitPropagatedInterrupts(t, eng, flowKey, 2, time.Minute)
 	assert.Equal(2, interruptedStepCount(t, eng, flowKey))
 
 	// Snapshot must report A (earliest updated_at = the next Resume's target), not B.
@@ -232,9 +234,9 @@ func TestInterruptSnapshotFollowsTheRecordedInterrupt(t *testing.T) {
 	if !assert.NoError(err) {
 		return
 	}
-	awaitPropagatedInterrupts(t, eng, flowKey, 1) // A's interrupt is the flow's record
+	awaitPropagatedInterrupts(t, eng, flowKey, 1, time.Minute) // A's interrupt is the flow's record
 	close(gateB)
-	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+	awaitPropagatedInterrupts(t, eng, flowKey, 2, time.Minute)
 
 	shard, _, flowID, _, err := keys.ParseFlowKey(flowKey)
 	assert.NoError(err)
@@ -335,7 +337,7 @@ func TestInterruptParallelSubgraphResume(t *testing.T) {
 	// Postgres NOW_UTC() is the transaction-start time, which is not ordered by commit/visibility), so the
 	// earliest-updated pick - which both Snapshot and Resume use - can shift between the Snapshot and the
 	// Resume. With both settled, the set is frozen and the two selections agree (the invariant under test).
-	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+	awaitPropagatedInterrupts(t, eng, flowKey, 2, time.Minute)
 	assert.Equal(2, interruptedStepCount(t, eng, flowKey))
 
 	// snapshotN returns the n of the child Snapshot says will resolve next (the propagated interrupt payload

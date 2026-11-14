@@ -21,6 +21,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
@@ -97,10 +98,10 @@ func TestStoppedTask_FanOutInterrupts(t *testing.T) {
 	flowKey, err := eng.Create(ctx, "stoppedtask.verify:428/fan", nil, nil)
 	assert.NoError(err)
 
-	awaitPropagatedInterrupts(t, eng, flowKey, 1)
+	awaitPropagatedInterrupts(t, eng, flowKey, 1, time.Minute)
 	assert.Equal("A", listedTask(t, eng, flowKey))
 	close(gateB)
-	awaitPropagatedInterrupts(t, eng, flowKey, 2)
+	awaitPropagatedInterrupts(t, eng, flowKey, 2, time.Minute)
 	assert.Equal("A", listedTask(t, eng, flowKey), "a later interrupt must not replace the first")
 
 	// Resuming A leaves the flow interrupted at B.

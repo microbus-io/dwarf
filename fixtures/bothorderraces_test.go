@@ -193,14 +193,14 @@ func TestConcurrentInterrupt_FirstWriterWins(t *testing.T) {
 	// IX's interrupt propagates its payload onto the shared Call step (the first writer wins it). The stop
 	// checkpoint fires POST-COMMIT, so one propagation counted on the parent means the payload is durable
 	// there - the fact the poll this replaces was spinning to sample.
-	awaitPropagatedInterrupts(t, e, fk, 1)
+	awaitPropagatedInterrupts(t, e, fk, 1, time.Minute)
 	assert.True(strings.Contains(callPayload(), "X"), "first writer (IX) should own the ancestor payload")
 
 	// Release IY: its interrupt now reaches the payload write, but the guard (interrupt_payload='{}') matches
 	// zero rows on the already-written Call step - a no-op. Its propagation still signals a stop, so the
 	// second arrival on the parent is what says IY has been all the way through the write.
 	release()
-	awaitPropagatedInterrupts(t, e, fk, 2)
+	awaitPropagatedInterrupts(t, e, fk, 2, time.Minute)
 
 	// The guard held: the shared ancestor still carries IX's payload, uncorrupted by IY.
 	p := callPayload()
