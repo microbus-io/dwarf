@@ -173,7 +173,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			payloadLen = len(payloadJSON)
 			// Guard: write the payload only to chain steps still at the default empty object, so a
 			// concurrent fan-out interrupt does not clobber a payload already set on a shared ancestor
-			// (first-writer-wins). Three dialect forms, and each is load-bearing:
+			// (first-writer-wins). Four dialect forms, and each is load-bearing:
 			//   - MySQL's JSON column does not match a bare string literal with '=', so
 			//     interrupt_payload='{}' silently matches nothing there; compare its textual form.
 			//   - SQL Server's column is VARBINARY (the payload columns are binary there so a Go []byte
@@ -181,13 +181,20 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			//     0x7B7D is "{}". A varchar '{}' literal is accepted only in a comparison like this one;
 			//     SQL Server rejects the same implicit conversion outright in a DEFAULT or a SET
 			//     assignment, which is why every payload RESET binds emptyJSON instead of inlining '{}'.
-			//   - TEXT/JSONB match the literal directly.
+			//   - SQLite stores a bound []byte as a BLOB, whatever the column's declared type, and a BLOB never
+			//     equals a text literal: once Resume resets the column (it binds emptyJSON), a bare '{}' matches
+			//     nothing, and every later prompt on that row - a re-interrupt after a retry, or a parked caller
+			//     whose child interrupts again - is dropped. Compare its text form, which reads either storage
+			//     class as '{}' (fixtures/interruptpayloadflow_test.go's TestInterruptpayloadflow_AskAgain).
+			//   - JSONB matches the literal directly.
 			emptyGuard := "interrupt_payload='{}'"
 			switch db.DriverName() {
 			case "mysql", "mariadb":
 				emptyGuard = "CAST(interrupt_payload AS CHAR)='{}'"
 			case "mssql":
 				emptyGuard = "interrupt_payload=0x7B7D"
+			case "sqlite":
+				emptyGuard = "CAST(interrupt_payload AS TEXT)='{}'"
 			}
 			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
 				ph, ids := inList(chunk)
