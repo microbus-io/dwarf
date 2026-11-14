@@ -1012,15 +1012,16 @@ func TestPiston_CadenceIsPerLoop(t *testing.T) {
 //
 // The supply loop goes on turning perfectly happily here - it plans from an empty planner, pushes nothing,
 // and reports no error at all - so a turn count taken from IT would read a piston that cannot see its own
-// shard as fully alive. That is why the count is the MINIMUM of the two loops; the mirror case, where every
-// fetch fails and the scan is healthy, is TestPiston_FailingFetchesReportNoLiveness.
+// shard as fully alive. That is why a turn needs BOTH loops; the mirror case, where every fetch fails and the
+// scan is healthy, is TestPiston_FailingFetchesReportNoLiveness.
 //
 // The busy half is easy to get wrong in a way that looks right. A failing cycle is still briefly inside its
 // queries - building the error, recording the phase, logging it - so a busy flag meaning "a cycle is in
 // flight" reads true a small but nonzero fraction of the time (measured ~1.2% with a scan that fails
 // instantly), and a reader sampling on its own clock catches that within seconds. It then keeps a broken
 // piston looking alive for good, which is exactly the stranding the evidence exists to prevent. Busy
-// therefore means a loop has been working LONGER THAN ONE PERIOD, which neither loop is here.
+// therefore means a loop has been working LONGER THAN ONE PERIOD, and this asserts that of every busy
+// reading.
 func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -1029,76 +1030,82 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 	r := newRigWith(t, seamsDiags(sm))
 	r.insertStep(t, 1, 5, "k", 1) // rig default interval is 0 - the degenerate case the floor covers
 
-	// A healthy ROUND TRIP first - both loops, since the turn count is their minimum and a tally alone would
-	// leave it pinned at whatever the supply loop has managed.
+	// A healthy ROUND TRIP first - both loops, since a turn needs both and a tally alone would leave the count
+	// where the supply loop left it.
 	before, _, _ := r.p.Liveness()
 	r.p.Cycle(ctx)
 	after, busy, _ := r.p.Liveness()
 	assert.Equal(before+1, after, "a completed round trip is a turn")
 	assert.False(busy, "and it is not still working")
 
-	// From here every scan fails. Sample hard while the loop runs: the turn count must not move and busy
-	// must never once read true.
-	sm.InjectN(diagnostics.FaultRefillScanErr, 1<<20)
+	// From here every scan fails. Sample hard while the loop runs: the turn count must not move, and every busy
+	// reading must be backed by a loop that has begun no cycle for a whole period. The loops spin at this
+	// cadence - the tally loop at over 100k cycles/s - so the fault must outlast every cycle the safety
+	// deadline below admits, or the scans start succeeding and the turn count moves.
+	sm.InjectN(diagnostics.FaultRefillScanErr, 1<<30)
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); r.p.Run(runCtx) }()
 
-	// EPISODES, not samples, and the distinction is what makes this measurable on a shared machine. The two
-	// things a busy reading can mean have opposite shapes:
+	// Each busy reading is judged by what the loops did, never counted. A thread taken off the CPU inside a
+	// failing cycle stretches that cycle past its period and busy then reads true as specified, so how often
+	// it reads true here measures the machine's load. A loop that has been inside one cycle for a period began
+	// no other in it, since its begin checkpoint fires before the work window opens and again only after it
+	// closes; a flag meaning merely "a cycle is in flight" reads true while both loops begin thousands. So at
+	// least one loop's count of begun cycles must not have moved since the earliest sample taken within one
+	// period before the reading.
 	//
-	//   - A busy flag meaning merely "a cycle is in flight" reads true for the sliver each failing cycle
-	//     spends in its queries, over and over. Against a 1ms sampler that is a scatter of MANY short
-	//     episodes: measured 61-103 of them per window under -race, by running this against a build whose
-	//     predicate was `WorkingFor() > 0`.
-	//   - A machine that starves this piston's goroutine inside one cycle produces ONE episode, however long
-	//     the stall: every sample for its duration reads busy. Counting samples cannot tell a scatter of
-	//     short episodes from one long stall - measured 8 busy samples in a starved window, against 175-271
-	//     under the broken predicate - while counting rising edges tells them apart by an order of magnitude.
-	//
-	// So a handful of episodes is tolerated and a scatter is not, which is the honest reading of the
-	// evidence: under the duration-qualified predicate a busy sample is only ever produced by a cycle that
-	// genuinely outran its period, and on this workload nothing but the scheduler can do that. The bound sits
-	// ~6x under the broken build's floor and ~5x over the worst starvation seen (2 episodes, in a window
-	// whose sample count had itself collapsed from ~450 to 175 - the same contention, visible twice).
-	// A SAMPLE BUDGET, NOT A WALL-CLOCK ONE, and it fixes the bound above as much as the flakiness. Both
-	// counts scale with how many samples a window fits: the broken predicate's 61-103 episodes and the
-	// starved window's 2 were both measured per ~450 samples, so "fewer than 10" only means what it was
-	// calibrated to mean at that density. Budgeting wall clock makes the density an OUTCOME - a loaded
-	// machine fits fewer samples, the bound silently loosens, and the test keeps reporting pass while
-	// testing less (measured: ~450 samples collapsing to 175 under contention). Budgeting samples makes it
-	// an INPUT: load can only make this take longer, never make it weaker.
-	//
-	// The safety deadline is 30x the healthy duration, so it bounds a pathologically starved machine
-	// without ever binding on a merely busy one; the density assertion below is what refuses to conclude
-	// anything if it ever does fire.
-	const wantSamples = 450
+	// A reading with no earlier sample inside that period cannot be judged - the sampler was off the CPU for
+	// all of it - so the budget is in JUDGED samples: load can only make this take longer, never weaker. The
+	// safety deadline bounds a machine too starved to sample within a period at all (GOMAXPROCS=1 is one: the
+	// two spinning loops hold its only P for a 10ms slice each), and the last assertion refuses to conclude
+	// anything if it fires.
+	type sample struct {
+		at            time.Time // taken before the counts are read
+		tally, supply int       // cycles each loop has begun
+	}
+	// The shorter period, so the comparison never reaches back before a busy loop's cycle began; the zero
+	// cadence floors both at the same value.
+	horizon := min(r.p.tallier.Period(), r.p.supplier.Period())
+	const wantJudged = 450
 	stalled, _, _ := r.p.Liveness()
-	var busyEpisodes, busySamples, samples int
-	wasBusy := false
+	var history []sample
+	var judged, busyReadings, unbacked int
 	safety := time.Now().Add(15 * time.Second)
-	for samples < wantSamples && time.Now().Before(safety) {
-		n, b, _ := r.p.Liveness()
-		samples++
-		if b {
-			busySamples++
-			if !wasBusy {
-				busyEpisodes++
+	for judged < wantJudged && time.Now().Before(safety) {
+		s := sample{
+			at:     time.Now(),
+			tally:  sm.Visits(diagnostics.CheckpointRefillTallyBegin),
+			supply: sm.Visits(diagnostics.CheckpointRefillSupplyBegin),
+		}
+		n, busy, _ := r.p.Liveness()
+		since := time.Now().Add(-horizon)
+		assert.Equal(stalled, n, "a failing cycle must never count as a turn")
+		ref := len(history)
+		for ref > 0 && !history[ref-1].at.Before(since) {
+			ref--
+		}
+		if ref < len(history) {
+			judged++
+			if busy {
+				busyReadings++
+				if history[ref].tally != s.tally && history[ref].supply != s.supply {
+					unbacked++
+				}
 			}
 		}
-		wasBusy = b
-		assert.Equal(stalled, n, "a failing cycle must never count as a turn")
+		history = append(history, s)
 		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	assert.True(busyEpisodes < 10,
-		"a piston that only fails must not read as busy across separate cycles (%d episodes, %d of %d samples)",
-		busyEpisodes, busySamples, samples)
-	assert.True(samples > 100,
-		"the sampling has to be dense enough to catch a brief window - only reachable if the safety deadline "+
-			"fired, i.e. this machine could not take %d samples in 15s (took %d)", wantSamples, samples)
+	assert.Zero(unbacked,
+		"busy must mean a loop outran its period, not that a cycle was in flight: %d of %d busy readings came "+
+			"while both loops kept beginning cycles", unbacked, busyReadings)
+	assert.True(judged >= wantJudged,
+		"only reachable if the safety deadline fired: this machine could not sample within one period %d times "+
+			"in 15s (managed %d of %d samples)", wantJudged, judged, len(history))
 }
 
 // TestPiston_FailingFetchesReportNoLiveness pins the OTHER half of the dispatch evidence, and it is the half
@@ -1107,8 +1114,8 @@ func TestPiston_FailingCyclesReportNoLiveness(t *testing.T) {
 // A piston whose every FETCH fails is invisible from outside: it scans honestly, publishes a real tally,
 // claims its band, and logs nothing a reader can see - while its partition takes zero candidates. So it
 // looks fully alive, keeps its residue class, and the work in that class is selected by nobody. That is the
-// same stranding a failing SCAN causes, reached from the opposite direction, which is why the turn count is
-// the MINIMUM of the two loops rather than either one of them.
+// same stranding a failing SCAN causes, reached from the opposite direction, which is why a turn needs BOTH
+// loops to have turned rather than either one of them.
 //
 // It fails against a build that counts tallies alone: the tally loop turns freely here.
 func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
@@ -1119,7 +1126,7 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 	r := newRigWith(t, seamsDiags(sm))
 	r.insertStep(t, 1, 5, "k", 1)
 
-	// A healthy round trip first: both loops turn, so the minimum moves.
+	// A healthy round trip first: both loops turn, so the count moves.
 	before, _, _ := r.p.Liveness()
 	r.p.Cycle(ctx)
 	after, _, _ := r.p.Liveness()
@@ -1139,8 +1146,8 @@ func TestPiston_FailingFetchesReportNoLiveness(t *testing.T) {
 	assert.False(busy, "and it is not merely slow")
 	assert.False(idle)
 
-	// The tally loop really was turning throughout, so the frozen count is the MINIMUM doing its job rather
-	// than both loops having stopped.
+	// The tally loop really was turning throughout, so the frozen count is the both-loops rule doing its job
+	// rather than both loops having stopped.
 	assert.True(r.p.tallyTurns.Load() > r.p.supplyTurns.Load(),
 		"the tally loop kept turning (%d) while the supply loop did not (%d)",
 		r.p.tallyTurns.Load(), r.p.supplyTurns.Load())

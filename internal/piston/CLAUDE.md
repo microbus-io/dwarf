@@ -110,10 +110,19 @@ Four things the shape has to get right:
   sampling every 50ms catches that within seconds. It then keeps a piston that serves nothing looking alive
   indefinitely — the precise stranding the evidence exists to prevent. A scan shorter than the period will
   have completed and advanced the turn count before any reader looks, so nothing is lost by requiring the
-  duration. Pinned by `TestPiston_FailingCyclesReportNoLiveness`, which samples ~1ms apart for half a second
-  and requires *zero* busy readings; against the bool it fails with 16 of 438, and 333 of 440 at the zero
-  period a bench sweep or a hand-driven caller can legitimately set — which is why the threshold is floored
-  at `MinGap`, the package's existing fuse for that same degenerate regime.
+  duration. The bool reads busy on 333 of 440 samples at the zero period a bench sweep or a hand-driven
+  caller can legitimately set — which is why the threshold is floored at `MinGap`, the package's existing
+  fuse for that same degenerate regime.
+
+  Pinned by `TestPiston_FailingCyclesReportNoLiveness`, at that zero period: it samples ~1ms apart and
+  requires every busy reading to be backed by a loop whose begin-checkpoint count has not moved for a whole
+  period. **Do not bound how OFTEN busy reads true there.** A loop spinning at the zero period is inside a
+  cycle most of the time, so a thread the OS takes off the CPU mid-cycle — or a GC stop-the-world, which an
+  oversubscribed machine stretches — holds that cycle past the floor, and busy then reads true exactly as
+  specified. How often follows the machine's load, and under heavy load it comes within a few times of the
+  bool's count, so no bound on it separates the two. Whether a loop stopped beginning cycles does, and no
+  load fakes it. This is the rig's exposure, not production's: a paced loop is inside its window for only
+  that window's share of the period, a fraction of a percent at 20ms.
 
   The threshold bounds the **false-alive** direction only. A query that hangs forever reads busy forever and
   keeps its residue class — indistinguishable from a legitimate long scan by construction, and the same
