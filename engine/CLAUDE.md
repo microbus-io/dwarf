@@ -1407,11 +1407,37 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
     already in handoff mode. This lock has not been benchmarked at width. 8192 stripes are ~320KB per engine.
   Pinned by `TestCohortStripe_FIFOAcrossTicks`, `TestCohortStripe_Abandon`, `TestCohortStripe_TickPanic` and
   `TestCohortStripe_QueuedArrivalsKeepTheirLeases` (fails with the extension removed).
-- **Coalescing was considered and rejected.** Folding a peer's arrivals into one `+k` write would split a member's
-  result-commit from its arrival-count, and either order leaves a crash window that strands (result committed,
-  in-memory arrival lost on a peer crash -> the cohort never reaches `cohort_size`) or double-handles a member. The
-  single-transaction coupling of (own result + arrival) is the same invariant the per-member redesign's
-  commit-before-count has to wrestle with. Serialize-only keeps it intact, and connection occupancy was the whole cost.
+- **The pure arrivals queued on a stripe land in ONE transaction (`arrivalBatch`, `cohortbatch.go`).** Serialized on
+  the spawn row, arrivals commit one after another and cannot group their commits, so one cohort absorbs at most one
+  arrival per transaction - measured on PostgreSQL 16 at width 150,000: ~2,700 arrivals/s alone, ~8,200 batched, the
+  fan-in 33 s after the last branch alone and 2.3 s batched. A pure arrival (`advance`: no successor, not a fan-out
+  source) that finds the stripe held joins its cohort's open batch; the first to join leads it, queuing on the stripe
+  like any waiter, and seals it when served, so later arrivals open the next. The others wait on the batch, holding no
+  turn, keeping their leases on the stripe's schedule.
+  - *Each member's arrival still commits with its own row*, which is what makes this sound. The transaction writes
+    the spawn's `+total` first (the lone bump's order), then every member's fenced `advancing=0`, then reads the
+    counters; a member whose fence matched nothing is taken back off the counter before anything reads it, and the
+    last member not fenced resolves the cohort exactly as a lone arrival would (`resolveCohort`). **Do not fold the
+    arrivals into a `+k` held in memory and written apart from the members' rows**: either order of the two writes
+    leaves a crash window that strands the cohort short of `cohort_size` (the count lost) or handles a member twice.
+  - *A member never abandons the batch*, not even when its lease is taken back, because the leader may be using its
+    dispatch; the batch's own fence leaves it out. The leader leads even with its own lease gone. Pinned by
+    `TestCohortBatch_FencedMemberIsLeftOut` (the leader fenced; fails with the take-back removed).
+  - *A batch that will not commit hands its members back* (`arrivalSolo`, the zero value, also what a panicking leader
+    leaves): each then runs its own transaction, which retries and classifies the failure as an arrival that never
+    batched does. Do not classify for the batch: one member's permanent error (a reducer that cannot fold, at the
+    resolving arrival) would fail every member's step.
+  - *The leader's cleanup covers its wait for the stripe, not only its work* (`leadBatch`): a lease tick that panics
+    while it waits must still seal the batch and close `done`, or the members wait forever and later arrivals join a
+    batch nobody leads (`TestCohortBatch_LeaderPanicReleasesTheBatch`, through `FaultPanicLeaseTick`). A MEMBER that
+    panics while it waits leaves its dispatch in the batch, which may still land it: `recoverStep` does nothing on a
+    panic, so its step stays completed and flagged, and is either landed or replayed by the orphan repair.
+  - *The transition's test seams are consulted once per member* before the batch writes, and a member whose fault
+    fires leaves the batch and meets it first in its own transaction (`dispatch.firedFault`), so an armed fault means
+    what it means for a lone arrival (`TestCohortBatch_FiredFaultLeavesTheBatch`).
+  - At most `arrivalBatchMax` (256) members per transaction: the transaction holds the spawn row's lock, which every
+    other replica's arrivals wait for. An arrival that finds the stripe free runs its own transaction as before, so
+    an uncontended cohort pays nothing.
 
 ### Candidate de-duplication: the partition (cross-peer) and the claim map (intra-peer)
 

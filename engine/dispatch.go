@@ -110,6 +110,9 @@ type dispatch struct {
 	linearRefsJSON   []byte
 	inlineFolded     map[string]bool
 	folds            map[string]staterefs.Fold
+	// firedFault is a transition test seam that fired while the arrival batch consulted it for this step (see
+	// arrivalBatch). The step's own transaction then returns it on its first attempt, as if it had fired there.
+	firedFault error
 
 	// Set by the transition's transaction, and reset at the top of each attempt.
 	newStepIDs    []int
@@ -1464,18 +1467,35 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 	var cohortMu *cohortStripe
 	if d.fanInArrivals > 0 && d.cohortSpawnID != 0 {
 		stripe := &e.cohortLocks[cohortLockStripe(d.shard, d.cohortSpawnID)]
-		// Park on the stripe holding NO turn. The stripe exists precisely so a losing sibling waits without
-		// occupying a connection, and a turn is that occupancy one level up - holding one here would put a
-		// whole cohort's losers into the turnstile, which is the queue the stripe was built to keep them
-		// out of. Yielding restores the property the stripe is for.
-		held := false
-		yieldTurn(ctx, &d.pass, func() {
-			held = e.lockCohortStripe(ctx, stripe, d)
-		})
-		if !held {
-			return nil // the step was taken back while it waited; its new owner replays it
+		// A PURE arrival that finds the stripe held joins the batch of arrivals queued for its cohort, which one
+		// transaction lands together (arriveInBatch). It runs its own transaction below only when the batch hands it
+		// back, or when the stripe was free - and then it already holds it.
+		if len(d.normalNexts) == 0 && !d.isPushTransition {
+			outcome, holds := e.arriveInBatch(ctx, stripe, d)
+			switch outcome {
+			case arrivalLanded:
+				return e.advanced(ctx, d)
+			case arrivalFenced:
+				return nil // the step was taken back while it waited; its new owner replays it
+			}
+			if holds {
+				cohortMu = stripe
+			}
 		}
-		cohortMu = stripe
+		if cohortMu == nil {
+			// Park on the stripe holding NO turn. The stripe exists precisely so a losing sibling waits without
+			// occupying a connection, and a turn is that occupancy one level up - holding one here would put a
+			// whole cohort's losers into the turnstile, which is the queue the stripe was built to keep them
+			// out of. Yielding restores the property the stripe is for.
+			held := false
+			yieldTurn(ctx, &d.pass, func() {
+				held = e.lockCohortStripe(ctx, stripe, d)
+			})
+			if !held {
+				return nil // the step was taken back while it waited; its new owner replays it
+			}
+			cohortMu = stripe
+		}
 		defer func() {
 			if cohortMu != nil {
 				cohortMu.unlock()
@@ -1502,6 +1522,12 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 	if landed, err := e.settlePersist(ctx, d, err, heldAdvancing); !landed {
 		return err
 	}
+	return e.advanced(ctx, d)
+}
+
+// advanced is what follows a transition that committed: the byte metrics, a lost flow's post-commit tail, and the
+// doorbell for the first successor.
+func (e *Engine) advanced(ctx context.Context, d *dispatch) error {
 	workflowURL := d.row.workflowURL
 	e.metricStateWriteBytes(ctx, workflowURL, "state", d.txBytes.stateWritten)
 	e.metricStateWriteBytes(ctx, workflowURL, "state_refs", d.txBytes.refsWritten)
@@ -1545,11 +1571,12 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	// returns a non-retryable error, so the tx fails after the step was already marked completed and the
 	// processStep recovery defer must reset it (completed->pending) and re-dispatch. Both are scoped to
 	// the completing task and checked before the flow-row write, so a fired fault rolls back nothing.
-	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultContention, taskName)) {
-		return errors.New("database is locked (injected fault: " + diagnostics.FaultContention + " " + taskName + ")")
+	if err := d.firedFault; err != nil {
+		d.firedFault = nil
+		return err
 	}
-	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultTransitionCommit, taskName)) {
-		return errors.New("injected fault: " + diagnostics.FaultTransitionCommit + " " + taskName)
+	if err := e.transitionFault(taskName); err != nil {
+		return err
 	}
 
 	// A NON-FINAL cohort arrival is the one disposition that neither extends nor terminalizes the flow:
@@ -1586,12 +1613,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 		e.queueFlowGrab(ctx, d, batch, errTransitionFlowTerminal)
 	}
 
-	succ := successorBatch{
-		flowID: d.row.flowID, flowHour: d.row.createdHour, stepDepth: d.row.stepDepth + 1, timeBudgetMs: d.row.flowTimeBudgetMs, lineageID: d.childLineageID,
-		predecessorID: d.stepID, sleepMs: d.sleep.Milliseconds(), priority: d.row.flowPriority, fairnessKey: d.row.flowFairnessKey,
-		fairnessWeight: d.row.flowFairnessWeight, engineID: e.engineID, inheritCancel: d.inheritCancel,
-		maxBytes: e.maxPayloadBytes,
-	}
+	succ := e.successorsOf(d)
 	for i, next := range d.normalNexts {
 		// fan_out_ordinal identifies the BRANCH within a cohort so the fan-in folds order-sensitive
 		// reducers (append/concat/union) in input-array order. A fan-out SOURCE stamps each new branch
@@ -1709,6 +1731,31 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 	return batch.flush()
 }
 
+// successorsOf is the successor batch a dispatch's transition inserts into: its rows' shared columns, from the
+// dispatched step and its flow.
+func (e *Engine) successorsOf(d *dispatch) successorBatch {
+	return successorBatch{
+		flowID: d.row.flowID, flowHour: d.row.createdHour, stepDepth: d.row.stepDepth + 1, timeBudgetMs: d.row.flowTimeBudgetMs, lineageID: d.childLineageID,
+		predecessorID: d.stepID, sleepMs: d.sleep.Milliseconds(), priority: d.row.flowPriority, fairnessKey: d.row.flowFairnessKey,
+		fairnessWeight: d.row.flowFairnessWeight, engineID: e.engineID, inheritCancel: d.inheritCancel,
+		maxBytes: e.maxPayloadBytes,
+	}
+}
+
+// transitionFault consults the transition's two test seams for a task, consuming whichever fires. Free in production.
+func (e *Engine) transitionFault(taskName string) error {
+	if !e.diags.Seams().Enabled() {
+		return nil
+	}
+	if e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultContention, taskName)) {
+		return errors.New("database is locked (injected fault: " + diagnostics.FaultContention + " " + taskName + ")")
+	}
+	if e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultTransitionCommit, taskName)) {
+		return errors.New("injected fault: " + diagnostics.FaultTransitionCommit + " " + taskName)
+	}
+	return nil
+}
+
 // queueFlowGrab queues the transition's write-first grab of the flow row's lock, before any step is written (except
 // the deferred grab of a cohort arrival), guarded on non-terminal status, so a transition racing a Terminate or
 // failStep inserts nothing into a closed flow. It is batched with what follows it, so its guard is read only after
@@ -1756,11 +1803,25 @@ func (e *Engine) arriveAtCohort(ctx context.Context, d *dispatch, tx *sequel.Tx,
 	//
 	// The same statement clears this step's own advancing flag, fenced on its lease generation, so a
 	// pure arrival - which writes nothing else to its own row - still clears it without a round trip.
-	arrivals, size, failures, cancellations, spawnLineageID, err := bumpCohortArrivals(ctx, tx, d.cohortSpawnID, d.fanInArrivals, d.stepID, d.row.leaseSeq)
+	var c cohortCounts
+	var err error
+	c.arrivals, c.size, c.failures, c.cancellations, c.spawnLineageID, err = bumpCohortArrivals(ctx, tx, d.cohortSpawnID, d.fanInArrivals, d.stepID, d.row.leaseSeq)
 	if err != nil {
 		return errors.Trace(err)
 	}
-	fullyResolved := size > 0 && arrivals >= size
+	return e.resolveCohort(ctx, d, tx, batch, succ, pureArrival, c)
+}
+
+// cohortCounts is a cohort spawn's counters as an arrival's bump left them.
+type cohortCounts struct {
+	arrivals, size, failures, cancellations, spawnLineageID int
+}
+
+// resolveCohort runs what an arrival that resolves its cohort does - inserts the fan-in step, or fails the flow - and
+// nothing for one that does not. c is the spawn's counters after the bump, in the same transaction.
+func (e *Engine) resolveCohort(ctx context.Context, d *dispatch, tx *sequel.Tx, batch *txBatch, succ *successorBatch, pureArrival bool, c cohortCounts) error {
+	failures, cancellations, spawnLineageID := c.failures, c.cancellations, c.spawnLineageID
+	fullyResolved := c.size > 0 && c.arrivals >= c.size
 	if !fullyResolved {
 		return nil
 	}

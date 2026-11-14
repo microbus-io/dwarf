@@ -56,6 +56,7 @@ const (
 	FaultClaimReadContention = "claimReadContention" // per attempt: the MySQL/MariaDB post-claim read returns lock contention before scanning a row
 	FaultCancelReasonReadErr = "cancelReasonReadErr" // per attempt: a Cancel-preempted step's re-read of the cancel reason returns a non-contention database error
 	FaultExtendLeaseErr      = "extendLeaseErr"      // per attempt: persist's lease renewal returns a database error, as during an outage
+	FaultPanicLeaseTick      = "panicLeaseTick"      // a waiting arrival's lease extension panics, as a bug in it would
 	FaultRecoveryResetErr    = "recoveryResetErr"    // the post-execution recovery reset write errors
 
 	// The step-completion write:

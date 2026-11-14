@@ -46,6 +46,25 @@ func waitQueued(t *testing.T, s *cohortStripe, n int) {
 	t.Fatalf("never saw %d waiters queued", n)
 }
 
+// waitBatched waits until the stripe has one batch open for spawn holding n arrivals.
+func waitBatched(t *testing.T, s *cohortStripe, shard, spawn, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second * enginetest.TimeoutScale())
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		got := 0
+		if b := s.batches[arrivalKey{shard: shard, spawn: spawn}]; b != nil {
+			got = len(b.members)
+		}
+		s.mu.Unlock()
+		if got == n {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("never saw %d arrivals batched", n)
+}
+
 // TestCohortStripe_FIFOAcrossTicks pins the property the stripe exists for: a waiter that wakes to tick keeps its
 // place in line. Waiters queue in a known order, all tick many times while the stripe is held, and they are served
 // in arrival order.
@@ -222,7 +241,9 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	queued := "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2') AND status='" + workflow.StatusCompleted + "' AND advancing=1"
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return enginetest.CountRows(t, e, shard, queued, flowID) == 2 }),
 		"the branches never queued on the stripe")
-	waitQueued(t, stripe, 2)
+	// Both are pure arrivals: one leads their batch, queued on the stripe, and the other waits in the batch.
+	waitQueued(t, stripe, 1)
+	waitBatched(t, stripe, shard, spawnID, 2)
 	var seqBefore int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqBefore))
 	var claimLeftMs float64

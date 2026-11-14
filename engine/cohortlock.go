@@ -21,6 +21,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 )
 
 // cohortStripe is one stripe of e.cohortLocks: a FIFO lock whose waiters can run a callback periodically while they
@@ -30,6 +32,39 @@ type cohortStripe struct {
 	mu    sync.Mutex
 	held  bool
 	queue []chan struct{} // waiters in arrival order; unlock hands the stripe to the head by closing its channel
+	// batches are the open arrival batches queued on this stripe, one per cohort (see arrivalBatch).
+	batches map[arrivalKey]*arrivalBatch
+}
+
+// join adds a pure arrival to its cohort's open batch on this stripe, or opens one it leads (idx 0). It returns a nil
+// batch when the stripe was free, and then the caller holds it.
+func (s *cohortStripe) join(key arrivalKey, d *dispatch) (b *arrivalBatch, idx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.held {
+		s.held = true
+		return nil, 0
+	}
+	if b = s.batches[key]; b != nil {
+		b.members = append(b.members, d)
+		return b, len(b.members) - 1
+	}
+	if s.batches == nil {
+		s.batches = map[arrivalKey]*arrivalBatch{}
+	}
+	b = &arrivalBatch{key: key, members: []*dispatch{d}, done: make(chan struct{})}
+	s.batches[key] = b
+	return b, 0
+}
+
+// seal closes a batch to new members and returns them; an arrival joining after it opens the next batch.
+func (s *cohortStripe) seal(b *arrivalBatch) []*dispatch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.batches[b.key] == b {
+		delete(s.batches, b.key)
+	}
+	return b.members
 }
 
 // lock acquires the stripe. While it waits it calls tick, first after the delay first and then after whatever delay
@@ -115,17 +150,32 @@ func (s *cohortStripe) unlock() {
 // The caller parks holding NO turn: the stripe exists so a losing sibling waits without occupying a connection, and
 // a turn is that occupancy one level up.
 func (e *Engine) lockCohortStripe(ctx context.Context, stripe *cohortStripe, d *dispatch) bool {
-	lead := min(e.leaseMargin, e.persistLeaseExtension) / 2
+	lead := e.leaseLead()
 	return stripe.lock(time.Until(e.leaseDeadline(d))-lead, func() (time.Duration, bool) {
-		start := time.Now()
-		tctx, doneTurn := e.dbTurn(ctx, d.shard)
-		defer doneTurn()
-		held, err := e.extendLease(tctx, d.db, d.stepID, d.row.leaseSeq, e.persistLeaseExtension)
-		if err != nil {
-			return lead, true
-		}
-		return time.Until(start.Add(e.persistLeaseExtension)) - lead, held
+		return e.extendWaitingLease(ctx, d, lead)
 	})
+}
+
+// leaseLead is how much lease a waiter keeps ahead of it: it extends when this much is left.
+func (e *Engine) leaseLead() time.Duration {
+	return min(e.leaseMargin, e.persistLeaseExtension) / 2
+}
+
+// extendWaitingLease extends a waiting step's lease to a full extension, on a turn of its own, and returns how long
+// until the next extension is due - measured from before the turn, which the extension cannot predate - and whether
+// the step is still this worker's. A database error keeps the lease it has and is due again a lead later.
+func (e *Engine) extendWaitingLease(ctx context.Context, d *dispatch, lead time.Duration) (next time.Duration, held bool) {
+	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.FaultPanicLeaseTick) {
+		panic("injected fault: " + diagnostics.FaultPanicLeaseTick)
+	}
+	start := time.Now()
+	tctx, doneTurn := e.dbTurn(ctx, d.shard)
+	defer doneTurn()
+	held, err := e.extendLease(tctx, d.db, d.stepID, d.row.leaseSeq, e.persistLeaseExtension)
+	if err != nil {
+		return lead, true
+	}
+	return time.Until(start.Add(e.persistLeaseExtension)) - lead, held
 }
 
 // leaseDeadline is a lower bound on when the lease the dispatch's claim set runs out: the claim's own NOW plus the
