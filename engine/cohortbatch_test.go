@@ -201,6 +201,21 @@ func TestCohortBatch_FiredFaultLeavesTheBatch(t *testing.T) {
 	assert.Equal(1, solo, "only the member whose fault fired leaves the batch")
 }
 
+// TestCohortBatch_LostCommitAcknowledgement pins a batch whose transaction committed and whose reply was lost. Every
+// member is told the batch did not land and arrives on its own, and each must find its arrival already landed: every
+// arrival counted once, the cohort converging once, and no task run twice.
+func TestCohortBatch_LostCommitAcknowledgement(t *testing.T) {
+	c := newBatchedCohort(t, 0)
+	b := c.batch()
+	fault := diagnostics.Join(diagnostics.FaultArrivalBatchCommitLost, "Branch")
+	c.e.diags.Seams().Inject(fault)
+	c.stripe.unlock()
+	c.await(t)
+	<-b.done
+	testarossa.For(t).False(c.e.diags.Seams().IsFault(fault), "the fault never fired")
+	assertSettledClean(t, c.e, nil)
+}
+
 // TestCohortBatch_LeaderPanicReleasesTheBatch pins the leader's cleanup over its WAIT, not only its work: a lease tick
 // that panics while the leader waits for the stripe must still seal the batch and wake its members, or they wait
 // forever and later arrivals join a batch nobody leads. Every waiter's first tick panics here; the steps are then

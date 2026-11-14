@@ -100,6 +100,9 @@ matching one before working there:**
 - **`fixtures/CLAUDE.md`** - the test harness: the name-keyed `NewEngineUnderTest` test mode and its
   caller-owned teardown, the per-test-engine rule under a `t.Parallel` suite (and which tests opt out), and
   `hosts.Mux` conventions.
+- **`internal/enginetest/CLAUDE.md`** - the invariant checker (`AssertInvariants`, and `CaptureOutcomes` /
+  `AssertOutcomesKept` for closed outcomes that must not move) and the mutation inventory: each engine transaction's
+  starting state, guard, post-commit backstop and lost-reply test. A new transaction or state transition updates it.
 - **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`) and the `Shard` handle every actor on
   a shard is given (its database, turns, residue class and server measurements): SQL-dialect guidance, shard-count
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,

@@ -4062,6 +4062,9 @@ the latch says nothing about it.
 
 ### Transactions
 
+Each transaction's starting state, guard, post-commit backstop and lost-reply test is in the mutation inventory in
+`internal/enginetest/CLAUDE.md`; a new transaction or state transition updates it there.
+
 The multi-statement write paths each run under one `db.Transact`. **There is no single engine-wide row-lock
 order** - two disciplines coexist deliberately; do not describe or "restore" a uniform "steps-first-then-flow"
 ordering:

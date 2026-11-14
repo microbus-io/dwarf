@@ -22,6 +22,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
 )
@@ -164,6 +165,9 @@ func (e *Engine) leadBatch(ctx context.Context, stripe *cohortStripe, b *arrival
 		err := leader.db.Transact(ctx, func(tx *sequel.Tx) error {
 			return e.arrivalBatchTx(ctx, tx, group, fenced)
 		})
+		if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultArrivalBatchCommitLost, leader.row.taskName)) {
+			err = commitLostErr(diagnostics.FaultArrivalBatchCommitLost, leader.row.taskName)
+		}
 		if err != nil {
 			e.diags.Logger().DebugContext(ctx, "Cohort arrival batch did not commit; its members arrive one by one",
 				"spawnStep", b.key.spawn, "members", len(group), "error", err)

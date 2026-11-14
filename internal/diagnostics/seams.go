@@ -99,6 +99,22 @@ const (
 	FaultResumeCommit    = "resumeCommit"    // the Resume transaction errors
 	FaultForkCommit      = "forkCommit"      // the Fork clone transaction errors
 
+	// Lost commit acknowledgements. Each transaction COMMITS, then reports a lost connection - an error
+	// sequel.IsConnectionError recognizes - as when the reply to its COMMIT is lost on the way back. Per attempt
+	// where the caller retries the transaction. The step-completion write, the subgraph spawn and the janitor's
+	// moves have their own (FaultPersistLandedErr, FaultSubgraphSpawnCommitLost, FaultJanitorLostResponse).
+	FaultAdvanceCommitLost      = "advanceCommitLost"      // by task, per attempt: the transition transaction (successors, a cohort arrival, a cohort resolved)
+	FaultArrivalBatchCommitLost = "arrivalBatchCommitLost" // by the leading arrival's task: the transaction landing a cohort's queued arrivals together
+	FaultFanInDirectCommitLost  = "fanInDirectCommitLost"  // by task, per attempt: a fan-out source's straight route to its own fan-in
+	FaultCompleteFlowCommitLost = "completeFlowCommitLost" // by flow id, per attempt: the flow-completion transaction
+	FaultFailStepCommitLost     = "failStepCommitLost"     // by task: failStep's transaction (the step, its flow or cohort, a failure delivered to a parked caller)
+	FaultReviveCommitLost       = "reviveCommitLost"       // by the child's flow id: the delivery of a completed child's result to its parked caller
+	FaultDeliverErrorCommitLost = "deliverErrorCommitLost" // by the child's flow id: the wedge sweep's delivery of a closed child's error to its parked caller
+	FaultCreateCommitLost       = "createCommitLost"       // by workflow URL: the transaction inserting a flow and its entry step (Create, Run, a subgraph spawn)
+	FaultResumeCommitLost       = "resumeCommitLost"       // by flow id: the Resume transaction
+	FaultTerminateCommitLost    = "terminateCommitLost"    // by the flow id of the subtree's top: the Terminate transaction, from Terminate, expiration or the orphaned-child sweep
+	FaultForkCommitLost         = "forkCommitLost"         // by the fork step's flow id: the Fork clone transaction
+
 	// The refiller:
 	FaultRefillScanErr  = "refillScanErr"  // a shard's piston's priority-band scan errors
 	FaultRefillFetchErr = "refillFetchErr" // a shard's piston's FetchSteps fails without touching the database

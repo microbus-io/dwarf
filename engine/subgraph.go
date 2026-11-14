@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -289,6 +290,9 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 		}
 		break
 	}
+	if err == nil && !settled && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultTerminateCommitLost, strconv.Itoa(flowID))) {
+		err = commitLostErr(diagnostics.FaultTerminateCommitLost, strconv.Itoa(flowID))
+	}
 	if settled {
 		return false, nil
 	}
@@ -371,6 +375,9 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		}
 		return nil
 	})
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultReviveCommitLost, strconv.Itoa(childFlowID))) {
+		err = commitLostErr(diagnostics.FaultReviveCommitLost, strconv.Itoa(childFlowID))
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -426,6 +433,9 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentS
 		reDispatchParent, derr = e.deliverFlowFailureToParent(ctx, tx, parentStepID, childFlowID, taskErr)
 		return errors.Trace(derr)
 	})
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultDeliverErrorCommitLost, strconv.Itoa(childFlowID))) {
+		err = commitLostErr(diagnostics.FaultDeliverErrorCommitLost, strconv.Itoa(childFlowID))
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}

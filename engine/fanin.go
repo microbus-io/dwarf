@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"maps"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
 	"github.com/microbus-io/dwarf/workflow"
@@ -197,6 +198,9 @@ func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget s
 		}
 		return nil
 	})
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultFanInDirectCommitLost, d.row.taskName)) {
+		err = commitLostErr(diagnostics.FaultFanInDirectCommitLost, d.row.taskName)
+	}
 	if err != nil {
 		return errors.Trace(err)
 	}

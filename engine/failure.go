@@ -189,6 +189,9 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 		}
 		return nil
 	})
+	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultFailStepCommitLost, taskName)) {
+		err = commitLostErr(diagnostics.FaultFailStepCommitLost, taskName)
+	}
 	if err != nil {
 		return false, errors.Trace(err)
 	}

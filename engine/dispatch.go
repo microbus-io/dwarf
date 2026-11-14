@@ -1506,6 +1506,9 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 		err := d.db.Transact(ctx, func(tx *sequel.Tx) error {
 			return e.transitionTx(ctx, d, tx)
 		})
+		if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultAdvanceCommitLost, d.row.taskName)) {
+			err = commitLostErr(diagnostics.FaultAdvanceCommitLost, d.row.taskName)
+		}
 		if errors.Is(err, errTransitionFlowTerminal) {
 			d.txBytes = stateByteCount{} // nothing the transaction wrote survived the rollback
 			return nil
@@ -1740,6 +1743,12 @@ func (e *Engine) successorsOf(d *dispatch) successorBatch {
 		fairnessWeight: d.row.flowFairnessWeight, engineID: e.engineID, inheritCancel: d.inheritCancel,
 		maxBytes: e.maxPayloadBytes,
 	}
+}
+
+// commitLostErr is the error a lost-commit-acknowledgement fault reports for a transaction that committed: a lost
+// connection, as a COMMIT whose reply never arrived reports.
+func commitLostErr(fault, target string) error {
+	return errors.Join(errors.New("injected fault: "+fault+" "+target), driver.ErrBadConn)
 }
 
 // transitionFault consults the transition's two test seams for a task, consuming whichever fires. Free in production.
