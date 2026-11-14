@@ -24,6 +24,14 @@ never does. The name is the job's handle - its metric label, what `RemoveJob` ta
 side by side (`fast_archiving_1`, `fast_archiving_2`: "Shares" below). `Job` is an interface whose methods are
 unexported: only this package's jobs, and its tests', satisfy it.
 
+**A replacement is one step**: `AddJob`, `RemoveJob` and `Stop` are serialized (`edit`), so two `AddJob`s of one name
+never both remove the old job before either adds theirs, leaving two running under it
+(`TestJanitor_AReplacementByNameIsOneStep`). `edit` is held across a job's attach and detach, which wait for the meter's
+lock, so it is never taken under `life` nor by a gauge's callback. **A removal reaches every round of the job**, a
+`Drain`'s included, which runs on the active period's context and its own copy of the jobs: each job has a removal
+context that cancels its round in flight and stops any later one, and removal waits out that round before detaching
+(`TestJanitor_RemovingAJobEndsItsDrainedRound`).
+
 A resume starts every job over, its position and observations forgotten: a replica that dispatches the shard again
 saw nothing of what happened meanwhile, so everything it kept is a stale hint, and losing it loses no tree. Each job
 reads its residue class from the shard at every round (`Shard.Residency`).

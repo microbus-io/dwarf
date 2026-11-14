@@ -78,6 +78,11 @@ type Janitor struct {
 	manual       bool
 	idle         time.Duration // replaces every job's idle wait when not 0
 
+	// edit serializes AddJob, RemoveJob and Stop, so a replacement by name is one step: two AddJobs of one name never
+	// both remove the old job before either adds theirs. It is held across a job's attach and detach, which wait for
+	// the meter's lock, so it is never taken under life or by a gauge's callback.
+	edit sync.Mutex
+
 	// life guards the lifecycle and the jobs: the run's context, the active period's context while active, and the
 	// jobs in the order they were added.
 	life       sync.Mutex
@@ -94,6 +99,9 @@ type runningJob struct {
 	job  Job
 	// mu is held across a round and a reset, so a Drain, the job's goroutine and a Resume never overlap one.
 	mu sync.Mutex
+	// removed ends when the job is removed: it cancels a round in flight, a Drain's included, and no round starts after.
+	removed context.Context
+	remove  context.CancelFunc
 	// progress is the Unix time in nanoseconds of the last round that made progress, or of the last Resume.
 	progress atomic.Int64
 	// cancel ends the job's goroutine, and done waits for it.
@@ -133,7 +141,9 @@ func (j *Janitor) SetIdle(d time.Duration) {
 // so adding a job is how its settings are changed: the new one starts over. A job is added to one janitor only, and
 // nothing is added to a stopped janitor.
 func (j *Janitor) AddJob(name string, job Job) {
-	j.RemoveJob(name)
+	j.edit.Lock()
+	defer j.edit.Unlock()
+	j.removeJob(name)
 	// Attached and detached outside life: registering or unregistering a gauge waits for the meter's lock, which a
 	// collection holds while it calls the gauge's callback, which takes life to ask whether the janitor is active.
 	job.attach(j, name)
@@ -144,6 +154,7 @@ func (j *Janitor) AddJob(name string, job Job) {
 		return
 	}
 	rn := &runningJob{name: name, job: job}
+	rn.removed, rn.remove = context.WithCancel(context.Background())
 	if j.active != nil {
 		rn.progress.Store(time.Now().UnixNano())
 	}
@@ -155,8 +166,16 @@ func (j *Janitor) AddJob(name string, job Job) {
 }
 
 // RemoveJob removes the job under name, cancelling it - a batch in flight is abandoned, its statement cancelled and
-// its transaction rolled back - and returns once its goroutine has. A name with no job is a no-op.
+// its transaction rolled back, a Drain's included - and returns once no round of it runs. A name with no job is a
+// no-op.
 func (j *Janitor) RemoveJob(name string) {
+	j.edit.Lock()
+	defer j.edit.Unlock()
+	j.removeJob(name)
+}
+
+// removeJob is RemoveJob, under edit.
+func (j *Janitor) removeJob(name string) {
 	j.life.Lock()
 	i := slices.IndexFunc(j.jobs, func(rn *runningJob) bool { return rn.name == name })
 	if i < 0 {
@@ -165,12 +184,24 @@ func (j *Janitor) RemoveJob(name string) {
 	}
 	rn := j.jobs[i]
 	j.jobs = slices.Delete(j.jobs, i, i+1)
+	j.life.Unlock()
+	j.retire(rn)
+}
+
+// retire ends rn, removed from the jobs: it cancels any round of it - its goroutine's, or a Drain's, which runs on
+// the active period's context and a copy of the jobs - waits for its goroutine and for a round in flight, and
+// releases what it registered.
+func (j *Janitor) retire(rn *runningJob) {
+	rn.remove()
+	j.life.Lock()
 	if rn.cancel != nil {
 		rn.cancel()
 	}
 	j.life.Unlock()
 	rn.done.Wait()
+	rn.mu.Lock() // a Drain's round in flight holds it until it returns
 	rn.job.detach()
+	rn.mu.Unlock()
 }
 
 // Start begins the janitor's run on ctx, paused; Stop, or ctx's end, ends it. Call it once.
@@ -231,6 +262,8 @@ func (j *Janitor) Pause() {
 // Stop ends the run: it pauses the janitor, returns once its jobs' goroutines have, and releases what its jobs
 // registered. A stopped janitor never resumes.
 func (j *Janitor) Stop() {
+	j.edit.Lock()
+	defer j.edit.Unlock()
 	j.life.Lock()
 	j.stopped = true
 	if j.stopActive != nil {
@@ -240,8 +273,7 @@ func (j *Janitor) Stop() {
 	jobs := slices.Clone(j.jobs)
 	j.life.Unlock()
 	for _, rn := range jobs {
-		rn.done.Wait()
-		rn.job.detach()
+		j.retire(rn)
 	}
 }
 
@@ -320,10 +352,17 @@ func (j *Janitor) loop(ctx context.Context, rn *runningJob) {
 	}
 }
 
-// round runs one round of rn, and records the time if it made progress.
+// round runs one round of rn, and records the time if it made progress. A removed job runs none, and its removal
+// cancels the round in flight.
 func (j *Janitor) round(ctx context.Context, rn *runningJob) bool {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
+	if rn.removed.Err() != nil {
+		return false
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(rn.removed, cancel)()
 	if !rn.job.round(ctx, j.batch(rn.name)) {
 		return false
 	}

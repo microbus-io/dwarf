@@ -18,6 +18,7 @@ package janitor
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,15 +49,20 @@ func testJanitor(t *testing.T, db *sequel.DB, d *diagnostics.Diags, set func(j *
 	return j
 }
 
-// funcJob is a test's job: its round, its idle wait, and what its reset does, nothing when nil.
+// funcJob is a test's job: its round, its idle wait, and what its reset and its attach do, nothing when nil.
 type funcJob struct {
-	name    string
-	idle    time.Duration
-	roundFn func(ctx context.Context, batch batchFunc) bool
-	onReset func()
+	name     string
+	idle     time.Duration
+	roundFn  func(ctx context.Context, batch batchFunc) bool
+	onReset  func()
+	onAttach func()
 }
 
-func (f *funcJob) attach(*Janitor, string) {}
+func (f *funcJob) attach(*Janitor, string) {
+	if f.onAttach != nil {
+		f.onAttach()
+	}
+}
 func (f *funcJob) detach()                 {}
 func (f *funcJob) idleWait() time.Duration { return f.idle }
 func (f *funcJob) round(ctx context.Context, batch batchFunc) bool {
@@ -451,4 +457,69 @@ func TestJanitor_TheIdleWaits(t *testing.T) {
 	assert.Equal(time.Second, r.del().idleWait())
 	assert.Equal(30*time.Second, r.sweep().idleWait())
 	assert.Equal(30*time.Second, r.large().idleWait())
+}
+
+// TestJanitor_AReplacementByNameIsOneStep pins that adding a job under a name replaces the job there in one step: a
+// second AddJob of the name waits for the first, held in its attach, and replaces its job, so one job runs under the
+// name, the last added. Unserialized, the second removes nothing - the first has not added its job yet - and both add.
+func TestJanitor_AReplacementByNameIsOneStep(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	j := testJanitor(t, nil, nil, func(j *Janitor) { j.SetManual(true) })
+	attaching, release := make(chan struct{}), make(chan struct{})
+	first := testJob("x", func(ctx context.Context, _ batchFunc) bool { return false })
+	first.onAttach = func() { close(attaching); <-release }
+	second := testJob("x", func(ctx context.Context, _ batchFunc) bool { return false })
+	var wg sync.WaitGroup
+	wg.Go(func() { j.AddJob("x", first) })
+	<-attaching
+	wg.Go(func() { j.AddJob("x", second) })
+	time.Sleep(50 * time.Millisecond) // the second AddJob reaches its wait, or - unserialized - adds its job
+	close(release)
+	wg.Wait()
+	j.life.Lock()
+	var under []Job
+	for _, rn := range j.jobs {
+		if rn.name == "x" {
+			under = append(under, rn.job)
+		}
+	}
+	j.life.Unlock()
+	if assert.Len(under, 1, "one job under the name") {
+		assert.True(under[0] == Job(second), "the last added")
+	}
+}
+
+// TestJanitor_RemovingAJobEndsItsDrainedRound pins that a removal reaches a Drain's rounds, which run on the active
+// period's context and a copy of the jobs: the round in flight is cancelled, RemoveJob returns once it has, and the
+// Drain runs the removed job no more.
+func TestJanitor_RemovingAJobEndsItsDrainedRound(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	entered := make(chan struct{}, 1)
+	var rounds atomic.Int64
+	j := testJanitor(t, nil, nil, func(j *Janitor) { j.SetManual(true) },
+		testJob("x", func(ctx context.Context, _ batchFunc) bool {
+			rounds.Add(1)
+			entered <- struct{}{}
+			<-ctx.Done()
+			return true // progress, so a Drain that ignored the removal would run it again
+		}),
+	)
+	drained := make(chan struct{})
+	go func() { j.Drain(t.Context()); close(drained) }()
+	<-entered
+	removed := make(chan struct{})
+	go func() { j.RemoveJob("x"); close(removed) }()
+	select {
+	case <-removed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RemoveJob did not end the drained round")
+	}
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Drain did not return")
+	}
+	assert.Equal(int64(1), rounds.Load(), "no round after the removal")
 }
