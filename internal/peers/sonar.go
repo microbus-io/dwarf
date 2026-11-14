@@ -234,9 +234,11 @@ type Sonar struct {
 	// advisory - the claim CAS arbitrates and the window is one getter call wide - but the fix is cheaper
 	// than the argument, and a pointer swap once per reading costs nothing.
 	part atomic.Pointer[partition]
-	// lastGood is the wall time of the last successful read, in nanoseconds. Seeded at construction so a
-	// fresh Sonar reports no blindness and then accrues it until its first read lands.
-	lastGood atomic.Int64
+	// lastGood is the time of the last successful read, by the Sonar's clock. Seeded at construction so a
+	// fresh Sonar reports no blindness and then accrues it until its first read lands. The time itself and not
+	// its UnixNano, so an age taken from it is monotonic: a wall-clock step back would otherwise read a Sonar
+	// that stopped reading as fresh for as long as the step, and a step forward would read a healthy one blind.
+	lastGood atomic.Pointer[time.Time]
 
 	// Driving-goroutine state, deliberately unsynchronized - nothing outside Join and Run touches it, and
 	// those two are contractually one goroutine.
@@ -299,7 +301,8 @@ func New(engineID int64, sh *database.Shard, d *diagnostics.Diags) (*Sonar, erro
 		dispatch: dispatchWindow, straggler: stragglerAge, pruneAfter: pruneHealthyFor,
 	}
 	s.diags = d
-	s.lastGood.Store(s.now().UnixNano())
+	seeded := s.now()
+	s.lastGood.Store(&seeded)
 	s.replicas.Store(1)
 	s.standing.Store(&standing{rank: 0, candidates: 1, replicas: 1, inCut: true})
 	s.lastRaw = standing{rank: 0, candidates: 1, replicas: 1, inCut: true}
@@ -477,7 +480,7 @@ func (p *partition) divides() bool {
 
 // BlindFor is how long it has been since the registry was last read successfully. Zero on a healthy Sonar.
 func (s *Sonar) BlindFor() time.Duration {
-	return max(0, s.now().Sub(time.Unix(0, s.lastGood.Load())))
+	return max(0, s.now().Sub(*s.lastGood.Load()))
 }
 
 // Join announces this replica and returns with every getter seeded. It BLOCKS for two scan intervals, and
@@ -852,7 +855,8 @@ func (s *Sonar) observe(ctx context.Context, rows []peer, err error) {
 		s.blindLogged = false
 		s.diags.Logger().InfoContext(ctx, "Peer registry readable again", "shard", s.shard)
 	}
-	s.lastGood.Store(now.UnixNano())
+	readAt := now
+	s.lastGood.Store(&readAt)
 
 	working := s.profile.Load().Working
 	v := classify(rows, s.engineID, working, s.windows())
@@ -1020,7 +1024,7 @@ func (s *Sonar) windows() windows {
 // is the same threshold that interrupts the prune's healthy run and that withholds a fall in the replica
 // count, so a gap either counts against all three or against none.
 func (s *Sonar) blind(now time.Time) bool {
-	return now.Sub(time.Unix(0, s.lastGood.Load())) > 2*s.scan
+	return now.Sub(*s.lastGood.Load()) > 2*s.scan
 }
 
 // sleep waits d or until ctx is done, reporting false if the context ended.

@@ -106,7 +106,8 @@ func newRigWith(t *testing.T, d *diagnostics.Diags) *rig {
 	// Both, together: New seeded lastGood from the real clock, which against the fake one would read as
 	// either decades of blindness or none at all.
 	s.now = clk.now
-	s.lastGood.Store(clk.now().UnixNano())
+	seeded := clk.now()
+	s.lastGood.Store(&seeded)
 	return &rig{s: s, db: db, clk: clk}
 }
 
@@ -934,7 +935,7 @@ func TestPeers_JoinAnnouncesWaitsAndSeedsEveryGetter(t *testing.T) {
 	started := r.clk.now()
 	assert.NoError(r.s.Join(ctx))
 	replicas, ordinal, partitioned := r.s.Partition()
-	seeded, readAt := r.s.Replicas(), r.s.lastGood.Load()
+	seeded, readAt := r.s.Replicas(), *r.s.lastGood.Load()
 
 	assert.Equal(2*r.s.scan, waited, "one wait of two read cadences")
 	assert.Equal([]int64{10, 20, selfID}, announced, "announced before the wait, so peers shrink first")
@@ -942,7 +943,7 @@ func TestPeers_JoinAnnouncesWaitsAndSeedsEveryGetter(t *testing.T) {
 	assert.True(partitioned)
 	assert.Equal(3, replicas)
 	assert.Equal(2, ordinal, "third by engine id among the dispatchers")
-	assert.True(readAt >= started.Add(waited).UnixNano(), "and the reading behind them came after the wait")
+	assert.False(readAt.Before(started.Add(waited)), "and the reading behind them came after the wait")
 }
 
 // TestPeers_ReRegistersWhenItsRowIsMissing pins the one repair path. Nothing else can fix a missing row - the
@@ -1144,7 +1145,8 @@ func TestPeers_RunReadsUntilTheContextEnds(t *testing.T) {
 	defer cancel()
 	r := newRig(t)
 	r.s.now = time.Now
-	r.s.lastGood.Store(time.Now().UnixNano())
+	seeded := time.Now()
+	r.s.lastGood.Store(&seeded)
 	// A CADENCE this test drives on the real clock has to sit well clear of scheduler jitter: the blindness
 	// grace is two of these, and a gap that wide resets the healthy run the prune below waits for.
 	r.s.scan = 100 * time.Millisecond

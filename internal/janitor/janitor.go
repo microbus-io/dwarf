@@ -103,8 +103,10 @@ type runningJob struct {
 	// removed ends when the job is removed: it cancels a round in flight, a Drain's included, and no round starts after.
 	removed context.Context
 	remove  context.CancelFunc
-	// progress is the Unix time in nanoseconds of the last round that made progress, or of the last Resume.
-	progress atomic.Int64
+	// progress is the time of the last round that made progress, or of the last Resume; nil before then. The time
+	// itself and not its UnixNano, so the age JobAges takes from it is monotonic: a wall-clock step would otherwise
+	// add itself to every job's age, or clamp a blocked job's to zero.
+	progress atomic.Pointer[time.Time]
 	// cancel ends the job's goroutine, and done waits for it.
 	cancel context.CancelFunc
 	done   sync.WaitGroup
@@ -157,7 +159,8 @@ func (j *Janitor) AddJob(name string, job Job) {
 	rn := &runningJob{name: name, job: job}
 	rn.removed, rn.remove = context.WithCancel(context.Background())
 	if j.active != nil {
-		rn.progress.Store(time.Now().UnixNano())
+		now := time.Now()
+		rn.progress.Store(&now)
 	}
 	j.jobs = append(j.jobs, rn)
 	if j.active != nil && !j.manual {
@@ -221,13 +224,13 @@ func (j *Janitor) Resume() {
 	if j.run == nil || j.stopped || j.active != nil {
 		return
 	}
-	now := time.Now().UnixNano()
+	now := time.Now()
 	for _, rn := range j.jobs {
 		// The last active period's goroutine is cancelled already; it must be gone before the job starts over.
 		rn.done.Wait()
 		rn.mu.Lock()
 		rn.job.reset()
-		rn.progress.Store(now)
+		rn.progress.Store(&now)
 		rn.mu.Unlock()
 	}
 	j.active, j.stopActive = context.WithCancel(j.run)
@@ -324,8 +327,8 @@ func (j *Janitor) JobAges(now time.Time) map[string]time.Duration {
 	j.life.Unlock()
 	ages := make(map[string]time.Duration, len(jobs))
 	for _, rn := range jobs {
-		if at := rn.progress.Load(); at != 0 {
-			ages[rn.name] = max(now.Sub(time.Unix(0, at)), 0)
+		if at := rn.progress.Load(); at != nil {
+			ages[rn.name] = max(now.Sub(*at), 0)
 		}
 	}
 	return ages
@@ -367,7 +370,8 @@ func (j *Janitor) round(ctx context.Context, rn *runningJob) bool {
 	if !rn.job.round(ctx, j.batch(rn.name)) {
 		return false
 	}
-	rn.progress.Store(time.Now().UnixNano())
+	now := time.Now()
+	rn.progress.Store(&now)
 	return true
 }
 

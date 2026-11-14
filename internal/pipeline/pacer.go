@@ -60,6 +60,10 @@ const (
 	DefaultMinGap = 20 * time.Millisecond
 )
 
+// clockBase anchors every pacer's workStart on the monotonic clock: an offset from it, taken with Sub or
+// Since, is monotonic, where a UnixNano is wall time.
+var clockBase = time.Now()
+
 // pacer is the cadence one loop keeps, and the work window an owner reads its liveness from. Both loops
 // embed one; it knows nothing about phases, shards or what the cycle does.
 //
@@ -79,8 +83,12 @@ type pacer struct {
 	// start) and lastEnd the gap (end to start); both zero until the first cycle runs.
 	lastStart time.Time
 	lastEnd   time.Time
-	// workStart is when the current cycle entered its work, in nanoseconds, or 0 between cycles - see
-	// WorkingFor. Atomic because the driving goroutine sets it and an owner's publisher reads it.
+	// workStart is when the current cycle entered its work, in nanoseconds since clockBase (at least 1), or 0
+	// between cycles - see WorkingFor. An offset on the monotonic clock, never a UnixNano: a wall-clock step
+	// inside a window would stretch it, reading a short cycle as busy, or clamp it to zero, reading a long scan
+	// as not working. An int64 rather than a stored time.Time, because begin runs once per cycle and a loop at
+	// a zero cadence turns ~100k times a second. Atomic because the driving goroutine sets it and an owner's
+	// publisher reads it.
 	workStart atomic.Int64
 }
 
@@ -146,7 +154,7 @@ func (p *pacer) WorkingFor() time.Duration {
 	if started == 0 {
 		return 0
 	}
-	return max(0, time.Since(time.Unix(0, started)))
+	return max(0, time.Since(clockBase)-time.Duration(started))
 }
 
 // wait sleeps out whatever the cadence still owes and reports how long that took. The wait is the larger of
@@ -179,7 +187,7 @@ func (p *pacer) wait(ctx context.Context) time.Duration {
 // of a healthy cycle's wall clock and would make any predicate over WorkingFor permanently true.
 func (p *pacer) begin() time.Time {
 	p.lastStart = time.Now()
-	p.workStart.Store(p.lastStart.UnixNano())
+	p.workStart.Store(max(1, int64(p.lastStart.Sub(clockBase))))
 	return p.lastStart
 }
 
