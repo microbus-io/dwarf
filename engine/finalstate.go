@@ -257,8 +257,15 @@ func (e *Engine) computeFinalState(ctx context.Context, db sequel.Executor, shar
 // terminalFinalState is computeFinalState for a path that terminalizes a flow whatever its state holds -
 // Terminate, Delete, Purge and the wedge sweep. A merge that cannot fold (a permanentError) yields an empty
 // final_state rather than an error: the merge would fail identically on every attempt, so propagating it would
-// leave the flow impossible to stop. A flow whose row is gone - reaped or deleted under a racing Terminate - needs
-// no final state either: the terminalizing UPDATE's guard will match nothing. A database error still propagates.
+// leave the flow impossible to stop. A flow whose row is gone needs no final state either: the terminalizing
+// UPDATE's guard will match nothing. terminateSubtree's rescan already drops a flow removed before its transaction,
+// so this is a backstop. A database error still propagates.
+//
+// sql.ErrNoRows reaches here only from flowGraph's read of the flow row. Every single-row read of a step under
+// computeFinalState takes a missing row as nothing to read - readTerminalTails, and with an error logged
+// outermostSpawn, mergeCohortState and simulatedFanInPart - and the other reads are multi-row queries. Keep it so: a
+// step read returning a bare sql.ErrNoRows would terminalize a flow that is present with an empty final state,
+// logged as a flow whose row was not found.
 func (e *Engine) terminalFinalState(ctx context.Context, db sequel.Executor, shardNum, flowID, flowHour int, flowToken string) ([]byte, error) {
 	fs, _, err := e.computeFinalState(ctx, db, shardNum, flowID, flowToken)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -304,7 +311,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	// The rebuild starts at the OUTERMOST cohort on the tail's lineage chain, whose spawn is on the trunk. The
 	// tail may sit deep inside a nested fan-out whose inner cohort failed, and rebuilding only that inner cohort
 	// would drop everything outside it - the flow's base state and every other branch at every level.
-	outermost, err := e.outermostSpawn(ctx, db, tails.baseLineage)
+	outermost, err := e.outermostSpawn(ctx, db, shardNum, tails.baseLineage)
 	if err != nil {
 		return nil, "", errors.Trace(err)
 	}
@@ -341,6 +348,12 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	return data, workflowURL, nil
 }
 
+// missingSpawnLog begins the error logged when a final state's rebuild names a spawn step that is not there. A
+// member's lineage names a step of its own flow, and no engine path removes some of a flow's steps and keeps the
+// flow, so only a bug or a hand edit leaves one. The rebuild goes on without it rather than fail, which would fail
+// every attempt to close or stop the flow.
+const missingSpawnLog = "Computing final_state found a fan-out's spawn step missing"
+
 // mergeCohortState rebuilds the state of a cohort that resolved with failures, and so never reached its fan-in.
 // It runs the SAME merge fanInRow runs at a successful convergence - the spawn step's `state + changes` as
 // the base, then every COMPLETED member's `changes` folded through the graph's reducers in `fan_out_ordinal,
@@ -368,6 +381,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		"SELECT state, changes, state_refs, task_name FROM dwarf_steps WHERE step_id=?", cohortSpawnID,
 	).Scan(&spawnStateJSON, &spawnChangesJSON, &spawnRefsJSON, &spawnTask)
 	if err == sql.ErrNoRows {
+		e.diags.Logger().ErrorContext(ctx, missingSpawnLog+"; the final state is empty", "shard", shardNum, "step", cohortSpawnID)
 		return workflow.State{}, nil
 	}
 	if err != nil {
@@ -425,6 +439,7 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 		"SELECT state, changes, state_refs FROM dwarf_steps WHERE step_id=?", spawnID,
 	).Scan(&stateJSON, &changesJSON, &refsJSON)
 	if err == sql.ErrNoRows {
+		e.diags.Logger().ErrorContext(ctx, missingSpawnLog+"; its cohort's work is left out", "shard", shardNum, "step", spawnID)
 		return workflow.Changes{}, nil
 	}
 	if err != nil {
@@ -550,8 +565,9 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, sh
 // cohort the step is inside (0 for a step outside any cohort). `lineage_id` names the spawn step of the cohort a
 // step belongs to (0 outside any cohort), and a spawn is itself a step with its own lineage, so nested fan-outs
 // form a chain. Each level costs one primary-key lookup and the chain is as deep as the graph's fan-out nesting
-// (typically zero or one), on a terminal path.
-func (e *Engine) outermostSpawn(ctx context.Context, db sequel.Executor, lineageID int) (outermost int, err error) {
+// (typically zero or one), on a terminal path. A spawn the chain names that is gone ends the walk at the cohort
+// inside it, or at none.
+func (e *Engine) outermostSpawn(ctx context.Context, db sequel.Executor, shardNum, lineageID int) (outermost int, err error) {
 	seen := map[int]bool{}
 	for lineageID != 0 && !seen[lineageID] {
 		seen[lineageID] = true // a malformed chain must not spin
@@ -560,6 +576,7 @@ func (e *Engine) outermostSpawn(ctx context.Context, db sequel.Executor, lineage
 			"SELECT lineage_id FROM dwarf_steps WHERE step_id=?", lineageID,
 		).Scan(&next)
 		if err == sql.ErrNoRows {
+			e.diags.Logger().ErrorContext(ctx, missingSpawnLog+"; the state is rebuilt without its cohort", "shard", shardNum, "step", lineageID)
 			return outermost, nil
 		}
 		if err != nil {
