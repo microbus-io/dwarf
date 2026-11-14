@@ -160,9 +160,10 @@ func gaugeTotal(g map[string]float64, name string) float64 {
 // package-level rather than two more parameters on runStep, whose signature already carries ten and none of
 // which this affects.
 var tracing struct {
-	every   time.Duration
-	profile taskProfile
-	dist    delayDist
+	every       time.Duration
+	profile     taskProfile
+	dist        delayDist
+	stackGroups int
 }
 
 // statsTrace is the gauge sampler's callback for the periodic line, or nil when the readout is off. It
@@ -178,5 +179,8 @@ func statsTrace() func(time.Duration, map[string]float64, float64, *seriesPoint)
 			delay = tracing.dist.mean() // a sampled class has no per-line value; the mean says which mix ran
 		}
 		fmt.Println(statsLine(elapsed, delay, g, heapMB, pt))
+		if tracing.stackGroups > 0 {
+			printStackGroups(tracing.stackGroups)
+		}
 	}
 }

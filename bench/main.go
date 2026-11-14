@@ -93,6 +93,7 @@ func run() error {
 		taskQuiet    = flag.Duration("task-quiet", 0, "bursty profile: the quiet half of the cycle, during which tasks do not sleep. Flows keep arriving at the same rate, so only the exec term moves")
 		pprofDir     = flag.String("pprof", "", "write a CPU profile for the whole run and a heap profile at the end into this directory. Run ONE arm at a time when attributing, since the CPU profile spans every -concurrency step")
 		statsEvery   = flag.Duration("stats-interval", 0, "print a stats line this often during each measurement window (0 = off). The crew column is what a burst arm is for")
+		stackGroups  = flag.Int("stack-groups", 0, "with -stats-interval, print below each stats line where the crew's workers are: the N largest groups of their stacks (0 = off)")
 		logLevel     = flag.String("log-level", "warn", "the engines' log level on stderr: debug, info, warn, error or off")
 		taskJitter   = flag.Duration("task-jitter", 0, "additional uniform random [0,d) per-task sleep - de-synchronizes fan-out siblings so a cohort's branches do not all complete at once")
 		taskDist     = flag.String("task-delay-dist", "", "per-task sleep drawn per invocation from weighted classes, e.g. '0.80:5ms,0.15:200ms,0.05:8s' (weights sum to 1): several task durations on one crew. Replaces -task-delay; -task-jitter still adds on top")
@@ -250,6 +251,7 @@ func run() error {
 	// The window functions read this rather than take two more parameters; runStep already carries ten, and
 	// the readout is a property of the RUN rather than of any one window.
 	tracing.every, tracing.profile, tracing.dist = *statsEvery, profile, dist
+	tracing.stackGroups = *stackGroups
 	guard.drain, guard.stall = *drain, *stallTimeout
 	if *stallTimeout > 0 && longestTask+*taskJitter >= *stallTimeout {
 		// A task longer than the timeout is silence the watchdog would read as a hang.

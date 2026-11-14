@@ -469,6 +469,14 @@ identically on a rig. `gaugeTotal` is the helper; use it for anything new here.
 
 ## Profiling a run
 
+**`-stack-groups N` says where the crew's workers are**, below each `-stats-interval` line: the N largest groups of
+their goroutine stacks, each named by its innermost frame outside the runtime and the engine frames that led there
+(parked in `WaitForWork`, at the gate, in a claim, in a completion write, in an arrival batch). A crew far above the
+turn count reads as either long tasks or workers stuck in one stage, and only the stacks tell which. It takes the
+runtime's goroutine profile, which stops the world for milliseconds at tens of thousands of goroutines, so it rides
+the stats line rather than sampling faster.
+
+
 `-pprof DIR` writes a CPU profile for the whole run and a heap profile at the end, named from `-label`.
 
 It exists because the headline cost — microseconds of engine CPU per step rising as the crew grows — is a
