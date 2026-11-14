@@ -31,10 +31,14 @@ and give the statements an existing database needs by hand in the release notes,
 - **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
   [Upgrading](https://docs.dwarf.run/operating/upgrading/)). A PATCH must run side by side with the earlier patches of its minor version during a
   rolling deploy, so it carries no migration - and no change to what replicas write to or expect from the
-  shared tables either, such as a new meaning for an existing column or status. A MINOR may change the
-  database and may need a maintenance window; the release notes say whether it does. Replicas of two versions
-  share a database only where the policy says so - patches of one minor, and a MINOR whose release notes say it
-  can roll; no other mix needs to work. Before a PATCH is tagged,
+  shared tables either: a new meaning for an existing column or status, or a change to how replicas coordinate
+  through them (leases and `lease_seq`, the claim, the peer registry and the residue classes it deals out, the
+  archive day catalog). A MINOR may change the database and may need a maintenance window; the release notes say
+  whether it does. Replicas of two versions share a database only where the policy says so - patches of one
+  minor, and a MINOR whose release notes say it can roll; no other mix needs to work. In such a release, a change
+  that could touch a stored meaning or that coordination - a fix in lease handling, say - is checked by running
+  the previous release and the new one side by side on one database, through that path; a change that touches
+  neither needs no mixed-version check. Before a PATCH is tagged,
   `git diff <its minor's .0 tag> -- internal/migrations` shows nothing.
 - **One `N.sql` per change, covering every dialect.** The file is split on `;\n`; a statement carrying a
   `-- DRIVER: <names>` line runs only on those drivers, an untagged one runs on all. A dialect's statement
@@ -42,15 +46,21 @@ and give the statements an existing database needs by hand in the release notes,
 - **A new file runs on populated tables that a released version made.** A column it adds carries a default every
   existing row can take, and that the engine reads correctly on a row written before the upgrade. Check it by
   opening, under the new code, a database the previous tag made and filled - running, interrupted and archived
-  flows - and driving those flows on: every fixture makes a fresh database, so the suites cannot see this.
+  flows - and driving those flows on, on every supported dialect, since each runs its own statements: every
+  fixture makes a fresh database, so the suites cannot see this.
 - **A new file can run again from its first statement.** `sequel` runs each statement on its own, outside any
   transaction, and marks the file complete only after the last: a statement that fails leaves the earlier ones
   applied, and the next open runs the file again from the top. Guard each statement (`IF NOT EXISTS`; a
   `sys.indexes` or `COL_LENGTH` check on SQL Server), and where a dialect has no guard (MySQL 8 has no
   `IF NOT EXISTS` for `ADD COLUMN` or `CREATE INDEX`), make it that dialect's only statement in the file. A runner
-  that dies between that statement and the mark still leaves a hand repair. The shipped `live/` files are not
-  guarded: they have only run on fresh databases, where a failed first open is dropped and made again. The
-  `archive/` files are (below).
+  that dies between that statement and the mark leaves it applied and the file unmarked, and every later open
+  fails on it (`already exists`). The repair is by hand: confirm every statement of the file applied, then mark
+  the number complete with `UPDATE sequel_migrations SET completed=TRUE WHERE
+  seq_name='github.com/microbus-io/dwarf' AND seq_num=<N>` (`completed=1` on SQL Server and SQLite). A file that
+  failed partway is repaired the same way, its remaining statements run by hand first, or by undoing what applied
+  and letting the next open run it whole. The shipped `live/` files are not guarded: they have only run on fresh
+  databases, where a failed first open is dropped and made again. The `archive/` files are (below), so a day's
+  sequence (`github.com/microbus-io/dwarf/archive/<day>`) needs no repair: the next run completes it.
 
 ## Schema Column Catalog
 
