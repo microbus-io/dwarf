@@ -183,16 +183,16 @@ makes it expensive to diagnose. Two shapes, each measured failing against SQL Se
 the call's own arguments, never the clock, so dispatch latency cannot move the give-up. Assert the exact give-up
 attempt (`retryhorizonflow` gives up at attempt 6).
 
-**A test that FORGES a shape a background sweep also detects must first wait for that sweep.** `recoveryLoop`
-sweeps ON ENTRY (Startup), concurrently with the test body, and it is four scans on one goroutine sharing the
-engine's pool - so on a loaded server it lands seconds in. The orphan detectors are the exposed ones, because
-the backdating a test does to *trigger* its own detector call satisfies the background pass's age guard too, and
-both then count the forged shape. `awaitStartupRecoverySweep` (engine `checkpointhelpers_test.go`) rendezvouses
-on `CheckpointRecoverySweepDone`. Measured: the sweep's own `recoverOrphanedFlows` landed **27ms** before the
-test's on a run that happened to pass. The park detectors are not exposed - they run against fresh, un-backdated
-rows that their 5m guard excludes, while the tests drive their own call with `minAge=0`.
+**No background recovery pass sees a shape a test forges, unless the test lets one run.** The recovery repairs are
+janitor jobs, and test mode's janitors run only in a drain (`janitorManual`), so a test that forges a shape a repair
+detects - a backdated orphan, a lapsed lease - and runs that repair itself is the only pass that sees it. A drain
+(`reapDueFlows` runs each recovery job once an interval) or a test with `janitorManual` off brings one back, and then
+the backdating the test does to *trigger* its own call satisfies the job's age guard too, so both count the forged
+shape: measured, a background orphan repair landed **27ms** before the test's own, on a run that happened to pass.
+The park detectors are less exposed - they run against fresh, un-backdated rows that their 5m guard excludes, while
+the tests drive their own call with `minAge=0`.
 
-Both helpers, and `enginetest.AwaitFlowStatus`, share one idiom: **arm the waiter FIRST, then read `Visits`.** An
+`awaitPropagatedInterrupts` and `enginetest.AwaitFlowStatus` share one idiom: **arm the waiter FIRST, then read `Visits`.** An
 event that landed before the call is caught by the count, a later one by the channel, and one landing between
 the two lines by the channel, since the waiter is already registered. Reversing the two lines reintroduces
 exactly the race the split-arm `Waiter` exists to remove. `Waiter` is one-shot, so waiting for N occurrences

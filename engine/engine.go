@@ -284,11 +284,6 @@ type Engine struct {
 	backlogCancel  context.CancelFunc
 	backlogWorker  sync.WaitGroup
 
-	// Recovery goroutine: runs the defense-in-depth parked-step wedge sweep on its own slow cadence,
-	// off the hot poll path. recoveryCancel stops it, abandoning a pass in flight.
-	recoveryCancel context.CancelFunc
-	recoveryWorker sync.WaitGroup
-
 	// Janitors: one per shard for the run (shardActors.janitor), active where this replica dispatches the shard -
 	// applyRole resumes and pauses them. janitorJobsBuilt, under janitorMu, is the settings their jobs were built
 	// with. janitorCancel ends their run. janitorIdle replaces every job's idle wait for a test; janitorManual starts
@@ -336,7 +331,7 @@ type Engine struct {
 	leaseMargin         time.Duration // added to a step's budget when sizing the crash-recovery lease (30s)
 	latchSweepInterval  time.Duration // Await latch detector cadence - the bound on cross-replica wake (50ms)
 	awaitDefaultBudget  time.Duration // how long Await blocks when the caller's ctx carries no deadline (15m)
-	recoveryInterval    time.Duration // recovery sweep tick; the park detectors run every heavyRepairEvery-th; read once at Startup (1m)
+	recoveryInterval    time.Duration // lease recovery's and orphan repair's interval; the wedge sweep's is wedgeSweepEvery of them; read once at Startup (1m)
 	parkWedgeThreshold  time.Duration // min age before a parked step is treated as wedged (5m)
 	orphanFlowThreshold time.Duration // quiet time before a stranded flow with no step to replay is reported orphaned (5m)
 	deletionGrace       time.Duration // DeleteOnCompletion linger window before reap (1m)
@@ -952,8 +947,7 @@ func (e *Engine) initRuntime() error {
 	e.backlogWanted.Store(false)
 	// The background loops' contexts exist before the engine reports itself started, as their stop signals must:
 	// a drain that found one missing would not stop its loop.
-	var recoveryCtx, archiveCtx, latchCtx context.Context
-	recoveryCtx, e.recoveryCancel = context.WithCancel(e.lifetimeCtx)
+	var archiveCtx, latchCtx context.Context
 	archiveCtx, e.archiveCancel = context.WithCancel(e.lifetimeCtx)
 	latchCtx, e.latchCancel = context.WithCancel(e.lifetimeCtx)
 	var janitorCtx context.Context
@@ -1037,17 +1031,13 @@ func (e *Engine) initRuntime() error {
 			a.piston.Run(pistonCtx)
 		})
 	}
-	// The recovery loop, the archive loop and the latch detector each run on their own child of the lifetime ctx, so
-	// the drain stops waiting for a statement in flight rather than waiting it out: on a bloated table one sweep
-	// statement runs for minutes, and the stop must stay bounded by the steps in flight. Abandoning one strands
-	// nothing: every write they make is a single statement or a single transaction, which lands whole or not at
-	// all, and every repair is idempotent and redone by a peer or the next start.
-	e.recoveryWorker.Go(func() {
-		e.recoveryLoop(recoveryCtx)
-	})
 	// Before Startup returns, so a shard this replica dispatches has its janitor active - and its gauges their
 	// readings - from the start.
 	e.startJanitors(janitorCtx)
+	// The archive loop and the latch detector each run on their own child of the lifetime ctx, so the drain stops
+	// waiting for a statement in flight rather than waiting it out: on a bloated table one statement runs for minutes,
+	// and the stop must stay bounded by the steps in flight. Abandoning one strands nothing: every write they make is
+	// a single statement or a single transaction, which lands whole or not at all.
 	e.archiveWorker.Go(func() {
 		e.archiveLoop(archiveCtx)
 	})
@@ -1168,11 +1158,7 @@ func (e *Engine) drainRuntime() {
 	close(drained)
 	withdrawal.Wait() // before anything below can close what a late withdrawal writes through
 	// Then the background loops, each by cancelling its ctx, so the drain stops waiting for a statement in flight:
-	// the stop stays bounded by the steps in flight, not by the slowest sweep.
-	if e.recoveryCancel != nil {
-		e.recoveryCancel()
-	}
-	e.recoveryWorker.Wait()
+	// the stop stays bounded by the steps in flight, not by the slowest statement.
 	if e.archiveCancel != nil {
 		e.archiveCancel()
 	}

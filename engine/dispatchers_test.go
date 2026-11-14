@@ -1177,8 +1177,8 @@ func TestDispatchers_DrainingDispatcherHandsItsSlotToAPeer(t *testing.T) {
 }
 
 // TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads pins the recovery half of the sweep rule,
-// through the lease reset: an expired lease on a shard this replica only reads is left to the shard's
-// dispatchers, and reset once this replica dispatches it.
+// through lease recovery's job: an expired lease on a shard this replica only reads is left to the shard's
+// dispatchers - its janitor is paused - and reset once this replica dispatches it.
 func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -1203,9 +1203,6 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 	_, err := e.Create(ctx, "rsweep/g", nil, nil)
 	assert.NoError(err)
 	<-started
-	// The startup pass runs the same lease reset as a dispatcher: one still in flight resets the lease
-	// forged below before the reader half can observe it.
-	awaitStartupRecoverySweep(t, e)
 
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -1218,12 +1215,12 @@ func TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads(t *testing.T) 
 		return n
 	}
 
-	e.dispatchFlag(1).Store(false)
-	e.recoverExpiredLeases(ctx)
+	setRole(e, 1, false)
+	e.reapDueFlows(ctx)
 	assert.Equal(1, expired(), "a reader leaves the expired lease to the shard's dispatchers")
 
-	e.dispatchFlag(1).Store(true)
-	e.recoverExpiredLeases(ctx)
+	setRole(e, 1, true)
+	e.reapDueFlows(ctx)
 	assert.Equal(0, expired(), "a dispatcher resets it")
 }
 

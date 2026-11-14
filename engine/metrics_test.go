@@ -735,10 +735,6 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 	}
 	db := sh.DB()
 
-	// The Startup sweep runs recoverOrphanedFlows too; let it finish before forging, or it counts the orphan
-	// a second time and this test's "exactly once" reads two.
-	awaitStartupRecoverySweep(t, eng)
-
 	// Forge the orphan shape: running flow, every step terminal and stale past the threshold, and no step flagged
 	// as advancing, so the sweep has no lost transition to re-run and counts the flow instead.
 	pastMs := -(eng.orphanFlowThreshold + time.Minute).Milliseconds()
@@ -750,7 +746,7 @@ func TestOrphanDetection_EmitsMetric(t *testing.T) {
 		"UPDATE dwarf_steps SET advancing=0, updated_at=DATE_ADD_MILLIS(NOW_UTC(), ?) WHERE flow_id=?", pastMs, flowID)
 	assert.NoError(err)
 
-	eng.recoverOrphanedFlows(ctx, db, shard, true)
+	eng.alarmStrandedFlows(ctx, db, shard)
 
 	var rm metricdata.ResourceMetrics
 	if !assert.NoError(reader.Collect(ctx, &rm)) {

@@ -89,7 +89,6 @@ func newBatchedCohort(t *testing.T, budget time.Duration) *batchedCohort {
 		opts = &workflow.FlowOptions{TimeBudget: budget}
 	}
 	assert.Must(assert.NoError(c.e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, c.e) // the tests run the orphan repair themselves
 
 	var err error
 	c.flowKey, err = c.e.Create(ctx, "batch/g", nil, opts)
@@ -174,7 +173,7 @@ func TestCohortBatch_FencedMemberIsLeftOut(t *testing.T) {
 	assert.NoError(c.db.QueryRowContext(ctx, "SELECT advancing FROM dwarf_steps WHERE step_id=?", leader).Scan(&advancing))
 	assert.Equal(1, advancing, "a fenced member's row was written")
 
-	c.e.recoverOrphanedFlows(ctx, c.db, c.shard, true)
+	c.e.recoverOrphanedFlows(ctx, c.db, c.shard)
 	c.await(t)
 }
 
@@ -240,6 +239,6 @@ func TestCohortBatch_LeaderPanicReleasesTheBatch(t *testing.T) {
 	live := "SELECT COUNT(*) FROM dwarf_steps WHERE lineage_id=? AND task_name='Branch' AND advancing=1 AND lease_expires >= NOW_UTC()"
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return enginetest.CountRows(t, c.e, c.shard, live, c.spawnID) == 0 }),
 		"the panicked arrivals' leases never lapsed")
-	c.e.recoverOrphanedFlows(ctx, c.db, c.shard, true)
+	c.e.recoverOrphanedFlows(ctx, c.db, c.shard)
 	c.await(t)
 }

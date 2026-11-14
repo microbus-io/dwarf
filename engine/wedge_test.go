@@ -297,7 +297,6 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 	releaseChild := func() { releaseOnce.Do(func() { close(release) }) }
 	// Below the Shutdown defer, so it unwinds first; the test also releases the child itself, so it runs once.
 	defer releaseChild()
-	awaitStartupRecoverySweep(t, e) // the Break below must catch only the sweep this test drives
 
 	flowKey, err := e.Create(ctx, "wedgelive.verify:0/parent", nil, nil)
 	if !assert.NoError(err) {
@@ -592,10 +591,6 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		return
 	}
 
-	// The Startup sweep runs recoverOrphanedFlows too; let it finish before forging, or it logs the orphan a
-	// second time and the "exactly one flagged" assertion below reads two.
-	awaitStartupRecoverySweep(t, e)
-
 	// Backdate both flows past orphanFlowThreshold (DB clock, native format), and flip the orphan to running.
 	pastMs := -(e.orphanFlowThreshold + time.Minute).Milliseconds()
 	_, err = db.ExecContext(ctx,
@@ -616,10 +611,10 @@ func TestOrphanDetection_FlagsWedgedFlow(t *testing.T) {
 		pastMs, orphanFlowID)
 	assert.NoError(err)
 
-	// A light pass repairs but never raises the alarm; the heavy pass does.
-	e.recoverOrphanedFlows(ctx, db, shard, false)
-	assert.Len(capture.seen(), 0, "a light pass raised the orphan alarm")
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	// The repair never raises the alarm; the alarm does.
+	e.recoverOrphanedFlows(ctx, db, shard)
+	assert.Len(capture.seen(), 0, "the repair raised the orphan alarm")
+	e.alarmStrandedFlows(ctx, db, shard)
 
 	seen := capture.seen()
 	assert.Len(seen, 1, "exactly one flow should be flagged as orphaned")
@@ -671,7 +666,6 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 		return
 	}
 	db := sh.DB()
-	awaitStartupRecoverySweep(t, e)
 
 	// Two full chunks and a short third of three ids, padded to four by repeating the last.
 	const n = 2*inListChunk + 3
@@ -722,7 +716,7 @@ func TestOrphanDetection_ChecksEveryChunk(t *testing.T) {
 		return
 	}
 
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.alarmStrandedFlows(ctx, db, shard)
 	var want []string
 	for i := range stranded {
 		want = append(want, keys.CorrelationID(shard, hours[i], ids[i]))
@@ -789,7 +783,8 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 
 	var seqBefore int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&seqBefore))
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.recoverOrphanedFlows(ctx, db, shard)
+	e.alarmStrandedFlows(ctx, db, shard)
 	assert.Len(capture.seen(), 0, "a flow whose step was just completed is mid-transition, not orphaned - it must not be flagged")
 	var unmoved int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND status='"+
@@ -798,6 +793,6 @@ func TestOrphanDetection_IgnoresCompletedSuccessorWindow(t *testing.T) {
 
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET advancing=0 WHERE flow_id=?", flowID)
 	assert.NoError(err)
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.alarmStrandedFlows(ctx, db, shard)
 	assert.Len(capture.seen(), 0, "a stranded flow whose step was touched inside orphanFlowThreshold must not be flagged yet")
 }

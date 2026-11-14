@@ -87,7 +87,7 @@ func awaitNextStop(t *testing.T, e *Engine) func() {
 // elapses and the caller's own assertion reports it.
 //
 // This DRIVES the engine rather than merely observing it, which is why it is the one helper here that still
-// loops: without the e.recoverExpiredLeases call the recovery never happens inside a test's lifetime, measured -
+// loops: without the e.recoverLeases call the recovery never happens inside a test's lifetime, measured -
 // every run of the lease-fence battery fails on the wait. A loop that makes the thing happen is not the
 // spin-wait-on-an-observation that every other wait in this package was converted away from.
 //
@@ -108,7 +108,7 @@ func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, la
 			return
 		}
 		time.Sleep(retryInterval)
-		e.recoverExpiredLeases(ctx)
+		e.recoverLeases(ctx)
 	}
 }
 
@@ -119,7 +119,7 @@ func driveLeaseRecovery(t *testing.T, e *Engine, retryDuration time.Duration, la
 // Three choices here are load-bearing:
 //   - Expire by primary key. An UPDATE filtered on status and task name scans dwarf_steps, and on MySQL/MariaDB
 //     it locks every row it scans, so it can deadlock with a sibling branch's transition.
-//   - Drive the sweep rather than run it once. A failed sweep only logs, and the next tick is a minute away.
+//   - Drive the sweep rather than run it once. A failed sweep only logs, and test mode runs no pass of its own.
 //   - Stop the moment the reset is visible in the row, not when the task re-runs. A sweep still in flight when
 //     the re-run's completion write lands can deadlock with it, and the write's contention retry is then all
 //     that keeps the task from running a third time - a test that relied on it would not be testing the fence.

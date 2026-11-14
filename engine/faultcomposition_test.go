@@ -206,8 +206,8 @@ func TestFaultComposition_RepeatedFault(t *testing.T) {
 }
 
 // TestFaultComposition_CompoundWakeLoss pins that when BOTH the dispatch wake (doorbell) and the terminal wake
-// (signalStop) are lost, two independent database-reading recoveries still cover the flow: recoverExpiredLeases
-// dispatches the stranded pending step, and the latch detector returns the DB-committed completion.
+// (signalStop) are lost, two independent database-reading recoveries still cover the flow: the piston's next cycle
+// selects the stranded pending step, and the latch detector returns the DB-committed completion.
 func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -241,8 +241,7 @@ func TestFaultComposition_CompoundWakeLoss(t *testing.T) {
 		outCh <- out
 	}()
 
-	// The doorbell was dropped, so the entry step sits pending until this backstop rings the local doorbell.
-	e.recoverExpiredLeases(ctx)
+	// The doorbell was dropped, so the entry step waits pending for the shard's next piston cycle.
 
 	select {
 	case out := <-outCh:

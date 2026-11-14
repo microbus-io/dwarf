@@ -126,7 +126,6 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 		return
 	}
 	assert.NoError(e.Shutdown(ctx))
-	awaitStartupRecoverySweep(t, e2)
 	sh2, err := e2.db.Shard(shard)
 	if !assert.NoError(err) {
 		return
@@ -134,14 +133,14 @@ func TestOrphanSweep_RecoversLostTransition(t *testing.T) {
 	db2 := sh2.DB()
 
 	// The lease still holds A for its dead worker, so the sweep waits.
-	e2.recoverOrphanedFlows(ctx, db2, shard, true)
+	e2.recoverOrphanedFlows(ctx, db2, shard)
 	assert.True(stranded(e2), "the sweep rewound a step whose lease was unexpired")
 
-	// Lapse the lease, as time would. A LIGHT pass - the one that runs every tick - rewinds A at once, with the age
-	// threshold at its default, since A's lease is the only wait. A is replayed, B runs, and the flow completes.
+	// Lapse the lease, as time would. Orphan repair's pass - every minute - rewinds A at once, with the age threshold
+	// at its default, since A's lease is the only wait. A is replayed, B runs, and the flow completes.
 	_, err = db2.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
-	e2.runRecoverySweep(ctx, false)
+	e2.recoverOrphanedFlows(ctx, db2, shard)
 	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()
 	out, err := e2.Await(awaitCtx, fk)
@@ -170,7 +169,6 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	if !assert.NoError(e.Startup(t.Context())) {
 		t.FailNow()
 	}
-	awaitStartupRecoverySweep(t, e)
 
 	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, flowURL, initial, nil)
@@ -193,7 +191,7 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 		beforeSweep(db, flowID)
 	}
 	swept = time.Now()
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.recoverOrphanedFlows(ctx, db, shard)
 	assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND task_name='A' AND lease_seq>?", flowID, stalledSeq),
 		"the sweep did not take A back")
 
@@ -510,7 +508,6 @@ func TestOrphanSweep_RecoversLostTransitionBesideLiveSibling(t *testing.T) {
 			e.SetHost(mux)
 			assert.NoError(e.SetWorkers(0))
 			assert.Must(assert.NoError(e.Startup(t.Context())))
-			awaitStartupRecoverySweep(t, e)
 
 			fk, err := e.Create(ctx, "livesibling/g", nil, nil)
 			assert.Must(assert.NoError(err))
@@ -544,8 +541,8 @@ func TestOrphanSweep_RecoversLostTransitionBesideLiveSibling(t *testing.T) {
 			assert.NoError(db.QueryRowContext(ctx, "SELECT status FROM dwarf_flows WHERE flow_id=?", flowID).Scan(&flowStatus))
 			assert.Equal(wantFlow, flowStatus)
 
-			// A LIGHT pass, the one that runs every tick, takes A back under a new generation while B is live.
-			e.recoverOrphanedFlows(ctx, db, shard, false)
+			// Orphan repair's pass takes A back under a new generation while B is live.
+			e.recoverOrphanedFlows(ctx, db, shard)
 			var aStatus string
 			var seqAfter int
 			assert.NoError(db.QueryRowContext(ctx, "SELECT status, lease_seq FROM dwarf_steps WHERE step_id=?", aID).Scan(&aStatus, &seqAfter))

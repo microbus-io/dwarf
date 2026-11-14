@@ -403,7 +403,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 	if n, _ := res.RowsAffected(); !assert.Equal(int64(1), n) { // the zombie really did mark A completed
 		return
 	}
-	eng.recoverExpiredLeases(ctx) // ring the doorbell so a free worker re-claims the now-pending A
+	// A is pending, so the shard's next piston cycle hands it to a free worker.
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Second*enginetest.TimeoutScale())
 	defer cancel()

@@ -931,9 +931,9 @@ O(due rows)) starts its successor at once; `MinGap` bounds the quiet time from E
 **Lease recovery is the ONLY thing that recovers a crashed worker**, because a piston never touches a
 `running` row, and it is the backstop for nothing else: a missed doorbell leaves a `pending` row the next cycle
 selects, and a `pending` step with a future `lease_expires` is invisible to both (the lease-extension guard in
-`persist.go`). It runs on `recoveryLoop` (see "Background Recovery"), the one cadence for every background
-repair; its worst case is `budget + leaseMargin + recoveryInterval`, and the constraints on shortening the tick
-(never from the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection trigger) are at
+`persist.go`). It is the janitor's `lease_recovery` job (see "Background Recovery"); its worst case is
+`budget + leaseMargin + recoveryInterval` plus a pass, and the constraints on shortening the interval (never from
+the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection trigger) are at
 `recoverExpiredLeases` in `wedge.go`.
 
 ### `processStep` and `dispatch` (`dispatch.go`)
@@ -2869,11 +2869,11 @@ most of the `R` idle, instead of `max(budget, 2R)` active.
   replica claiming it and then wedging would keep its residue class forever): it feeds only the ranking, and
   the partition divides on `dispatched_at` evidence alone. A dispatcher
   that wedges still holds its slot until its row goes stale - the residual below - but it strands no class.
-- **Background sweeps run only on dispatched shards.** The janitors and every recovery repair (expired leases,
-  wedged parks, orphaned children, orphan detection) skip a shard this replica only reads. Each is
-  idempotent, so one sweeper per shard suffices, and every shard always has a dispatcher; a reader running
-  them would put heavy scans through its two-connection pool once per replica in the fleet. Pinned by
-  `TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads`.
+- **Background sweeps run only on dispatched shards.** The janitors' jobs - the recovery repairs (expired leases,
+  wedged parks, orphaned children, orphan detection) among them - skip a shard this replica only reads, whose
+  janitor is paused. Each is idempotent, so one sweeper per shard suffices, and every shard always has a dispatcher;
+  a reader running them would put heavy scans through its two-connection pool once per replica in the fleet. Pinned
+  by `TestDispatchers_SweepsSkipShardsThisReplicaOnlyReads` and `TestDispatchers_RecoverySweepSkipsShardsThisReplicaOnlyReads`.
 - **`dwarf_shard_dispatching{shard}`** reports the role (1/0) per replica; summed across the fleet it is the
   shard's dispatcher count, and zero means the shard runs nothing. Replica identity is the host's OTel
   resource (`service.instance.id`), never an engine attribute - engine ids are random per restart, so an
@@ -3669,6 +3669,9 @@ wiring (`janitor.go`):
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
   (`janitorJobsBuilt`). It takes the archive grace to drain with: `accessors.ArchiveNow` drains with 0, then the
   jobs are rebuilt with the engine's own grace.
+- **The recovery repairs are three more of its jobs** (`addRecoveryJobs`, `wedge.go`: `lease_recovery`,
+  `orphan_repair`, `wedge_sweep`, each a `janitor.NewRecovery` running the engine's pass on the shard; see "Background
+  Recovery"). They are added once, with the shard's actors, and the rebuild above leaves them alone.
 - **Two fast jobs of each kind, one on SQLite** (`fastArchivingJobs`, `fastDeletionJobs`, `fastJobs`; user): each
   takes its share of the shard's roots and has a sweep of its own, all named by the share (`janitor.ShareName`:
   `fast_archiving_1`, `sweep_archiving_1`). SQLite's single writer gains nothing from a second job. How the share
@@ -3683,10 +3686,17 @@ wiring (`janitor.go`):
   before its first drain, since a change rebuilds the jobs and starts the fast jobs over.
 - **Tests:** `reapDueFlows` runs the janitors' jobs until they make no progress (`drainJanitors`), expiration
   included when the engine's `flowExpiration` is on (the settings carry it, so a test turning it on mid-run gets the job
-  at its next drain); a test of the pass alone calls `expirePass` with the position it wants. `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
+  at its next drain); a test of the pass alone calls `expirePass` with the position it wants. The drain runs the
+  recovery jobs too, each at most once an interval: a completed pass is progress, so the drain that runs them takes
+  every job round once more, and a test reading what one failing round left (a failure episode) drains once before it
+  arms its fault. **Do not shorten `recoveryInterval` below a drain's round in a test that drains**: every round then
+  finds the interval passed, every recovery pass is progress, and the drain never returns. A test of one repair runs its pass on the shard it forged - `recoverOrphanedFlows`,
+  `alarmStrandedFlows`, a park detector, or `recoverLeases`, lease recovery's pass on every dispatched shard.
+  `janitorManual` starts no job goroutine, so a test decides when the jobs run: **test mode's default**
   (`NewEngineUnderTest`), since jobs polling every second from Startup race any test that holds a due tree in the
   live tables for a moment (a Delete then a Fork expecting 409, a root backdated past the grace); the suite was
-  written against background removal whose first pass came 15 s in. A test of the background running sets it false
+  written against background removal whose first pass came 15 s in. It holds the recovery jobs too, so no background
+  pass races a test that forges a shape a repair would take. A test of the background running sets it false
   (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
   idle wait. A test blocks a real batch, holding its turn, at `diagnostics.CheckpointJanitorBatchTurn`, and one inside
   its transaction, holding a connection, at `diagnostics.CheckpointReapBatchLocked`.
@@ -3940,7 +3950,7 @@ outcomes (no `onError` → flow `failed`; with `onError` → routed to the handl
 
 The engine's lifetime context (`e.lifetimeCtx`) is created at Startup and cancelled only after `Shutdown` has
 drained everything. The workers run on a non-cancelable copy of it, so a step's writes are never interrupted by
-ctx cancellation. The backlog refresh, the recovery loop, the archive loop, the janitors, the latch detector, the
+ctx cancellation. The backlog refresh, the archive loop, the janitors, the latch detector, the
 pistons and the Sonars each run on a child of it that the drain cancels when it stops that goroutine (see "Shutdown ordering"). The only *cancellable*, time-bounded ctx on a
 worker is the `ExecuteTask` call: `executeTask` derives it from the worker's ctx with the step's `time_budget_ms`.
 
@@ -3957,7 +3967,7 @@ against a ~1.5M/s ceiling - inside the connection hold, since pgx watches during
 crew a cancelable ctx (per-worker children included) to "let shutdown reach the workers"**: the drain's stop
 signals are the cache, the gate and `drainStop`, and a per-step deadline belongs on a per-step ctx.
 
-### Shutdown ordering: janitors, then workers, then recovery/archive/latch, then the pistons, then the Sonars
+### Shutdown ordering: janitors, then workers, then archive/latch, then the pistons, then the Sonars
 
 There is no timer goroutine and no wake channel to close (see "A cycle is UNCONDITIONAL"), so no send can
 race a close and panic a worker mid-`processStep`. `drainRuntime`:
@@ -3972,8 +3982,7 @@ backlogCancel(); backlogWorker.Wait()        // nor the backlog refresh against 
 janitorCancel(); stopJanitors()             // a job's statement would hold a connection a worker needs to finish
 cache.Close(); db.CloseTurns()              // BOTH: a worker parks on one or waits on the other
 crew.Drain(); withdrawal.Wait()
-recoveryCancel();    recoveryWorker.Wait() // abandons a sweep statement in flight
-archiveCancel();     archiveWorker.Wait()  // ditto, a catalog refresh
+archiveCancel();     archiveWorker.Wait()  // abandons a catalog refresh in flight
 latchCancel();       latchWorker.Wait()    // the detectors stop before the boards close
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
@@ -3984,8 +3993,9 @@ every latch board Close(); lifetimeCancel()
 **The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's statement has no
 deadline and holds its connection while it runs - a transaction, until it ends - so a worker in flight that needs one
 to record its step could wait on it, and the drain on the worker, for as long as the statement takes - forever, for a
-job blocked on a held lock. The recovery loop and the archive loop can stop after the crew only because every attempt
-of theirs is bounded. Pinned by `TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which holds a batch inside
+job blocked on a held lock. The recovery repairs are janitor jobs and stop with them, before the crew, which needs none
+of them: a stopping replica's leases are its peers' to recover. The archive loop can stop after the crew only because
+every attempt of its is bounded. Pinned by `TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain`, which holds a batch inside
 its transaction and hangs with the cancellation after `crew.Drain`.
 
 **The Sonars drain LAST, after the pistons, and that ordering is load-bearing.** This replica must stay
@@ -3999,8 +4009,9 @@ that one is deliberately left live until every goroutine has drained, while `pis
 on ctx alone. Neither needs a second signal - a cycle is a pure read and a beat is one idempotent UPDATE, so
 abandoning either mid-flight strands nothing.
 
-**The recovery loop, the archive loop and the latch detector each run on a child of their own, and the drain stops
-each by cancelling it**, so the drain stops waiting for the statement a pass has in flight. Do not stop them with a signal while
+**Every background pass is stopped by cancelling its context** - a janitor job's by the janitors' stop, the archive
+loop's and the latch detector's each on a child of its own - so the drain stops waiting for the statement a pass has
+in flight. Do not stop them with a signal while
 they run on the lifetime ctx: the drain then waits out the slowest background statement (measured: a stop held
 9+ minutes by the orphan, lease-recovery and live-table removal statements on a bloated `dwarf_steps`), and `Shutdown` is
 bounded by a sweep rather than by the steps in flight, as its godoc promises.
@@ -4021,8 +4032,8 @@ bounded by a sweep rather than by the steps in flight, as its godoc promises.
   read holds back vacuum") does not reach it: a deadline fails a pass the running engine depends on, whereas
   nothing after the stop depends on it.
 
-Pinned by `TestShutdown_AbandonsASweepInFlight`: lease recovery held at a checkpoint between its two statements,
-and (on the row-locking dialects) its reset blocked on a row lock the test holds.
+Pinned by `TestShutdown_AbandonsASweepInFlight`: the lease recovery job's pass held at a checkpoint between its two
+statements, and (on the row-locking dialects) its reset blocked on a row lock the test holds.
 
 `leaveFleet` runs on `context.Background()` rather than the lifetime ctx, which is cancelled moments later.
 
@@ -4167,11 +4178,12 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
 
 1. **`recoverExpiredLeases`** (`wedge.go`) - resets `running` steps whose lease expired to `pending`: a plain SELECT
    of the expired ids per shard, then a by-id UPDATE that repeats the predicate. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
-   like any other. Runs on `recoveryLoop` with everything else here - there is no timer goroutine.
+   like any other. It is the janitor's `lease_recovery` job, a pass every `recoveryInterval`, with no trigger and no
+   early wake.
 2. **Closed flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
-3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`) - rewinds to `pending` every `completed` step of a
+3. **Orphan flow repair** (`recoverOrphanedFlows`, `wedge.go`; the janitor's `orphan_repair` job) - rewinds to `pending` every `completed` step of a
    `running` or `interrupted` flow still carrying **`advancing=1`** whose lease has lapsed. That is the shape a
    worker leaves when it dies between the completion write and the transition transaction (see "processStep -
    Normal Completion" below) - the only shape lease recovery cannot reach, since the step is `completed`. Dispatch
@@ -4236,7 +4248,7 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    `TestBumpCohortArrivals_Fence`, and `enginetest.AssertInvariants`' check that no quiesced open flow holds a
    `completed` step still flagged - the signature of a transition path that forgot to clear it.
 
-   **The lease is the repair's only wait, and it runs on every recovery tick**, so the worst case is
+   **The lease is the repair's only wait, and it runs every `recoveryInterval`**, so the worst case is
    `budget + leaseMargin + recoveryInterval` - the bound lease recovery gives a claimed step. **Do not put an age
    guard on step activity in front of the repair.** A step mid-transition still holds its lease, so the scan
    already skips it, and a live worker that keeps its step past its lease is fenced and its step replayed - one
@@ -4251,8 +4263,8 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    `running`+parked subgraph caller, an `interrupted` human wait, a live fan-out sibling).
    **The alarm keeps an age guard** (`orphanFlowThreshold`, 5m): a stranded flow with no flagged step is counted
    only once no step of it has been touched for that long, so a transient all-terminal state nobody has named is
-   not reported as a bug. It is raised only on the heavy pass (every `heavyRepairEvery`-th tick), so an
-   unrepairable flow is counted every 5 minutes per dispatcher, not every minute. **Anchor that guard on `dwarf_steps.updated_at`, never on the flow row**: no
+   not reported as a bug. It is the wedge sweep's (`alarmStrandedFlows`), so an unrepairable flow is counted every 5
+   minutes per dispatcher, not with every minute's repair. **Anchor that guard on `dwarf_steps.updated_at`, never on the flow row**: no
    per-step write moves `dwarf_flows.updated_at`, which stays at go-`running` time, so it tracks no per-step progress and is
    permanently satisfied for any flow running past 5m.
 
@@ -4263,16 +4275,18 @@ UPDATE - see "Time Budgets"). If the worker crashes, the lease expires and `reco
    does not cap step rows examined or force indexed probes. If those flows account for much of `dwarf_steps`, the
    planner may prefer a sequential scan. **Do not check every open flow in one statement**, which makes that the
    likely plan: PostgreSQL then hashes them and reads all of `dwarf_steps` once per `EXISTS` (the measurements are at
-   `recoverOrphanedFlows`). The sweep's runtime delays the next lease-recovery pass.
+   `recoverOrphanedFlows`). The repair is a job apart from lease recovery so that its runtime delays no lease reset
+   (`TestRecoveryJobs_AHeldOrphanRepairDelaysNoLeaseReset`). The alarm runs a scan of its own through the same code
+   (`sweepOpenFlows`), so each dispatcher scans the open flows six times every five minutes.
    `advancing` remains deliberately unindexed because it is set and cleared on every step; indexing it trades
    scan work for two index changes per step. The flow row offers no shortcut to the flagged step:
    `stopped_step_id` is 0 while a flow runs.
 4. **Parked-step wedge sweep** (`recoverWedgedSubgraphParks` + `recoverOrphanedSubgraphChildren`, `wedge.go`,
-   called inline from `runRecoverySweep`) - defense in depth for the `parkedSubgraph` park, whose releasing
-   condition could in principle never fire (a parked step is invisible to selection, and `parkedSubgraph` is
-   invisible to lease recovery too). Runs on the **dedicated recovery goroutine** (`recoveryLoop`) on a plain
-   5m cadence (every `heavyRepairEvery`-th tick of `recoveryInterval`); the loop is drained before the pistons in `drainRuntime` since a recovered
-   park can re-offer a step. The detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation
+   the janitor's `wedge_sweep` job with the stranded-flow alarm, `wedgeSweep`) - defense in depth for the
+   `parkedSubgraph` park, whose releasing condition could in principle never fire (a parked step is invisible to
+   selection, and `parkedSubgraph` is invisible to lease recovery too). A pass every `wedgeSweepEvery` recovery
+   intervals, 5m; it stops with the janitors, before the pistons, since a recovered park can re-offer a step. The
+   detector carries a `parkWedgeThreshold` (5m) age guard so steady-state operation
    never trips a
    false positive (the guard sits comfortably beyond normal subgraph-completion latency). Like the orphan-flow repair,
    this auto-recovers because each recovery re-invokes a *normal, status-guarded* mechanism (the
@@ -4405,8 +4419,8 @@ timeout also kills transactions that sit idle while a busy replica is slow.
   already rolled back its partial writes, so the replay starts clean) - the task does not run again. Same reset
   idiom the defer applies to the `running` -> `pending` lock-contention case, generalized to post-completion. The
   defer runs only on an error return, so a worker that DIES in the window (or whose reset UPDATE loses to a
-  contention storm) leaves the step `completed` with `advancing=1`; the orphan sweep (#3) rewinds it on the first
-  recovery tick after its lease lapses, and it is replayed the same way.
+  contention storm) leaves the step `completed` with `advancing=1`; the orphan sweep (#3) rewinds it on its first
+  pass after its lease lapses, and it is replayed the same way.
 - **processStep - Flow Completion (no next steps)** - step -> `completed` (the completion write, which sets
   `advancing=1`), then `completeFlow`'s transaction sets the flow `completed`. A crash between leaves a completed,
   flagged step on a `running` flow; the orphan sweep (#3) rewinds it and the replay completes the flow. Self-healing.

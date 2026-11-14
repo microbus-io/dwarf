@@ -20,7 +20,8 @@ Its jobs are fast archiving (NewFastArchiving) - closed trees moved into the arc
 as they come due - large-tree archiving (NewLargeArchiving) - trees too large for one transaction copied into the
 archive in stages, then published - and fast deletion (NewFastDeletion) - the trees stamped for deletion deleted as
 they come due. Several fast jobs of one kind share out the shard's roots (SetShare), each with a sweep of its own
-behind it (NewSweepArchiving, NewSweepDeletion).
+behind it (NewSweepArchiving, NewSweepDeletion). A recovery job (NewRecovery) runs a repair the engine passes it on
+the shard every interval.
 
 A Janitor serves one shard on one replica for the replica's run. It works only while it is active - while the replica
 dispatches the shard - and a paused one holds no goroutine and no connection:

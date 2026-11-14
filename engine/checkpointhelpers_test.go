@@ -17,41 +17,36 @@ limitations under the License.
 package engine
 
 import (
-	"testing"
+	"context"
+	"maps"
+	"slices"
 	"time"
-
-	"github.com/microbus-io/dwarf/internal/diagnostics"
-	"github.com/microbus-io/dwarf/internal/enginetest"
 )
 
 const (
 	// retryInterval is the cadence of driveLeaseRecovery, the one helper that still loops - it DRIVES the engine
-	// (it calls recoverExpiredLeases) rather than waiting for it, so it is not a spin-wait on an observation.
+	// (it calls recoverLeases) rather than waiting for it, so it is not a spin-wait on an observation.
 	retryInterval = 20 * time.Millisecond
 
 	// leaseRecoveryWait bounds a lease-recovery re-dispatch - see driveLeaseRecovery.
 	leaseRecoveryWait = 2 * time.Second
 )
 
-// awaitStartupRecoverySweep blocks until the engine's Startup recovery pass has finished. Every test that
-// FORGES a wedge or orphan shape and then drives one detector itself must call this before forging: that
-// background pass runs the same detectors, so one still in flight sees the forged shape too and the test's
-// "flagged exactly once" assertion reads two (see diagnostics.CheckpointRecoverySweepDone for the measured timing).
-//
-// Arm FIRST, then check Visits. That order is load-bearing: a sweep that finished before the call is caught by
-// the count, one that finishes later by the channel, and one landing between the two lines by the channel - the
-// waiter is already registered. Checking first would drop a sweep that lands in the gap.
-func awaitStartupRecoverySweep(t testing.TB, e *Engine) {
-	t.Helper()
-	swept := e.diags.Seams().Waiter(diagnostics.CheckpointRecoverySweepDone)
-	if e.diags.Seams().Visits(diagnostics.CheckpointRecoverySweepDone) > 0 {
-		return
-	}
-	// A "did it hang" ceiling, not a timing contract - the sweep either completes or the engine is broken - so
-	// it leaves generous room for a loaded server and for -race.
-	select {
-	case <-swept:
-	case <-time.After(time.Minute * enginetest.TimeoutScale()):
-		t.Fatal("engine never completed its startup recovery sweep")
+// recoverLeases runs lease recovery's pass on every shard this replica dispatches, each under a turn of its own, as
+// the lease recovery job runs it: what a test drives where it cannot wait for the job, which runs only in a drain or,
+// with janitorManual off, an interval apart.
+func (e *Engine) recoverLeases(ctx context.Context) {
+	actors := e.allActors()
+	for _, shard := range slices.Sorted(maps.Keys(actors)) {
+		if !e.dispatchesOn(shard) {
+			continue
+		}
+		sh, err := e.db.Shard(shard)
+		if err != nil {
+			continue
+		}
+		turnCtx, done := e.dbTurn(ctx, shard)
+		_ = e.recoverExpiredLeases(turnCtx, sh.DB(), shard) // logged by the pass; a test asserts on the rows
+		done()
 	}
 }

@@ -275,8 +275,8 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	driver := sh.DB().DriverName()
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 4+2*fastJobs(fastArchivingJobs, driver)+2*fastJobs(fastDeletionJobs, driver),
-		"fast and sweep archiving, large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep and archive retention are reported")
+	assert.Len(got, 7+2*fastJobs(fastArchivingJobs, driver)+2*fastJobs(fastDeletionJobs, driver),
+		"fast and sweep archiving, large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep, archive retention and the three recovery jobs are reported")
 	first := janitor.ShareName(janitor.JobFastArchiving, 1)
 	assert.True(got[first] >= 0.1 && got[first] < 10, "age %v", got)
 

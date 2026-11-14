@@ -377,6 +377,9 @@ func TestArchiveMetrics_ATransientFailureEndsWhenNothingDueAtItRemains(t *testin
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
+	// A drain first, so the recovery jobs' passes - progress, which would take the drain round every job again and end
+	// the episode under test there - are behind it.
+	e.reapDueFlows(ctx)
 	e.diags.Seams().InjectN(diagnostics.FaultReapSelectErr, 1) // the janitor's scan, which runs first
 	e.drainJanitors(ctx, e.archiveGrace)
 	time.Sleep(20 * time.Millisecond)

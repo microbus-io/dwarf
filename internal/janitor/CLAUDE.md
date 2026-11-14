@@ -2,8 +2,8 @@
 
 > Load when: changing how a janitor's jobs are scheduled, started, stopped or drained, how a batch takes its turn,
 > any of its jobs - fast, sweep and large-tree archiving, fast and sweep deletion and their shares, live retention,
-> the archive deletion sweep, archive retention, expiration - chunked deletion, the shared sweep machinery, or the
-> janitors' metrics.
+> the archive deletion sweep, archive retention, expiration, the recovery jobs - chunked deletion, the shared sweep
+> machinery, or the janitors' metrics.
 > Coupled with: `engine/CLAUDE.md` §"The janitors" (their activity, the residue class, the drain order, the test seams),
 > `internal/turnstile/CLAUDE.md` (what a claim's age means), `internal/archiver/CLAUDE.md` (the day tables, the
 > directory, why a row goes into a day only once the next is whole) and `internal/migrations/CLAUDE.md` (the column
@@ -49,7 +49,7 @@ at once by the next; a round without - nothing found, or every candidate held or
 job whose candidates all fail would otherwise spin on them. No failure counters, backoff or retry classes beyond that.
 
 **The fast jobs wait 1 s, the repair jobs 30 s** (`fastIdle`, `repairIdle`; `TestJanitor_TheIdleWaits`), archive
-retention its pass interval and expiration its own pace (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
+retention its pass interval, expiration its own pace and the recovery jobs their interval (below). A fast job polls for work that keeps arriving. A repair job - the sweeps, live
 retention, large-tree archiving - normally has nothing to do, and its wait is what it costs then: polled every second it would take a turn and its reads every second
 on every shard, and retry a root or tree that keeps failing every second, a large tree's failing chunk copied again
 each time. So in a healthy fleet the janitor's steady cost is its fast jobs. The wait slows nothing that works: a
@@ -64,8 +64,8 @@ nothing else bounds a job's statement.
 
 ## The batch: a fresh turn, its timings
 
-A round does its work in batches through the `batchFunc` it is handed - every job's, archive retention's and
-expiration's included.
+A round does its work in batches through the `batchFunc` it is handed - every job's, archive retention's, expiration's
+and the recovery jobs' included.
 
 - **Each batch takes a turn of its own, from a context with no claim.** The turnstile keeps the age of a context
   stamped before, so a job that reused a batch's context would rank as old as its first batch and outrank every
@@ -475,6 +475,28 @@ pass goes on after, forgotten at a resume - and the pace; the counters (`dwarf_f
   ended and does nothing.
 - **What it ends is marked for deletion**, and the deletion jobs delete it: mostly sweep deletion, within its window,
   since an expired root is old and so behind fast deletion's position once a newer root has been stamped.
+
+## Recovery (`recovery.go`)
+
+The jobs that run the engine's recovery repairs (`NewRecovery`): `lease_recovery`, `orphan_repair` and `wedge_sweep`,
+each running the engine's pass for one repair (`RecoveryPass`) as expiration runs its own. What each repair recovers,
+and why each is a job apart, is the engine's (`engine/CLAUDE.md`, "Background Recovery"); what the job owns is the
+pace.
+
+- **A pass every interval, counted from the last one's end.** A round runs a pass unless the last ended less than an
+  interval ago, and the idle wait is the interval, so the next pass comes an interval after a completed one and after a
+  failed one alike. A resume runs one at once - what a replica restarting after a crash needs, since its own expired
+  leases are lease recovery's (`TestRecovery_ThePace`).
+- **A completed pass is progress, and nothing else is** (user): a healthy shard has nothing to repair, so progress as
+  "repaired something" would leave the progress age growing from the resume, healthy or blocked alike. With a completed
+  pass the age reads up to an interval and a pass while the job is well, and grows past that when it is blocked or
+  failing (`TestRecovery_AFailedPassIsNoProgress`). The pace makes the round after a completed pass, which progress
+  runs at once, a no-op, so progress never runs passes back to back.
+- **A drain runs a pass once** (`TestRecovery_ADrainRunsOnePass`) - which, being progress, takes the drain round every
+  job once more.
+- **A pass is one batch**, under one common turn (`TestRecovery_ThePassRunsUnderATurn`), its statements on the shard's
+  DB. The pass logs its own failures, so the job adds none.
+- **No residue class**: every dispatcher of a shard runs every repair, each idempotent.
 
 ## Chunked deletion (`chunk.go`)
 

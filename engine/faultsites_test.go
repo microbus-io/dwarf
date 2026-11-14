@@ -72,7 +72,6 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	// InjectN(8) is one full round of Transact's retries (transactMaxAttempts), so the transition gives up with a
 	// contention error; the reset fault fires once on the defer that follows.
@@ -104,7 +103,7 @@ func TestFaultSite_RecoveryResetErr(t *testing.T) {
 
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", flowID)
 	assert.NoError(err)
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.recoverOrphanedFlows(ctx, db, shard)
 
 	awaitCtx, cancel := context.WithTimeout(ctx, 10*time.Second*enginetest.TimeoutScale())
 	defer cancel()

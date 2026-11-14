@@ -42,8 +42,7 @@ import (
 // (a single successor, a single convergence, a single child), no outcome that moves once it closed, and a structurally
 // clean world after every recovery sweep has had its turn.
 
-// newLostCommitEngine starts an engine on mux with persist's retry ladder shortened to milliseconds, and returns it
-// once the startup recovery sweep is behind it, so a test that drives the sweeps itself is not raced by that one.
+// newLostCommitEngine starts an engine on mux with persist's retry ladder shortened to milliseconds.
 func newLostCommitEngine(t *testing.T, mux *hosts.Mux) (*Engine, sdkmetric.Reader) {
 	t.Helper()
 	assert := testarossa.For(t)
@@ -53,7 +52,6 @@ func newLostCommitEngine(t *testing.T, mux *hosts.Mux) (*Engine, sdkmetric.Reade
 	e.persistBackoff = []time.Duration{time.Millisecond, time.Millisecond}
 	reader := withManualReader(e)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 	return e, reader
 }
 
@@ -65,20 +63,22 @@ func assertFired(t *testing.T, e *Engine, fault string) {
 }
 
 // sweepEveryDetector runs every background recovery detector once on every shard, the park detectors without their
-// age guard, as a replica's recovery loop would over time.
+// age guard, as a replica's recovery jobs would over time. A detector's error is logged by the detector; the
+// assertions that follow read the rows.
 func sweepEveryDetector(t *testing.T, e *Engine) {
 	t.Helper()
 	ctx := context.Background()
-	e.recoverExpiredLeases(ctx)
+	e.recoverLeases(ctx)
 	for _, shard := range e.db.Indices() {
 		sh, err := e.db.Shard(shard)
 		if !testarossa.For(t).NoError(err) {
 			continue
 		}
 		db := sh.DB()
-		e.recoverOrphanedFlows(ctx, db, shard, true)
-		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-		e.recoverOrphanedSubgraphChildren(ctx, db, shard, 0)
+		_ = e.recoverOrphanedFlows(ctx, db, shard)
+		_ = e.alarmStrandedFlows(ctx, db, shard)
+		_ = e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
+		_ = e.recoverOrphanedSubgraphChildren(ctx, db, shard, 0)
 	}
 }
 

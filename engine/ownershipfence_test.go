@@ -71,7 +71,6 @@ func TestCompleteFlow_StaleWorkerIsFenced(t *testing.T) {
 	e.SetHost(mux)
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 
 	fk, err := e.Create(ctx, "stalecomplete/g", nil, nil)
 	assert.Must(assert.NoError(err))
@@ -99,7 +98,7 @@ func TestCompleteFlow_StaleWorkerIsFenced(t *testing.T) {
 	assert.NoError(db.QueryRowContext(ctx, "SELECT lease_seq FROM dwarf_steps WHERE step_id=?", aID).Scan(&seqBefore))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE step_id=?", aID)
 	assert.NoError(err)
-	e.recoverOrphanedFlows(ctx, db, shard, false)
+	e.recoverOrphanedFlows(ctx, db, shard)
 	var status string
 	var seqAfter int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT status, lease_seq FROM dwarf_steps WHERE step_id=?", aID).Scan(&status, &seqAfter))
@@ -197,7 +196,6 @@ func TestSubgraphRevive_StaleChildDoesNotSettleNewPark(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 
 	// The first child's revive is lost, wedging the caller on a completed child.
 	e.diags.Seams().Inject(diagnostics.FaultSubgraphReviveLost)

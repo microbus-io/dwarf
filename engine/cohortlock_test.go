@@ -222,7 +222,6 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	e.SetHost(mux)
 	e.leaseMargin = 200 * time.Millisecond // the lead is 100ms
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e) // it runs the orphan repair this test drives itself
 
 	fk, err := e.Create(ctx, "queue/g", nil, &workflow.FlowOptions{TimeBudget: 3 * time.Second})
 	assert.NoError(err)
@@ -259,7 +258,7 @@ func TestCohortStripe_QueuedArrivalsKeepTheirLeases(t *testing.T) {
 	assert.True(enginetest.WaitUntil(t, 10*time.Second, func() bool { return enginetest.CountRows(t, e, shard, extended, flowID) == 2 }),
 		"the queued waiters never extended their leases")
 	time.Sleep(time.Until(claimEnds.Add(200 * time.Millisecond))) // the claim's lease is over before the sweep looks
-	e.recoverOrphanedFlows(ctx, db, shard, true)
+	e.recoverOrphanedFlows(ctx, db, shard)
 	var seqAfter int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT SUM(lease_seq) FROM dwarf_steps WHERE flow_id=? AND task_name IN ('B1', 'B2')", flowID).Scan(&seqAfter))
 	assert.Equal(seqBefore, seqAfter, "the sweep took back a waiter that was keeping its lease")

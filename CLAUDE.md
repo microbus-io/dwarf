@@ -121,8 +121,8 @@ matching one before working there:**
   one-statement locate with its sparse directory.
 - **`internal/janitor/CLAUDE.md`** - one shard's background jobs on a replica that dispatches it: why each job has a
   goroutine of its own, the idle wait after a round without progress, why every batch takes a fresh turn and no
-  connection of its own, why the janitors stop before the workers drain, fast archiving and fast deletion, and how
-  their jobs share out a shard's roots.
+  connection of its own, why the janitors stop before the workers drain, fast archiving and fast deletion, how
+  their jobs share out a shard's roots, and the pace of the jobs that run the engine's recovery repairs.
 - **`internal/candidates/CLAUDE.md`** - the bounded hint-cache mechanism; its driving refiller algorithm is in
   `engine/CLAUDE.md`. (`internal/lru` is a textbook LRU+TTL, bounded by count or by weight - godoc only, no
   design doc.)

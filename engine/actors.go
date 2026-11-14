@@ -120,6 +120,7 @@ func (e *Engine) buildActors(ctx context.Context, dayLength time.Duration) error
 		a.janitor.SetManual(e.janitorManual)
 		a.janitor.SetIdle(e.janitorIdle)
 		e.addJanitorJobs(a.janitor, idx, a.archive, settings)
+		e.addRecoveryJobs(a.janitor, idx)
 		actors[idx] = a
 	}
 	e.buildSonars(ctx, actors)

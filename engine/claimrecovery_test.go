@@ -70,7 +70,6 @@ func TestMySQLClaim_ReadErrorRecovery(t *testing.T) {
 			if driver := db.DriverName(); driver != "mysql" && driver != "mariadb" {
 				t.Skip("the two-statement claim is MySQL and MariaDB only")
 			}
-			awaitStartupRecoverySweep(t, e)
 			flowKey, err := e.Create(ctx, "g", nil, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -158,7 +157,6 @@ func TestLeaseFence_RecoveryRequiresKnownGeneration(t *testing.T) {
 				if err := e.Startup(t.Context()); err != nil {
 					t.Fatal(err)
 				}
-				awaitStartupRecoverySweep(t, e)
 				flowKey, err := e.Create(ctx, "g", nil, nil)
 				if err != nil {
 					t.Fatal(err)

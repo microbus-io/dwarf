@@ -72,7 +72,6 @@ func TestMySQLClaim_ReadKeepsItsOwnGeneration(t *testing.T) {
 			if d := db.DriverName(); d != "mysql" && d != "mariadb" {
 				t.Skip("the two-statement claim is MySQL and MariaDB only")
 			}
-			awaitStartupRecoverySweep(t, e)
 			second := e
 			if peer {
 				second = NewEngineUnderTest(t.Name())
@@ -82,7 +81,6 @@ func TestMySQLClaim_ReadKeepsItsOwnGeneration(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer second.Shutdown(ctx)
-				awaitStartupRecoverySweep(t, second)
 			}
 
 			flowKey, err := e.Create(ctx, "g", nil, nil)

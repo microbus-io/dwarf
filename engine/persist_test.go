@@ -177,7 +177,7 @@ func TestPersist_PermanentWriteErrorFailsTheStepInsteadOfLoopingForever(t *testi
 
 	// Run lease recovery, then let every shard's piston scan and push twice: had either re-offered the step, a
 	// worker would have run it again by then.
-	e.recoverExpiredLeases(ctx)
+	e.recoverLeases(ctx)
 	enginetest.AwaitShardCycles(t, e, 2)
 	assert.Equal(int32(1), runs.Load(), "nothing re-dispatches a terminalized step")
 }
@@ -573,8 +573,8 @@ func TestPersist_FailedRenewalStillRetries(t *testing.T) {
 // TestPersist_LandedWriteReportingAnErrorIsNotFailed pins that failStep, after a failed persist, matches only the
 // state the failed write started from. The completion write lands on every attempt but reports an error, as when
 // a commit's acknowledgement is lost, until the ladder is spent. The step is `completed` by then, so failStep
-// matches nothing; the orphan sweep replays the landed completion once the lease lapses, and the flow completes
-// with the task run once. Fenced on `running` or `completed`, failStep matched the landed row and failed the flow.
+// matches nothing; the landed completion is replayed rather than re-run, and the flow completes with the task run
+// once. Fenced on `running` or `completed`, failStep matched the landed row and failed the flow.
 func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -586,7 +586,6 @@ func TestPersist_LandedWriteReportingAnErrorIsNotFailed(t *testing.T) {
 	// The lease the sweep waits out is the longest of the claim's (budget + margin) and the renewals'.
 	e.persistLeaseExtension = 200 * time.Millisecond
 	e.leaseMargin = 200 * time.Millisecond
-	e.recoveryInterval = 200 * time.Millisecond
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistLandedErr, "A"), 1+len(shortPersistBackoff))
 

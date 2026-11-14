@@ -48,7 +48,6 @@ func TestInterruptResume_DeepChain(t *testing.T) {
 	e.SetHost(noopHost{})
 	assert.NoError(e.SetWorkers(0))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()

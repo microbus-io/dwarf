@@ -23,7 +23,7 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// Job is a job a Janitor runs: one NewFastArchiving, NewLargeArchiving or NewFastDeletion returns.
+// Job is a job a Janitor runs: one this package's constructors return - NewFastArchiving, NewRecovery and the rest.
 type Job interface {
 	// attach readies the job to run on j under name, creating its instruments on j's meter; name labels what they record.
 	attach(j *Janitor, name string)

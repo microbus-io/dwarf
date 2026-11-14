@@ -80,7 +80,6 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	e.SetHost(mux)
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e) // the Break below must catch only the sweep this test drives
 
 	fk, err := e.Create(ctx, "leasegap/g", nil, nil)
 	assert.NoError(err)
@@ -104,7 +103,7 @@ func TestLeaseRecovery_StepCompletedBetweenSelectAndResetIsLeftAlone(t *testing.
 	swept := make(chan struct{})
 	go func() {
 		defer close(swept)
-		e.recoverExpiredLeases(ctx)
+		e.recoverLeases(ctx)
 	}()
 	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointLeaseRecoverySelected, 15*time.Second), "the sweep never selected A")
 	unblock()
@@ -147,7 +146,6 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 	e.diags.Seams().InjectN(diagnostics.Join(diagnostics.FaultPersistErr, "A"), math.MaxInt)
 	e.diags.Seams().Inject(diagnostics.Join(diagnostics.FaultFailStepErr, "A"))
 
@@ -172,7 +170,7 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 	e.diags.Seams().Withdraw(diagnostics.Join(diagnostics.FaultPersistErr, "A"))
 	_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?", aStepID)
 	assert.NoError(err)
-	e.recoverExpiredLeases(ctx)
+	e.recoverLeases(ctx)
 	assert.Equal(int64(1), recoveredCount(t, reader))
 
 	out, err := enginetest.BoundedAwait(t, e, fk)
@@ -212,7 +210,6 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 	e.leaseRecoveryBatch = 2 // three batches for five steps
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
-	awaitStartupRecoverySweep(t, e)
 
 	var fks []string
 	for range flows {
@@ -238,7 +235,7 @@ func TestLeaseRecovery_ResetsPastOneBatch(t *testing.T) {
 		return
 	}
 
-	e.recoverExpiredLeases(ctx)
+	e.recoverLeases(ctx)
 	assert.Equal(int64(flows), recoveredCount(t, reader), "every expired step is reset and counted, across batches")
 
 	unblock()

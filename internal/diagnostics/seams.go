@@ -233,14 +233,7 @@ const (
 	CheckpointLeaseRecoverySelected = "leaseRecoverySelected" // lease recovery, after it selected expired steps and before its by-id reset; reached only when it found some
 	CheckpointWedgeSweepSelected    = "wedgeSweepSelected"    // the wedged-park sweep, after it selected parked callers with no open child and before it reads each one's latest child; reached only when it found some
 
-	// CheckpointRecoverySweepDone is fired at the end of a recovery pass, once every detector in it has read the
-	// database. recoveryLoop sweeps ON ENTRY (Startup), so that first pass runs CONCURRENTLY with the test body, and
-	// a test that forges a wedge or orphan shape and then drives one detector itself is racing it: the sweep sees
-	// the forged shape too and counts and logs it a second time. The pass is not instant - four scans on one
-	// goroutine sharing the engine's connection pool - so against a loaded server it lands seconds after Startup
-	// (measured on SQL Server: the sweep's own recoverOrphanedFlows landed 27ms before a forge that followed a
-	// Create+Await). Wait for this before forging; the wait is free once the sweep is behind (Visits).
-	CheckpointRecoverySweepDone = "recoverySweepDone"
+	CheckpointRecoveryPassDone = "recoveryPassDone" // a recovery job's pass, once it has returned, cancelled or not; joined with the job's name and the shard
 
 	// Connection pools:
 	CheckpointPoolPushHeld = "poolPushHeld" // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks

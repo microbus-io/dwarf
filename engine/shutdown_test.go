@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/janitor"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/sequel"
@@ -62,19 +64,19 @@ func (l *sweepErrorLog) logged() []string {
 	return append([]string(nil), l.lines...)
 }
 
-// TestShutdown_AbandonsASweepInFlight pins that Shutdown does not wait out a background sweep's statement. The
-// background lease-recovery pass is held mid-pass, and the drain must get past it while the hold is still in place:
-// a sweep left on the lifetime ctx keeps the drain waiting for as long as the hold lasts. The abandoned pass must not
-// log its cancellation as a sweep failure either.
+// TestShutdown_AbandonsASweepInFlight pins that Shutdown does not wait out a recovery pass's statement. The lease
+// recovery job's pass is held mid-pass, and the drain must get past it while the hold is still in place: a pass the
+// janitor's stop did not cancel keeps the drain waiting for as long as the hold lasts. The abandoned pass must not log
+// its cancellation as a sweep failure either.
 func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 	t.Parallel()
 
-	// The hold is released only once the recovery loop has returned or this ceiling has passed, so a drain that
-	// waits for the sweep fails here instead of hanging.
+	// The hold is released only once the held pass has returned or this ceiling has passed, so a drain that waits for
+	// the pass fails here instead of hanging.
 	ceiling := 15 * time.Second * enginetest.TimeoutScale()
 
-	// run holds the background sweep with hold once its SELECT has found the forged step, calls Shutdown, and
-	// asserts the recovery loop returned before the hold was released. hold returns what ends the hold.
+	// run holds the lease recovery job's pass with hold once its SELECT has found the forged step, calls Shutdown, and
+	// asserts the pass returned before the hold was released. hold returns what ends the hold.
 	run := func(t *testing.T, rowLocks bool, hold func(t *testing.T, e *Engine, db *sequel.DB, stepID int) (release func())) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
@@ -91,6 +93,7 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		defer e.Shutdown(ctx)
 		e.SetHost(mux)
 		assert.NoError(e.SetLogger(slog.New(log)))
+		e.janitorManual = false
 		e.recoveryInterval = 100 * time.Millisecond
 		assert.Must(assert.NoError(e.Startup(t.Context())))
 
@@ -113,7 +116,7 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 		assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=?", flowID).Scan(&stepID))
 
 		// Forge the shape lease recovery resets - a running step whose lease has lapsed - under a breakpoint, so
-		// the next background pass stops between its SELECT and its reset.
+		// the job's next pass stops between its SELECT and its reset.
 		e.diags.Seams().Break(diagnostics.CheckpointLeaseRecoverySelected)
 		_, err = db.ExecContext(ctx,
 			"UPDATE dwarf_steps SET status=?, parked=0, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?",
@@ -123,20 +126,15 @@ func TestShutdown_AbandonsASweepInFlight(t *testing.T) {
 			e.diags.Seams().Resume(diagnostics.CheckpointLeaseRecoverySelected)
 			return
 		}
+		abandoned := e.diags.Seams().Waiter(diagnostics.Join(diagnostics.CheckpointRecoveryPassDone, janitor.JobLeaseRecovery, strconv.Itoa(shard)))
 		release := hold(t, e, db, stepID)
 
-		// The hold ends once the recovery loop has returned, or at the ceiling. Waiting for Shutdown itself instead
-		// would also wait for its teardown of the shard's test database, which a session the hold keeps open there
-		// delays.
+		// The hold ends once the held pass has returned, or at the ceiling. Waiting for Shutdown itself instead would
+		// also wait for its teardown of the shard's test database, which a session the hold keeps open there delays.
 		stopped := make(chan struct{})
 		go func() {
 			defer close(stopped)
 			e.Shutdown(ctx)
-		}()
-		abandoned := make(chan struct{})
-		go func() {
-			e.recoveryWorker.Wait()
-			close(abandoned)
 		}()
 		select {
 		case <-abandoned:
