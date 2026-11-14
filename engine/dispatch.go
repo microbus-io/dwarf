@@ -143,11 +143,10 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	d := &dispatch{shard: shardNum, stepID: stepID, returnGateTurn: returnGateTurn, closeEntryPhase: closeEntryPhase}
 	// d.claimed is set once this dispatch wins its claim. The checkpoint's defer is registered before the
 	// recovery defer so it runs after it: a test waiting for a dispatch to return sees its recovery reset too.
-	if e.diags.Seams().Enabled() { // Enabled gates the assembled name in production
+	if e.diags.Seams().Enabled() { // a production dispatch registers no defer for it
 		defer func() {
 			if d.claimed {
-				e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointClaimedDispatchDone)
-				e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shardNum), strconv.Itoa(stepID)))
+				e.diags.CheckpointBy(ctx, diagnostics.CheckpointClaimedDispatchDone, shardNum, stepID)
 			}
 		}()
 	}
@@ -1013,7 +1012,7 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 	// terminal - Terminate already terminated its children - and returns without reaping or re-dispatching.
 	// Test checkpoint: a breakpoint here freezes the worker before the rewind, so a test can Terminate the
 	// flow (terminalizing this running step) in exactly the window the status='running' rewind guard protects.
-	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeRetryRewind)
+	e.diags.CheckpointBy(ctx, diagnostics.CheckpointBeforeRetryRewind, d.shard, d.stepID)
 	var rewound bool
 	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
 		rewound = false
@@ -1284,7 +1283,7 @@ func (e *Engine) transition(ctx context.Context, d *dispatch) error {
 	// completion - so a test can Terminate the flow in exactly the window the write-first terminal-status guard
 	// exists to survive (the transition must become a no-op, inserting no successors into the terminated flow), or
 	// take the step back from under a worker that has stalled there.
-	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeTransitionTx)
+	e.diags.CheckpointBy(ctx, diagnostics.CheckpointBeforeTransitionTx, d.shard, d.stepID)
 
 	// Evaluate transitions
 	var nextTasks []nextStep

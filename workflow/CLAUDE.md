@@ -525,7 +525,9 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
 
   Pass `giveUpAfter <= 0` for unlimited; to bound by count instead, pass `0` and gate on `flow.Attempt()`. The step row
   is reused. The engine tracks `attempt` and computes the re-dispatch delay `min(initialDelay * delayMultiplier^attempt,
-  maxIntervalDelay)`, merging `state + changes` back into `state` so the task sees its prior output. `flow.Retry`
+  maxIntervalDelay)`. The rewind keeps the attempt's whole delta in `changes` and leaves `state` alone; the next
+  attempt sees it folded in and adds to it ("A step's runs compose"), so a fan-in, which reads a branch's `changes`,
+  takes every attempt's writes. `flow.Retry`
   rewinds the step row in place (it is task-initiated, while the flow is still `running` - distinct from `Fork`, which
   clones a *terminal* flow into a new one). **A retry clears the park
   slot** (`interrupt_done`/`subgraph_done` -> 0, `resume_data`/`subgraph_result`/`subgraph_error` -> `'{}'`),

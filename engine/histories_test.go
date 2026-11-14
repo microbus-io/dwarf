@@ -39,12 +39,13 @@ import (
 )
 
 // Generated operation histories. Each history is a list of events drawn from a seed by the reference model
-// (historymodel_test.go): a task's next execution with what it does, an operation landing at a chosen point of
-// that execution, or an operation landing on the flow at rest. The test drives one engine through the history in
-// lockstep with the model. Every execution enters the test's task handler and waits there to be admitted, so the
-// order the engine runs things in is the history's order and not the scheduler's, and an execution the model did
-// not predict is caught at the door. An operation lands at its point by a hold: inside the task, or at the
-// checkpoint after the completion write or before the retry's rewind.
+// (historymodel_test.go): a task's next execution with what it does, two executions admitted together, an
+// operation landing at a chosen point of an execution, or an operation landing between executions. The test drives
+// one engine through the history in lockstep with the model. Every execution enters the test's task handler and
+// waits there to be admitted, so the order the engine runs things in is the history's order and not the
+// scheduler's, and an execution the model did not predict is caught at the door. An operation lands at its point
+// by a hold: inside the task, or at the step's checkpoint after the completion write or before the retry's rewind.
+// Before any operation lands, every step the engine has claimed is at the door, so the operation finds it running.
 //
 // After every event the flow must stand where the model says, and at the end its outcome, its step rows and its
 // executions must be the model's, no closed outcome may have moved - through the operations a history applies
@@ -58,7 +59,7 @@ import (
 //	                          path is from the package directory)
 
 const (
-	hSleepFor        = time.Second // a sleep long enough for an operation to land while the next step waits
+	hSleepFor        = time.Hour // a sleep no operation can outlast; the driver ends it when the model wakes the step
 	hCancelReason    = "history cancel"
 	hTerminateReason = "history terminate"
 	hFailPrefix      = "history fail "
@@ -66,9 +67,10 @@ const (
 
 // hArrival is an execution waiting at the task handler's door.
 type hArrival struct {
-	task    string
-	stepKey string
-	admit   chan hDirective
+	task   string
+	shard  int
+	stepID int
+	admit  chan hDirective
 }
 
 // hDirective is what an admitted execution does.
@@ -76,6 +78,10 @@ type hDirective struct {
 	behavior hBehavior
 	token    string        // the token it contributes, before the resume data it receives
 	resumed  bool          // it reads the resume data first
+	child    string        // the workflow URL of the child it runs: spawned, or read back once it closed
+	reentry  bool          // the child closed: it reads what the child returned
+	onErr    bool          // it is an error handler: it reads what routed its source
+	abandon  bool          // it returns at once: its flow was terminated while it waited
 	inside   chan struct{} // closed by the task once it contributed, when an operation lands mid-task
 	hold     chan struct{} // closed by the driver once that operation is done
 }
@@ -91,9 +97,16 @@ type hRunner struct {
 	shard    int
 	flowID   int
 	arrivals chan *hArrival
+	waiting  map[string]*hArrival // executions at the door that no event admitted yet, by task
+	refs     map[*mStep][2]int    // each step's shard and id
+	claims   map[*mStep]int       // the dispatches of each step that won their claim
 	done     chan struct{}
-	kept     enginetest.Outcomes // the closed outcome, as it first closed
-	closed   bool
+	released []*mStep // executions let go from the door by a Terminate, whose dispatches the event awaits
+
+	kept       enginetest.Outcomes // the closed outcomes, recorded when a flow last closed
+	keptFlows  map[*mFlow]bool     // the flows closed when they were recorded
+	keptReaped int                 // the children deleted by a retry when they were recorded
+
 	mu       sync.Mutex
 	problems []string // what a task handler saw that the model did not predict
 }
@@ -104,24 +117,57 @@ func (r *hRunner) report(format string, args ...any) {
 	r.problems = append(r.problems, fmt.Sprintf(format, args...))
 }
 
-// mux serves the history's graph, each task through the handler that waits at the door.
+// mux serves the history's graph and the graphs it calls, each task through the handler that waits at the door.
 func (r *hRunner) mux() *hosts.Mux {
 	mux := hosts.NewMux()
-	tasks := hShapeTasks[r.h.Shape]
+	r.serve(mux, r.h.Shape)
+	return mux
+}
+
+// serve registers the graph of shape, and the graphs its tasks call.
+func (r *hRunner) serve(mux *hosts.Mux, shape hShape) {
+	gr := hGraphs[shape]
+	for _, child := range gr.calls {
+		r.serve(mux, child)
+	}
 	g := workflow.NewGraph("History")
-	for _, task := range tasks {
+	for _, task := range gr.tasks {
 		g.SetURL(task, "history/"+task)
 		mux.HandleTask("history/"+task, r.handler(task))
 	}
+	g.SetEntryPoint(gr.tasks[0])
 	g.SetReducer("trail", workflow.ReducerAppend)
-	g.AddTransitionChain(append(slices.Clone(tasks), workflow.End)...)
-	mux.HandleGraph("history/"+string(r.h.Shape), g)
-	return mux
+	branch := map[string]bool{}
+	for source, branches := range gr.branches {
+		for _, b := range branches {
+			g.AddTransition(source, b)
+			g.AddTransition(b, gr.fanIn)
+			branch[b] = true
+		}
+	}
+	for _, task := range gr.tasks {
+		if next, ok := gr.next[task]; ok {
+			g.AddTransition(task, next)
+		} else if gr.branches[task] == nil && !branch[task] {
+			g.AddTransition(task, workflow.End)
+		}
+	}
+	for task, handler := range gr.onError {
+		g.AddTransitionOnError(task, handler)
+	}
+	if gr.fanIn != "" {
+		g.SetFanIn(gr.fanIn)
+	}
+	mux.HandleGraph("history/"+string(shape), g)
 }
 
 func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flow) error {
 	return func(ctx context.Context, f *workflow.Flow) error {
-		a := &hArrival{task: task, stepKey: f.StepKey(), admit: make(chan hDirective, 1)}
+		shard, _, _, stepID, _, err := keys.ParseStepKey(f.StepKey())
+		if err != nil {
+			return err
+		}
+		a := &hArrival{task: task, shard: shard, stepID: stepID, admit: make(chan hDirective, 1)}
 		select {
 		case r.arrivals <- a:
 		case <-r.done:
@@ -137,6 +183,9 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+		if d.abandon {
+			return errors.New("the flow was terminated")
+		}
 		tok := d.token
 		if d.resumed {
 			var out map[string]any
@@ -147,6 +196,31 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 			}
 			tok += ":" + fmt.Sprint(out["answer"])
 		}
+		if d.onErr {
+			var routed errors.TracedError
+			if ok, err := f.Get("onErr", &routed); !ok || err != nil {
+				r.report("%s: execution %s found no onErr: ok=%v err=%v", task, tok, ok, err)
+				return errors.New("no onErr")
+			}
+			tok += ":" + map[bool]string{true: workflow.StatusCancelled, false: workflow.StatusFailed}[workflow.IsCancelled(&routed)]
+		}
+		if d.reentry {
+			var out struct {
+				Trail []string `json:"trail"`
+			}
+			yield, err := f.Subgraph(d.child, nil, &out)
+			switch {
+			case yield:
+				r.report("%s: execution %s expected its child's outcome, but spawned another", task, tok)
+				return errors.New("no child outcome")
+			case workflow.IsCancelled(err):
+				tok += ":" + workflow.StatusCancelled
+			case err != nil:
+				tok += ":" + workflow.StatusFailed
+			default:
+				tok += ":" + strings.Join(out.Trail, ".")
+			}
+		}
 		if err := f.Set("trail", []string{tok}); err != nil {
 			return err
 		}
@@ -154,6 +228,8 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 			close(d.inside)
 			select {
 			case <-d.hold:
+			case <-r.done:
+				return errors.New("the history is over")
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -170,6 +246,11 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 			if err != nil || !yield {
 				r.report("%s: execution %s could not interrupt: yield=%v err=%v", task, tok, yield, err)
 			}
+		case hSpawn:
+			yield, err := f.Subgraph(d.child, nil, nil)
+			if err != nil || !yield {
+				r.report("%s: execution %s could not spawn its child: yield=%v err=%v", task, tok, yield, err)
+			}
 		case hFail:
 			return errors.New("%s", hFailPrefix+d.token)
 		}
@@ -177,21 +258,96 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 	}
 }
 
-// timeout is how long the driver waits for the engine to reach a point the model predicts.
-func (r *hRunner) timeout() time.Duration { return 10 * time.Second * enginetest.TimeoutScale() }
+// timeout is how long the driver waits for the engine to reach a point the model predicts, as the enginetest
+// helpers take it: unscaled, since they stretch it under -race themselves.
+func (r *hRunner) timeout() time.Duration { return 10 * time.Second }
 
-// awaitArrival waits for the next execution at the door, which must be task's.
-func (r *hRunner) awaitArrival(task string) *hArrival {
+// scaled is timeout as a wait of the driver's own takes it.
+func (r *hRunner) scaled() time.Duration { return r.timeout() * enginetest.TimeoutScale() }
+
+// wakeSleepers ends the sleeps of the tree's pending steps - only the marked ones, with marked - where the model
+// wakes them: their not_before comes to now, as if the hour had passed, so an operation that must land while a step
+// sleeps cannot race the clock. Each is offered to the dispatcher as a step coming due would be: the piston
+// schedules its next look by the earliest not_before it saw, an hour off.
+func (r *hRunner) wakeSleepers(marked bool) {
+	r.t.Helper()
+	ctx := r.t.Context()
+	sh, err := r.e.db.Shard(r.shard)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	db := sh.DB()
+	rows, err := db.QueryContext(ctx,
+		"SELECT step_id, priority FROM dwarf_steps WHERE status='"+workflow.StatusPending+"' AND not_before>NOW_UTC()"+
+			" AND flow_id IN (SELECT flow_id FROM dwarf_flows WHERE root_flow_id=?) AND (cancelling=1 OR ?=0)", r.flowID, map[bool]int{true: 1}[marked])
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var sleepers [][2]int
+	for rows.Next() {
+		var stepID, priority int
+		if err := rows.Scan(&stepID, &priority); err != nil {
+			rows.Close()
+			r.t.Fatal(err)
+		}
+		sleepers = append(sleepers, [2]int{stepID, priority})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		r.t.Fatal(err)
+	}
+	for _, s := range sleepers {
+		if _, err := db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", s[0]); err != nil {
+			r.t.Fatal(err)
+		}
+		r.e.enqueueStepDue(ctx, r.shard, s[0], s[1])
+	}
+}
+
+// expected reports whether an arrival of task is one the model accounts for: its step is pending, and not already
+// at the door.
+func (r *hRunner) expected(task string) bool {
+	s := r.m.step(task)
+	return s != nil && s.status == workflow.StatusPending && r.waiting[task] == nil
+}
+
+// receive takes one arrival off the door, or fails the test at the deadline. An arrival the model does not account
+// for fails the test, unless its task is one of also: a step the driver is pulling to the door ahead of an operation
+// the model has already applied.
+func (r *hRunner) receive(deadline <-chan time.Time, waitingFor string, also ...*mStep) {
 	r.t.Helper()
 	select {
 	case a := <-r.arrivals:
-		if a.task != task {
-			r.t.Fatalf("expected an execution of %s, %s arrived", task, a.task)
+		if !r.expected(a.task) && !slices.ContainsFunc(also, func(s *mStep) bool { return s.task == a.task && r.waiting[a.task] == nil }) {
+			r.t.Fatalf("an execution of %s arrived that the model did not predict (waiting for %s)", a.task, waitingFor)
 		}
-		return a
-	case <-time.After(r.timeout() + hSleepFor):
-		r.t.Fatalf("no execution of %s arrived", task)
-		return nil
+		r.waiting[a.task] = a
+	case <-deadline:
+		r.t.Fatalf("no execution of %s arrived", waitingFor)
+	}
+}
+
+// takeArrival returns task's execution at the door, waiting for it.
+func (r *hRunner) takeArrival(task string) *hArrival {
+	r.t.Helper()
+	deadline := time.After(r.scaled())
+	for r.waiting[task] == nil {
+		r.receive(deadline, task)
+	}
+	a := r.waiting[task]
+	delete(r.waiting, task)
+	return a
+}
+
+// ensureAtDoor waits for every step in steps to be at the door: claimed, so an operation landing now finds it
+// running.
+func (r *hRunner) ensureAtDoor(steps []*mStep) {
+	r.t.Helper()
+	deadline := time.After(r.scaled())
+	for _, s := range steps {
+		for r.waiting[s.task] == nil {
+			r.receive(deadline, s.task, steps...)
+		}
 	}
 }
 
@@ -208,52 +364,178 @@ func (r *hRunner) applyOp(op hOp, refused bool) {
 	case hResume:
 		err = r.e.Resume(ctx, r.flowKey, map[string]any{"answer": fmt.Sprintf("r%d", r.m.resumes)})
 	}
+	assert := testarossa.For(r.t)
 	if refused {
-		testarossa.For(r.t).Error(err, "%s was expected to be refused", op)
+		assert.Error(err, "%s was expected to be refused", op)
 	} else {
-		testarossa.For(r.t).NoError(err, "%s", op)
+		assert.NoError(err, "%s", op)
 	}
+}
+
+// afterOp follows an operation that just landed. A Terminate that closed the tree records the closed outcomes
+// there, before a held execution goes on: what it writes next must not move them, and a record taken after it
+// would hold whatever it wrote. The executions still waiting at the door are then let go; their writes are fenced,
+// and the event awaits their dispatches before it checks anything.
+func (r *hRunner) afterOp(op hOp) {
+	r.t.Helper()
+	if op != hTerminate || r.m.root.status != workflow.StatusTerminated {
+		return
+	}
+	r.checkKept()
+	r.keep()
+	for task, a := range r.waiting {
+		s := r.m.step(task)
+		r.admit(s, a, hDirective{abandon: true})
+		r.released = append(r.released, s)
+		delete(r.waiting, task)
+	}
+}
+
+// admit lets a's execution of s in with d, counting its dispatch.
+func (r *hRunner) admit(s *mStep, a *hArrival, d hDirective) {
+	r.refs[s] = [2]int{a.shard, a.stepID}
+	r.claims[s]++
+	a.admit <- d
+}
+
+// awaitDispatches waits for every counted dispatch of s to have returned.
+func (r *hRunner) awaitDispatches(s *mStep) {
+	r.t.Helper()
+	ref := r.refs[s]
+	name := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(ref[0]), strconv.Itoa(ref[1]))
+	enginetest.AwaitVisitCount(r.t, r.e.diags.Seams(), r.claims[s], r.timeout(), name)
+}
+
+// awaitReleased waits for the dispatches of the executions a Terminate let go from the door.
+func (r *hRunner) awaitReleased() {
+	r.t.Helper()
+	for _, s := range r.released {
+		r.awaitDispatches(s)
+	}
+	r.released = nil
+}
+
+// awaitPreempted waits for the dispatches that preempt the steps the last event marked before their claim. The
+// model settles a preemption at once and the engine in a dispatch of its own, after the claim - a sleeping step's
+// once it wakes, which the model's preemption stands for - so an event that follows must not land before it.
+func (r *hRunner) awaitPreempted() {
+	r.t.Helper()
+	r.wakeSleepers(true)
+	for _, s := range r.m.preempted {
+		if _, ok := r.refs[s]; !ok {
+			r.refs[s] = [2]int{r.shard, r.newestStepID(s.task)}
+		}
+		r.claims[s]++
+		r.awaitDispatches(s)
+	}
+}
+
+// directive is what the next execution of s does with behavior.
+func (r *hRunner) directive(s *mStep, behavior hBehavior) hDirective {
+	d := hDirective{behavior: behavior, token: fmt.Sprintf("%s%d", s.task, s.execs+1), resumed: s.resumeData != "", reentry: s.subgraphDone, onErr: s.onErr != ""}
+	if child := s.flow.g.calls[s.task]; child != "" {
+		d.child = "history/" + string(child)
+	}
+	return d
+}
+
+// newestStepID waits for a step of task to exist in the tree, and returns the newest one's id.
+func (r *hRunner) newestStepID(task string) int {
+	r.t.Helper()
+	assert := testarossa.For(r.t)
+	var id int
+	assert.True(enginetest.WaitUntil(r.t, r.timeout(), func() bool {
+		id = enginetest.CountRows(r.t, r.e, r.shard, "SELECT COALESCE(MAX(s.step_id), 0) FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE f.root_flow_id=? AND s.task_name=?", r.flowID, task)
+		return id > 0
+	}), "no %s step in the tree", task)
+	return id
+}
+
+// holdAt is the targeted checkpoint an operation at point waits at, for a's step, or "" for none.
+func holdAt(point hPoint, a *hArrival) string {
+	switch point {
+	case hBeforeTransition:
+		return diagnostics.Join(diagnostics.CheckpointBeforeTransitionTx, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
+	case hBeforeRewind:
+		return diagnostics.Join(diagnostics.CheckpointBeforeRetryRewind, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
+	}
+	return ""
+}
+
+// others is the steps at the door except the ones the event runs.
+func (r *hRunner) others(except ...string) []*mStep {
+	var out []*mStep
+	for _, s := range r.m.atDoor() {
+		if !slices.Contains(except, s.task) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // step runs one event on the engine and the model.
 func (r *hRunner) step(ev hEvent) {
 	r.t.Helper()
-	seams := r.e.diags.Seams()
-	if ev.Task == "" {
-		r.cov.add("op %s on %s", ev.Op, r.restingAs())
-		refused, err := r.m.apply(ev)
-		if err != nil {
-			r.t.Fatal(err)
-		}
-		r.applyOp(ev.Op, refused)
-		r.settle()
+	switch {
+	case ev.Task == "":
+		r.restOp(ev)
+	case ev.With != "":
+		r.runTogether(ev)
+	default:
+		r.runOne(ev)
+	}
+	for _, route := range r.m.routes {
+		r.cov.add("routed to a handler by %s", route)
+	}
+	if r.t.Failed() {
 		return
 	}
-	s := r.m.runnable()
-	if s == nil {
-		r.t.Fatalf("event %s: no step can run", ev)
+	r.checkFlows()
+	r.checkKept()
+	r.keep()
+}
+
+// restOp applies an operation between executions.
+func (r *hRunner) restOp(ev hEvent) {
+	r.t.Helper()
+	r.cov.add("op %s on %s", ev.Op, r.restingAs())
+	r.ensureAtDoor(r.m.atDoor())
+	refused, err := r.m.apply(ev)
+	if err != nil {
+		r.t.Fatal(err)
 	}
-	d := hDirective{behavior: ev.Behavior, token: fmt.Sprintf("%s%d", s.task, s.execs+1), resumed: s.resumeData != ""}
+	r.applyOp(ev.Op, refused)
+	r.afterOp(ev.Op)
+	r.wakeSleepers(false)
+	r.awaitPreempted()
+	r.awaitReleased()
+	r.settle()
+}
+
+// runOne runs one execution, with an operation at a point of it if the event names one.
+func (r *hRunner) runOne(ev hEvent) {
+	r.t.Helper()
+	seams := r.e.diags.Seams()
+	r.m.wake()
+	r.wakeSleepers(false)
+	s, err := r.m.runnableTask(ev.Task, ev.Behavior)
+	if err != nil {
+		r.t.Fatalf("event %s: %v", ev, err)
+	}
+	d := r.directive(s, ev.Behavior)
 	if ev.Op == "" {
 		r.cov.add("run %s%s", ev.Behavior, map[bool]string{true: " resumed"}[d.resumed])
 	} else {
 		r.cov.add("run %s%s +%s@%s on %s", ev.Behavior, map[bool]string{true: " resumed"}[d.resumed], ev.Op, ev.At, ev.Task)
 	}
-	a := r.awaitArrival(ev.Task)
-	shard, _, _, stepID, _, err := keys.ParseStepKey(a.stepKey)
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	dispatchDone := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID))
-	visits := seams.Visits(dispatchDone)
+	others := r.others(ev.Task)
+	a := r.takeArrival(ev.Task)
 	hold := ""
-	switch {
-	case ev.Op != "" && ev.At == hMidTask:
+	if ev.Op != "" {
+		hold = holdAt(ev.At, a)
+	}
+	if ev.Op != "" && ev.At == hMidTask {
 		d.inside, d.hold = make(chan struct{}), make(chan struct{})
-	case ev.Op != "" && ev.At == hBeforeTransition:
-		hold = diagnostics.CheckpointBeforeTransitionTx
-	case ev.Op != "" && ev.At == hBeforeRewind:
-		hold = diagnostics.CheckpointBeforeRetryRewind
 	}
 	if hold != "" {
 		seams.Break(hold)
@@ -263,36 +545,101 @@ func (r *hRunner) step(ev hEvent) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	a.admit <- d
+	r.admit(s, a, d)
 	switch {
 	case d.inside != nil:
 		select {
 		case <-d.inside:
-		case <-time.After(r.timeout()):
+		case <-time.After(r.scaled()):
 			r.t.Fatalf("event %s: the task never ran", ev)
 		}
+		r.ensureAtDoor(others)
 		r.applyOp(ev.Op, refused)
-		r.keepIfTerminated(ev.Op)
+		r.afterOp(ev.Op)
 		close(d.hold)
 	case hold != "":
-		if !seams.WaitTimeout(r.t.Context(), hold, r.timeout()) {
+		if !seams.WaitTimeout(r.t.Context(), hold, r.scaled()) {
 			r.t.Fatalf("event %s: the engine never reached %s", ev, hold)
 		}
+		r.ensureAtDoor(others)
 		r.applyOp(ev.Op, refused)
-		r.keepIfTerminated(ev.Op)
+		r.afterOp(ev.Op)
 		seams.Resume(hold)
 	}
-	enginetest.AwaitVisitCount(r.t, seams, visits+1, r.timeout(), dispatchDone)
+	r.awaitDispatches(s)
+	r.awaitPreempted()
+	r.awaitReleased()
+	r.settle()
+}
+
+// runTogether admits two executions at once: racing, or both held before their transitions while an operation
+// lands, then released in the event's order.
+func (r *hRunner) runTogether(ev hEvent) {
+	r.t.Helper()
+	seams := r.e.diags.Seams()
+	r.m.wake()
+	r.wakeSleepers(false)
+	sa, err := r.m.runnableTask(ev.Task, ev.Behavior)
+	if err != nil {
+		r.t.Fatalf("event %s: %v", ev, err)
+	}
+	sb, err := r.m.runnableTask(ev.With, ev.WithBehavior)
+	if err != nil {
+		r.t.Fatalf("event %s: %v", ev, err)
+	}
+	da, db := r.directive(sa, ev.Behavior), r.directive(sb, ev.WithBehavior)
+	if ev.Op == "" {
+		pair := []string{string(ev.Behavior), string(ev.WithBehavior)}
+		sort.Strings(pair)
+		r.cov.add("together %s & %s", pair[0], pair[1])
+	} else {
+		r.cov.add("together held +%s@%s", ev.Op, ev.At)
+	}
+	others := r.others(ev.Task, ev.With)
+	a, b := r.takeArrival(ev.Task), r.takeArrival(ev.With)
+	holdA, holdB := "", ""
+	if ev.Op != "" {
+		holdA, holdB = holdAt(ev.At, a), holdAt(ev.At, b)
+		seams.Break(holdA)
+		seams.Break(holdB)
+		r.t.Cleanup(func() { seams.Resume(holdA); seams.Resume(holdB) })
+	}
+	refused, err := r.m.apply(ev)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	r.admit(sa, a, da)
+	r.admit(sb, b, db)
+	if ev.Op != "" {
+		for _, hold := range []string{holdA, holdB} {
+			if !seams.WaitTimeout(r.t.Context(), hold, r.scaled()) {
+				r.t.Fatalf("event %s: the engine never reached %s", ev, hold)
+			}
+		}
+		r.ensureAtDoor(others)
+		r.applyOp(ev.Op, refused)
+		r.afterOp(ev.Op)
+		seams.Resume(holdA)
+		r.awaitDispatches(sa)
+		seams.Resume(holdB)
+	}
+	r.awaitDispatches(sa)
+	r.awaitDispatches(sb)
+	r.awaitPreempted()
+	r.awaitReleased()
 	r.settle()
 }
 
 // restingAs names the state an operation event lands on, for coverage.
 func (r *hRunner) restingAs() string {
-	if r.m.status == workflow.StatusRunning && r.m.tail().sleeping {
-		return "asleep"
+	s := r.m.root.status
+	if r.m.root.status == workflow.StatusRunning {
+		s = fmt.Sprintf("running with %d at the door", len(r.m.atDoor()))
+		if slices.ContainsFunc(r.m.steps, func(s *mStep) bool { return s.sleeping }) {
+			s = "asleep"
+		}
 	}
-	s := r.m.status
-	if r.m.watermark >= 0 && !r.m.closed() {
+	if r.m.root.watermark >= 0 && !r.m.closed() {
 		s += " cancelling"
 	}
 	return s
@@ -303,16 +650,16 @@ func (r *hRunner) restingAs() string {
 func (r *hRunner) settle() {
 	r.t.Helper()
 	assert := testarossa.For(r.t)
-	if r.m.status == workflow.StatusRunning {
+	if r.m.root.status == workflow.StatusRunning {
 		return // the next execution's arrival is the check
 	}
-	// Await, watching the door: an execution arriving while the model has the flow stopped is the engine running
-	// what the model says it would not.
+	// Await, watching the door: an execution the model does not account for is the engine running what the model
+	// says it would not.
 	type awaited struct {
 		outcome *workflow.FlowOutcome
 		err     error
 	}
-	ctx, cancel := context.WithTimeout(r.t.Context(), r.timeout()+hSleepFor)
+	ctx, cancel := context.WithTimeout(r.t.Context(), r.scaled())
 	defer cancel()
 	stopped := make(chan awaited, 1)
 	go func() {
@@ -320,55 +667,117 @@ func (r *hRunner) settle() {
 		stopped <- awaited{outcome, err}
 	}()
 	var outcome *workflow.FlowOutcome
-	select {
-	case a := <-r.arrivals:
-		r.t.Fatalf("an execution of %s arrived, the model has the flow %s", a.task, r.m.status)
-	case got := <-stopped:
-		if got.err != nil {
-			r.t.Fatalf("the flow did not stop as %s: %v", r.m.status, got.err)
+	for outcome == nil {
+		select {
+		case a := <-r.arrivals:
+			if !r.expected(a.task) {
+				r.t.Fatalf("an execution of %s arrived, the model has the flow %s", a.task, r.m.root.status)
+			}
+			r.waiting[a.task] = a
+		case got := <-stopped:
+			if got.err != nil {
+				r.t.Fatalf("the flow did not stop as %s: %v", r.m.root.status, got.err)
+			}
+			outcome = got.outcome
 		}
-		outcome = got.outcome
 	}
-	if outcome.Status != r.m.status {
-		r.t.Fatalf("the flow is %s, the model has it %s", outcome.Status, r.m.status)
+	if outcome.Status != r.m.root.status {
+		r.t.Fatalf("the flow is %s, the model has it %s", outcome.Status, r.m.root.status)
 	}
-	if r.m.status == workflow.StatusInterrupted {
-		assert.Equal(nonNil(r.m.tail().merged()), nonNil(outcome.State.GetStrings("trail")), "the interrupted step's state")
+	if r.m.root.status == workflow.StatusInterrupted {
+		assert.Equal(nonNil(r.m.snapshotStep().merged()), nonNil(outcome.State.GetStrings("trail")), "the interrupted step's state")
+		assert.Equal(r.m.interrupts[0].ask, outcome.InterruptPayload.GetString("ask"), "the interrupt payload")
 		return
 	}
-	assert.Equal(nonNil(r.m.final), nonNil(outcome.State.GetStrings("trail")), "the final state")
+	assert.Equal(nonNil(r.m.root.final), nonNil(outcome.State.GetStrings("trail")), "the final state")
 	// Each reason belongs to its own status alone: a Cancel that landed on a flow that then completed or failed
 	// leaves no reason on the outcome.
-	want := map[string]string{r.m.status: "*"}
+	want := map[string]string{r.m.root.status: "*"}
 	assert.Equal(map[bool]string{true: hTerminateReason}[want[workflow.StatusTerminated] != ""], outcome.TerminateReason, "the terminate reason")
 	assert.Equal(map[bool]string{true: hCancelReason}[want[workflow.StatusCancelled] != ""], outcome.CancelReason, "the cancel reason")
-	if r.m.status == workflow.StatusFailed {
-		assert.Contains(outcome.Error, hFailPrefix)
+	if r.m.root.status == workflow.StatusFailed {
+		assert.True(slices.ContainsFunc(r.m.root.failed, func(run string) bool { return strings.Contains(outcome.Error, hFailPrefix+run) }),
+			"the error %q names none of the runs that failed: %v", outcome.Error, r.m.root.failed)
 	} else {
 		assert.Equal("", outcome.Error, "the error")
 	}
-	r.keepIfClosed()
 }
 
-// keepIfTerminated records the closed outcome where a Terminate closed the flow under a held execution, before
-// the execution goes on: what it writes next must not move the outcome, and a record taken after it would hold
-// whatever it wrote. Only a Terminate has closed the flow by then; what a Cancel leads to happens once the
-// execution is released.
-func (r *hRunner) keepIfTerminated(op hOp) {
-	if op == hTerminate {
-		r.keepIfClosed()
+// keep records the closed outcomes again when the model has a flow closed that the last record did not hold, so
+// every later event is compared against them.
+func (r *hRunner) keep() {
+	r.t.Helper()
+	newly := false
+	for _, f := range r.m.flows {
+		if f.closed() && !r.keptFlows[f] {
+			r.keptFlows[f], newly = true, true
+			if f == r.m.root {
+				r.cov.add("closed %s by %s", f.status, f.closedBy)
+			}
+		}
+	}
+	if newly {
+		r.kept, r.keptReaped = enginetest.CaptureOutcomes(r.t, r.e), r.m.reaped
 	}
 }
 
-// keepIfClosed records the closed outcome the first time the model has the flow closed.
-func (r *hRunner) keepIfClosed() {
+// checkKept fails the test for a recorded closed outcome that moved. The only closed flows that may leave the live
+// tables are children a retry of their caller deleted since the record.
+func (r *hRunner) checkKept() {
 	r.t.Helper()
-	if r.closed || !r.m.closed() {
+	if len(r.keptFlows) == 0 {
 		return
 	}
-	r.closed = true
-	r.cov.add("closed %s by %s", r.m.status, r.m.closedBy)
-	r.kept = enginetest.CaptureOutcomes(r.t, r.e)
+	assert := testarossa.For(r.t)
+	removed := enginetest.AssertOutcomesKept(r.t, r.e, r.kept)
+	assert.Len(removed, r.m.reaped-r.keptReaped, "closed flows that left the live tables: %v", removed)
+}
+
+// checkFlows compares the tree's flows with the model's, in the order they were created: each one's graph and
+// status, and a closed one's final state, which the model froze at its close.
+func (r *hRunner) checkFlows() {
+	r.t.Helper()
+	assert := testarossa.For(r.t)
+	want := []string{}
+	for _, f := range r.m.flows {
+		line := r.m.url(f) + ":" + f.status
+		if f.closed() {
+			line += fmt.Sprint(nonNil(f.final))
+		}
+		want = append(want, line)
+	}
+	sh, err := r.e.db.Shard(r.shard)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	rows, err := sh.DB().QueryContext(r.t.Context(), "SELECT workflow_url, status, final_state FROM dwarf_flows WHERE root_flow_id=? ORDER BY flow_id", r.flowID)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	defer rows.Close()
+	got := []string{}
+	for rows.Next() {
+		var url, status string
+		var final []byte
+		if err := rows.Scan(&url, &status, &final); err != nil {
+			r.t.Fatal(err)
+		}
+		line := url + ":" + status
+		if workflow.IsTerminalStatus(status) {
+			var fs struct {
+				Trail []string `json:"trail"`
+			}
+			if err := json.Unmarshal(final, &fs); err != nil {
+				r.t.Fatalf("flow final state %s: %v", final, err)
+			}
+			line += fmt.Sprint(nonNil(fs.Trail))
+		}
+		got = append(got, line)
+	}
+	if err := rows.Err(); err != nil {
+		r.t.Fatal(err)
+	}
+	assert.Equal(want, got, "the flows")
 }
 
 func nonNil(s []string) []string {
@@ -378,14 +787,14 @@ func nonNil(s []string) []string {
 	return s
 }
 
-// stepRows reads the flow's steps as task:status, in the order they were inserted.
+// stepRows reads the tree's steps as task:status, in the order they were inserted.
 func (r *hRunner) stepRows() []string {
 	r.t.Helper()
 	sh, err := r.e.db.Shard(r.shard)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	rows, err := sh.DB().QueryContext(r.t.Context(), "SELECT task_name, status FROM dwarf_steps WHERE flow_id=? ORDER BY step_id", r.flowID)
+	rows, err := sh.DB().QueryContext(r.t.Context(), "SELECT s.task_name, s.status FROM dwarf_steps s JOIN dwarf_flows f ON f.flow_id=s.flow_id WHERE f.root_flow_id=? ORDER BY s.step_id", r.flowID)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -404,9 +813,13 @@ func (r *hRunner) stepRows() []string {
 	return out
 }
 
-// noStray fails the test if an execution arrives within a moment: the model ran everything it predicted.
+// noStray fails the test if an execution is at the door or arrives within a moment: the model ran everything it
+// predicted.
 func (r *hRunner) noStray(when string) {
 	r.t.Helper()
+	for task := range r.waiting {
+		r.t.Errorf("%s: an execution of %s waits at the door", when, task)
+	}
 	select {
 	case a := <-r.arrivals:
 		r.t.Errorf("%s: an execution of %s arrived that the model did not predict", when, a.task)
@@ -417,7 +830,7 @@ func (r *hRunner) noStray(when string) {
 // runHistory drives a fresh engine through h and checks it against the model.
 func runHistory(t *testing.T, h hHistory, cov *hCoverage) {
 	assert := testarossa.For(t)
-	r := &hRunner{t: t, h: h, m: newHModel(h.Shape), cov: cov, arrivals: make(chan *hArrival), done: make(chan struct{})}
+	r := &hRunner{t: t, h: h, m: newHModel(h.Shape), cov: cov, arrivals: make(chan *hArrival), waiting: map[string]*hArrival{}, refs: map[*mStep][2]int{}, claims: map[*mStep]int{}, done: make(chan struct{}), keptFlows: map[*mFlow]bool{}}
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := json.Marshal(h)
@@ -448,22 +861,22 @@ func runHistory(t *testing.T, h hHistory, cov *hCoverage) {
 		}
 	}
 	if !r.m.closed() {
-		t.Fatalf("the history ends with the flow %s", r.m.status)
+		t.Fatalf("the history ends with the flow %s", r.m.root.status)
 	}
 	r.noStray("after the history")
-	want := []string{}
+	wantSteps := []string{}
 	for _, s := range r.m.steps {
-		want = append(want, s.task+":"+s.status)
+		wantSteps = append(wantSteps, s.task+":"+s.status)
 	}
-	assert.Equal(want, r.stepRows(), "the step rows")
+	assert.Equal(wantSteps, r.stepRows(), "the step rows")
 	r.mu.Lock()
 	assert.Len(r.problems, 0, "the task handlers saw: %v", r.problems)
 	r.mu.Unlock()
 
-	assert.Len(enginetest.AssertOutcomesKept(t, r.e, r.kept), 0, "a closed flow left the live tables")
 	sweepEveryDetector(t, r.e)
 	r.noStray("after every recovery detector")
-	assert.Len(enginetest.AssertOutcomesKept(t, r.e, r.kept), 0, "a closed flow left the live tables")
+	r.checkFlows()
+	r.checkKept()
 	enginetest.AssertInvariants(t, r.e)
 }
 
@@ -555,4 +968,19 @@ func runHistories(t *testing.T, shape hShape) {
 func TestHistories_Linear(t *testing.T) {
 	t.Parallel()
 	runHistories(t, hLinear)
+}
+
+func TestHistories_Cohort(t *testing.T) {
+	t.Parallel()
+	runHistories(t, hCohort)
+}
+
+func TestHistories_Child(t *testing.T) {
+	t.Parallel()
+	runHistories(t, hChild)
+}
+
+func TestHistories_Recover(t *testing.T) {
+	t.Parallel()
+	runHistories(t, hRecover)
 }

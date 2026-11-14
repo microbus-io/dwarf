@@ -49,10 +49,15 @@ and its `Diags`, so it must not import `testing`, `testarossa` or anything test-
 cannot live in `internal/enginetest`, the shared test helpers - nor any component, or the two are an import
 cycle.
 
-**Consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the fault's
-effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to be
-readable at the point of perturbation. Two consults that are easy to wrap are inline: the lost-delivery consult in
-`deliverFlowFailureToParent` (`subgraph.go`) and the flow-row-write counter in `queueFlowGrab` (`dispatch.go`). Both
+**Fault consults are written inline at the site they affect, never wrapped in a helper.** A wrapper puts the
+fault's effect a jump away from the code it perturbs, which is exactly backwards for a seam whose whole purpose is to
+be readable at the point of perturbation. A checkpoint changes no outcome at its site - it is observed, or held
+where a test asks - so a checkpoint fired bare and targeted at an entity by integer ids goes through
+`Diags.CheckpointBy`, which builds the targeted name only while the seams are enabled. It takes the ids raw, never a
+name built by the caller: Go evaluates arguments before the call, so a `Join` passed in is assembled on every pass in
+production (pinned at zero allocations by `TestCheckpointBy_FreeWhenDisabled`). Two seams that are easy to wrap stay
+inline: the lost-delivery fault consult in `deliverFlowFailureToParent` (`subgraph.go`), and the flow-row-write
+counter in `queueFlowGrab` (`dispatch.go`), a checkpoint fired targeted only, which `CheckpointBy` does not do. Both
 guard on `e.diags.Seams().Enabled()` first - the lost-delivery one because building its scope needs a **DB read** (a live
 binary must run neither the query nor the consult), the counter because formatting the flow id would otherwise
 allocate a throwaway scope string on the hot path.
@@ -92,12 +97,13 @@ fan-out sibling, or a peer replica's flows stop concurrently. The targeted form 
 `signalStop` runs **post-commit**: when it fires the status is durable, so a test reading the row immediately
 after sees it - the exact fact a status poll was spinning to sample.
 
-**Every join outside a test is wrapped in `e.diags.Seams().Enabled()`, without exception.** The join
+**Every join outside a test is wrapped in `e.diags.Seams().Enabled()`, or made inside `CheckpointBy`.** The join
 assembles a string, and a caller assembles it *before* the seam's own gate can short-circuit - so an unguarded
 site allocates on every pass in production, for a seam that can never fire there. A consult reads
 `if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(...))`, whose `&&` short-circuits before the join; a
-checkpoint pair puts both fires inside one `if e.diags.Seams().Enabled()` block, since the bare fire is a no-op when
-disabled anyway. A **bare constant** name costs nothing and needs no guard - that is most sites.
+checkpoint pair targeted by integer ids is `CheckpointBy`, and one targeted by strings the site already holds
+(`signalStop`'s flow key and status) puts both fires inside one `if e.diags.Seams().Enabled()` block, since the bare
+fire is a no-op when disabled anyway. A **bare constant** name costs nothing and needs no guard - that is most sites.
 
 Every component and every test shares `diagnostics.Join`, so no two can spell the separator differently.
 

@@ -32,7 +32,9 @@ limitations under the License.
 package diagnostics
 
 import (
+	"context"
 	"log/slog"
+	"strconv"
 
 	"github.com/microbus-io/seamster"
 	"go.opentelemetry.io/otel/metric"
@@ -90,6 +92,24 @@ func (d *Diags) Seams() *seamster.Seamster {
 		return inertSeams
 	}
 	return d.seams
+}
+
+// CheckpointBy passes checkpoint name twice: bare, then targeted at the entity ids identify, the name Join(name,
+// ids...) with each id in decimal. A test waits on or holds one entity's arrival by the targeted name, and any
+// entity's by the bare one. The targeted name is built only while the seams are enabled, so a site calls it
+// without an Enabled guard.
+func (d *Diags) CheckpointBy(ctx context.Context, name string, ids ...int) {
+	s := d.Seams()
+	if !s.Enabled() {
+		return
+	}
+	s.Checkpoint(ctx, name)
+	parts := make([]string, 0, len(ids)+1)
+	parts = append(parts, name)
+	for _, id := range ids {
+		parts = append(parts, strconv.Itoa(id))
+	}
+	s.Checkpoint(ctx, Join(parts...))
 }
 
 // SetMeterProvider sets the meter provider, for a component that instruments itself in a scope of its own (the

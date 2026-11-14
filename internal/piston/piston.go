@@ -543,10 +543,7 @@ func (p *Piston) runSupplier(ctx context.Context) {
 // package fires uses, so a caller can wait on either "any shard" or this shard specifically. A no-op when
 // seams are disabled, which the caller need not check itself.
 func (p *Piston) fireCheckpoint(ctx context.Context, name string) {
-	if seams := p.diags.Seams(); seams.Enabled() { // Enabled gates the assembled name in production
-		seams.Checkpoint(ctx, name)
-		seams.Checkpoint(ctx, diagnostics.Join(name, strconv.Itoa(p.shard)))
-	}
+	p.diags.CheckpointBy(ctx, name, p.shard)
 }
 
 // Cycle runs exactly one tally cycle and then one supply cycle - each paced as always - and returns both

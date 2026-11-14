@@ -183,8 +183,8 @@ const (
 	// Step execution:
 	CheckpointClaimBeforeRead         = "claimBeforeRead"         // by (shard, step id, the generation it claimed): the MySQL/MariaDB claim, after its CAS committed and before it reads the row back
 	CheckpointBeforeCancelRoute       = "beforeCancelRoute"       // after the completion write of a step Cancel marked while it ran, before it is routed to its handler or failed as cancelled
-	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // after the step is marked completed, before whichever transaction transitions it
-	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // before the flow.Retry rewind transaction
+	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // bare and by (shard, step id): after the step is marked completed, before whichever transaction transitions it
+	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // bare and by (shard, step id): before the flow.Retry rewind transaction
 	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // flow completion, just before its transaction's status-gate write
 	CheckpointBeforeRecoveryReset     = "beforeRecoveryReset"     // the post-execution recovery path, just before its fenced step-reset transaction
 	CheckpointClaimedDispatchDone     = "claimedDispatchDone"     // bare and by (shard, step id): step execution returned after winning its claim, recovery reset included
