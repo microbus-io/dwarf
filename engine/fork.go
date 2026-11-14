@@ -140,7 +140,7 @@ func (e *Engine) forkFrom(ctx context.Context, db *sequel.DB, src flowTables, sh
 		return errors.Trace(txErr)
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultForkCommitLost, strconv.Itoa(forkFlowID))) {
-		err = commitLostErr(diagnostics.FaultForkCommitLost, strconv.Itoa(forkFlowID))
+		err = e.commitLostErr(ctx, diagnostics.FaultForkCommitLost, strconv.Itoa(forkFlowID))
 	}
 	if errors.Is(err, errForkSourceNotHere) {
 		return "", errForkSourceNotHere

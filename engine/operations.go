@@ -382,7 +382,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 		return err
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultCreateCommitLost, workflowURL)) {
-		err = commitLostErr(diagnostics.FaultCreateCommitLost, workflowURL)
+		err = e.commitLostErr(ctx, diagnostics.FaultCreateCommitLost, workflowURL)
 	}
 	if err != nil {
 		return "", errors.Trace(err)
@@ -1380,7 +1380,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		return nil
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultResumeCommitLost, strconv.Itoa(flowID))) {
-		err = commitLostErr(diagnostics.FaultResumeCommitLost, strconv.Itoa(flowID))
+		err = e.commitLostErr(ctx, diagnostics.FaultResumeCommitLost, strconv.Itoa(flowID))
 	}
 	if lost {
 		return errors.New("flow is not interrupted", http.StatusConflict)

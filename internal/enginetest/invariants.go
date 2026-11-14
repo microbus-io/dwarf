@@ -28,6 +28,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -207,14 +208,25 @@ type stepOutcome struct {
 func CaptureOutcomes(t *testing.T, e Engine) Outcomes {
 	t.Helper()
 	assert := testarossa.For(t)
-	ctx := context.Background()
-	out := Outcomes{flows: map[string]flowOutcome{}, steps: map[string]stepOutcome{}, live: map[string]bool{}}
+	shards := map[int]*sequel.DB{}
 	for _, shard := range accessors.DB(e).Indices() {
 		sh, err := accessors.DB(e).Shard(shard)
-		if !assert.NoError(err) {
-			continue
+		if assert.NoError(err) {
+			shards[shard] = sh.DB()
 		}
-		db := sh.DB()
+	}
+	return CaptureOutcomesIn(t, shards)
+}
+
+// CaptureOutcomesIn records the closed outcomes CaptureOutcomes does, read from the given databases by shard index
+// rather than through an engine: for a test that records them while no engine runs there, as after a process that
+// held the shard was killed and before its replacement starts.
+func CaptureOutcomesIn(t *testing.T, shards map[int]*sequel.DB) Outcomes {
+	t.Helper()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	out := Outcomes{flows: map[string]flowOutcome{}, steps: map[string]stepOutcome{}, live: map[string]bool{}}
+	for shard, db := range shards {
 		rows, err := db.QueryContext(ctx,
 			"SELECT flow_id, created_hour, flow_token, status, error, cancel_reason, final_state FROM dwarf_flows")
 		if !assert.NoError(err) {

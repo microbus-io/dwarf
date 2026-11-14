@@ -714,7 +714,7 @@ func (e *Engine) completeFlow(ctx context.Context, shardNum int, flowID int, ste
 		return nil
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(flowID))) {
-		err = commitLostErr(diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(flowID))
+		err = e.commitLostErr(ctx, diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(flowID))
 	}
 	if err != nil {
 		return false, errors.Trace(err)

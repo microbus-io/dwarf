@@ -166,7 +166,7 @@ func (e *Engine) leadBatch(ctx context.Context, stripe *cohortStripe, b *arrival
 			return e.arrivalBatchTx(ctx, tx, group, fenced)
 		})
 		if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultArrivalBatchCommitLost, leader.row.taskName)) {
-			err = commitLostErr(diagnostics.FaultArrivalBatchCommitLost, leader.row.taskName)
+			err = e.commitLostErr(ctx, diagnostics.FaultArrivalBatchCommitLost, leader.row.taskName)
 		}
 		if err != nil {
 			e.diags.Logger().DebugContext(ctx, "Cohort arrival batch did not commit; its members arrive one by one",

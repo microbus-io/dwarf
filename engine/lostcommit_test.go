@@ -40,7 +40,10 @@ import (
 // engine is told the connection was lost. Each asserts what a lost reply may cost and nothing more - the operation's
 // outcome as without the fault, each task run as often as its contract allows, one durable advancement per obligation
 // (a single successor, a single convergence, a single child), no outcome that moves once it closed, and a structurally
-// clean world after every recovery sweep has had its turn.
+// clean world after every recovery sweep has had its turn. Where the engine retries the operation itself, the test
+// holds it between the commit and the retry, records what the commit left, and waits for the retry to have run
+// before it compares: an operation the test does not wait for can be cancelled by the test's end before it retries,
+// and a baseline taken after the retry cannot see the retry rewrite anything.
 
 // newLostCommitEngine starts an engine on mux with persist's retry ladder shortened to milliseconds.
 func newLostCommitEngine(t *testing.T, mux *hosts.Mux) (*Engine, sdkmetric.Reader) {
@@ -82,20 +85,81 @@ func sweepEveryDetector(t *testing.T, e *Engine) {
 	}
 }
 
-// assertSettledClean is the end of every test here, run once the workload has quiesced: it records every closed
-// outcome, lets every recovery detector run, and requires the outcomes unchanged, nothing removed, the world clean and
-// - given the engine's metric reader - the wedge alarm silent.
-func assertSettledClean(t *testing.T, e *Engine, reader sdkmetric.Reader) {
+// assertSettledClean is the end of every test here, run once the workload has quiesced and the retry the lost reply
+// caused has run. Every closed outcome the commit left must be unchanged after the retry, and again once every
+// recovery detector has run, as must every outcome closed since; nothing may be removed; the world must be clean
+// and - given the engine's metric reader - the wedge alarm silent.
+func assertSettledClean(t *testing.T, e *Engine, reader sdkmetric.Reader, committed enginetest.Outcomes) {
 	t.Helper()
-	before := enginetest.CaptureOutcomes(t, e)
+	assert := testarossa.For(t)
+	assert.Len(enginetest.AssertOutcomesKept(t, e, committed), 0, "a closed flow left the live tables")
+	settled := enginetest.CaptureOutcomes(t, e)
 	sweepEveryDetector(t, e)
-	removed := enginetest.AssertOutcomesKept(t, e, before)
-	testarossa.For(t).Len(removed, 0, "a closed flow left the live tables")
+	assert.Len(enginetest.AssertOutcomesKept(t, e, committed), 0, "a closed flow left the live tables")
+	assert.Len(enginetest.AssertOutcomesKept(t, e, settled), 0, "a closed flow left the live tables")
 	if reader == nil {
 		enginetest.AssertInvariants(t, e)
 		return
 	}
 	assertFaultRecoveryClean(t, e, reader)
+}
+
+// lostReply is a lost-commit fault armed together with a hold on the operation it fires in, between the commit and
+// the retry.
+type lostReply struct {
+	t     *testing.T
+	e     *Engine
+	fault string // the fault, joined with its target
+	held  string // CheckpointCommitLost for the fault
+}
+
+// armLostReply arms fault for target, and the hold before the retry.
+func armLostReply(t *testing.T, e *Engine, fault, target string) *lostReply {
+	t.Helper()
+	l := &lostReply{t: t, e: e, fault: diagnostics.Join(fault, target), held: diagnostics.Join(diagnostics.CheckpointCommitLost, fault)}
+	e.diags.Seams().Break(l.held)
+	e.diags.Seams().Inject(l.fault)
+	t.Cleanup(l.release) // before the engine's shutdown, so a failed test frees the held operation
+	return l
+}
+
+// committed waits for the fault to fire and returns the closed outcomes as its commit left them, with the operation
+// held before its retry.
+func (l *lostReply) committed() enginetest.Outcomes {
+	l.t.Helper()
+	if !l.e.diags.Seams().WaitTimeout(context.Background(), l.held, 10*time.Second*enginetest.TimeoutScale()) {
+		l.t.Fatalf("the fault %s never fired", l.fault)
+	}
+	return enginetest.CaptureOutcomes(l.t, l.e)
+}
+
+// release lets the held operation see its lost connection and retry.
+func (l *lostReply) release() {
+	l.e.diags.Seams().Resume(l.held)
+}
+
+// stepIDOf waits for the step of taskName in the flow with flowID - the branch at ordinal, for a fan-out's - and
+// returns its id.
+func stepIDOf(t *testing.T, e *Engine, shard, flowID int, taskName string, ordinal ...int) int {
+	t.Helper()
+	query, args := "SELECT COALESCE(MAX(step_id), 0) FROM dwarf_steps WHERE flow_id=? AND task_name=?", []any{flowID, taskName}
+	if len(ordinal) > 0 {
+		query, args = query+" AND fan_out_ordinal=?", append(args, ordinal[0])
+	}
+	var id int
+	testarossa.For(t).True(enginetest.WaitUntil(t, 10*time.Second, func() bool {
+		id = enginetest.CountRows(t, e, shard, query, args...)
+		return id > 0
+	}), "no %s step in flow %d", taskName, flowID)
+	return id
+}
+
+// awaitDispatched waits for the dispatch of a step to return: the retry of an operation the step's dispatch held is
+// behind it.
+func awaitDispatched(t *testing.T, e *Engine, shard, stepID int) {
+	t.Helper()
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second,
+		diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(shard), strconv.Itoa(stepID)))
 }
 
 // gate holds a task until it is opened, or until the task's context ends. Open is idempotent, so a test opens it in a
@@ -188,17 +252,22 @@ func TestLostCommit_Transition(t *testing.T) {
 	a, b := lostCommitLinear(mux, "lctransition", nil)
 	e, reader := newLostCommitEngine(t, mux)
 
-	fault := diagnostics.Join(diagnostics.FaultAdvanceCommitLost, "A")
-	e.diags.Seams().Inject(fault)
-	fk, out := batteryRun(t, e, "lctransition/g")
-	assertFired(t, e, fault)
+	l := armLostReply(t, e, diagnostics.FaultAdvanceCommitLost, "A")
+	fk, err := e.Create(context.Background(), "lctransition/g", nil, nil)
+	assert.Must(assert.NoError(err))
+	committed := l.committed()
+	shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+	assert.Equal(1, countSteps(t, e, fk, "B"), "the transition did not commit")
+	l.release()
+	awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "A"))
+	out := awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal("ran", out.State.GetString("a"))
 	assert.Equal("ran", out.State.GetString("b"))
 	assert.Equal(int32(1), a.Load(), "A ran again after its transition committed")
 	assert.Equal(int32(1), b.Load())
 	assert.Equal(1, countSteps(t, e, fk, "B"), "the transition inserted its successor twice")
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // lostCommitCohort registers Seed -> forEach(items) Branch -> Join (fan-in) -> END, the branches appending their
@@ -257,20 +326,30 @@ func TestLostCommit_CohortArrival(t *testing.T) {
 			branches, joins := lostCommitCohort(mux, "lcarrival", 2, hold)
 			e, reader := newLostCommitEngine(t, mux)
 
-			fault := diagnostics.Join(diagnostics.FaultAdvanceCommitLost, "Branch")
+			var l *lostReply
+			var committed enginetest.Outcomes
 			if !resolving {
-				e.diags.Seams().Inject(fault) // the first arrival, element 0's: element 1 is held
+				l = armLostReply(t, e, diagnostics.FaultAdvanceCommitLost, "Branch") // the first arrival, element 0's: element 1 is held
 			}
 			fk, err := e.Create(ctx, "lcarrival/g", nil, nil)
 			assert.Must(assert.NoError(err))
-			// Seed's dispatch and element 0's have returned, so the first arrival and its retry are behind us
-			enginetest.AwaitVisitCount(t, e.diags.Seams(), 2, 10*time.Second, diagnostics.CheckpointClaimedDispatchDone)
+			shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+			if !resolving {
+				committed = l.committed()
+				l.release()
+			}
+			awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "Branch", 0))
 			if resolving {
-				e.diags.Seams().Inject(fault) // the second arrival, element 1's, resolves the cohort
+				l = armLostReply(t, e, diagnostics.FaultAdvanceCommitLost, "Branch") // the second arrival, element 1's, resolves the cohort
 			}
 			hold.open()
+			if resolving {
+				committed = l.committed()
+				assert.Equal(1, countSteps(t, e, fk, "Join"), "the resolving arrival did not commit")
+				l.release()
+			}
+			awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "Branch", 1))
 			out := awaitBounded(t, e, fk)
-			assertFired(t, e, fault)
 			if assert.Equal(workflow.StatusCompleted, out.Status) {
 				var got []int
 				_, err := out.State.Get("got", &got)
@@ -280,10 +359,9 @@ func TestLostCommit_CohortArrival(t *testing.T) {
 			assert.Equal(int32(2), branches.Load(), "a branch ran again after its arrival committed")
 			assert.Equal(int32(1), joins.Load(), "the cohort converged twice")
 			assert.Equal(1, countSteps(t, e, fk, "Join"))
-			shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
 			assert.Equal(2, enginetest.CountRows(t, e, shard, "SELECT cohort_arrivals FROM dwarf_steps WHERE flow_id=? AND task_name='Seed'", flowID),
 				"an arrival was counted twice or lost")
-			assertSettledClean(t, e, reader)
+			assertSettledClean(t, e, reader, committed)
 		})
 	}
 }
@@ -297,15 +375,20 @@ func TestLostCommit_FanInDirect(t *testing.T) {
 	branches, joins := lostCommitCohort(mux, "lcfanindirect", 0, nil)
 	e, reader := newLostCommitEngine(t, mux)
 
-	fault := diagnostics.Join(diagnostics.FaultFanInDirectCommitLost, "Seed")
-	e.diags.Seams().Inject(fault)
-	fk, out := batteryRun(t, e, "lcfanindirect/g")
-	assertFired(t, e, fault)
+	l := armLostReply(t, e, diagnostics.FaultFanInDirectCommitLost, "Seed")
+	fk, err := e.Create(context.Background(), "lcfanindirect/g", nil, nil)
+	assert.Must(assert.NoError(err))
+	committed := l.committed()
+	shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+	assert.Equal(1, countSteps(t, e, fk, "Join"), "the route to the fan-in did not commit")
+	l.release()
+	awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "Seed"))
+	out := awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(int32(0), branches.Load())
 	assert.Equal(int32(1), joins.Load(), "the fan-in ran twice")
 	assert.Equal(1, countSteps(t, e, fk, "Join"), "the fan-in was inserted twice")
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // lostCommitParent registers a parent Call -> END whose Call runs the child X -> END as a subgraph, counting both
@@ -371,16 +454,17 @@ func TestLostCommit_FlowCompletion(t *testing.T) {
 
 		fk, err := e.Create(ctx, "lccomplete/g", nil, nil)
 		assert.Must(assert.NoError(err))
-		_, _, flowID, _, _ := keys.ParseFlowKey(fk)
-		fault := diagnostics.Join(diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(flowID))
-		e.diags.Seams().Inject(fault)
+		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+		l := armLostReply(t, e, diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(flowID))
 		hold.open()
+		committed := l.committed()
+		l.release()
+		awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "A"))
 		out := awaitBounded(t, e, fk)
-		assertFired(t, e, fault)
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal("ran", out.State.GetString("a"))
 		assert.Equal(int32(1), a.Load(), "the task ran again after its flow completed")
-		assertSettledClean(t, e, reader)
+		assertSettledClean(t, e, reader, committed)
 	})
 
 	t.Run("child", func(t *testing.T) {
@@ -396,17 +480,18 @@ func TestLostCommit_FlowCompletion(t *testing.T) {
 		fk, err := e.Create(ctx, "lccompletechild/parent", nil, nil)
 		assert.Must(assert.NoError(err))
 		childID := awaitChildFlow(t, e, fk)
-		fault := diagnostics.Join(diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(childID))
-		e.diags.Seams().Inject(fault)
+		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+		l := armLostReply(t, e, diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(childID))
 		hold.open()
+		committed := l.committed()
+		l.release()
+		awaitDispatched(t, e, shard, stepIDOf(t, e, shard, childID, "X"))
 		out := awaitBounded(t, e, fk)
-		assertFired(t, e, fault)
 		assert.Equal(workflow.StatusCompleted, out.Status)
 		assert.Equal(int32(2), calls.Load(), "the caller ran other than to spawn and to take its child's result")
 		assert.Equal(int32(1), xs.Load(), "the child's task ran again after its flow completed")
-		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID))
-		assertSettledClean(t, e, reader)
+		assertSettledClean(t, e, reader, committed)
 	})
 }
 
@@ -431,14 +516,18 @@ func TestLostCommit_FailStep(t *testing.T) {
 		})
 		e, reader := newLostCommitEngine(t, mux)
 
-		fault := diagnostics.Join(diagnostics.FaultFailStepCommitLost, "A")
-		e.diags.Seams().Inject(fault)
-		_, out := batteryRun(t, e, "lcfail/g")
-		assertFired(t, e, fault)
+		l := armLostReply(t, e, diagnostics.FaultFailStepCommitLost, "A")
+		fk, err := e.Create(context.Background(), "lcfail/g", nil, nil)
+		assert.Must(assert.NoError(err))
+		committed := l.committed()
+		l.release()
+		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+		awaitDispatched(t, e, shard, stepIDOf(t, e, shard, flowID, "A"))
+		out := awaitBounded(t, e, fk)
 		assert.Equal(workflow.StatusFailed, out.Status)
 		assert.Contains(out.Error, "boom")
 		assert.Equal(int32(1), a.Load(), "the failed task ran again")
-		assertSettledClean(t, e, reader)
+		assertSettledClean(t, e, reader, committed)
 	})
 
 	t.Run("child", func(t *testing.T) {
@@ -448,17 +537,20 @@ func TestLostCommit_FailStep(t *testing.T) {
 		calls, xs := lostCommitParent(mux, "lcfailchild", nil, errors.New("child boom"))
 		e, reader := newLostCommitEngine(t, mux)
 
-		fault := diagnostics.Join(diagnostics.FaultFailStepCommitLost, "X")
-		e.diags.Seams().Inject(fault)
-		fk, out := batteryRun(t, e, "lcfailchild/parent")
-		assertFired(t, e, fault)
+		l := armLostReply(t, e, diagnostics.FaultFailStepCommitLost, "X")
+		fk, err := e.Create(context.Background(), "lcfailchild/parent", nil, nil)
+		assert.Must(assert.NoError(err))
+		committed := l.committed()
+		l.release()
+		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
+		awaitDispatched(t, e, shard, stepIDOf(t, e, shard, awaitChildFlow(t, e, fk), "X"))
+		out := awaitBounded(t, e, fk)
 		assert.Equal(workflow.StatusFailed, out.Status)
 		assert.Contains(out.Error, "child boom")
 		assert.Equal(int32(1), xs.Load(), "the child's failed task ran again")
 		assert.Equal(int32(2), calls.Load(), "the caller ran other than to spawn and to take its child's failure")
-		shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
 		assert.Equal(1, enginetest.CountRows(t, e, shard, "SELECT COUNT(*) FROM dwarf_flows WHERE surgraph_flow_id=?", flowID))
-		assertSettledClean(t, e, reader)
+		assertSettledClean(t, e, reader, committed)
 	})
 }
 
@@ -478,15 +570,17 @@ func TestLostCommit_Revive(t *testing.T) {
 	fk, err := e.Create(ctx, "lcrevive/parent", nil, nil)
 	assert.Must(assert.NoError(err))
 	childID := awaitChildFlow(t, e, fk)
-	fault := diagnostics.Join(diagnostics.FaultReviveCommitLost, strconv.Itoa(childID))
-	e.diags.Seams().Inject(fault)
+	shard, _, _, _, _ := keys.ParseFlowKey(fk)
+	l := armLostReply(t, e, diagnostics.FaultReviveCommitLost, strconv.Itoa(childID))
 	hold.open()
+	committed := l.committed()
+	l.release()
+	awaitDispatched(t, e, shard, stepIDOf(t, e, shard, childID, "X"))
 	out := awaitBounded(t, e, fk)
-	assertFired(t, e, fault)
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(int32(2), calls.Load(), "the caller ran other than to spawn and to take its child's result")
 	assert.Equal(int32(1), xs.Load())
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // TestLostCommit_DeliverError loses the acknowledgement of the wedge sweep's delivery of a failed child's error to its
@@ -514,20 +608,21 @@ func TestLostCommit_DeliverError(t *testing.T) {
 	sh, err := e.db.Shard(shard)
 	assert.Must(assert.NoError(err))
 	db := sh.DB()
-	fault := diagnostics.Join(diagnostics.FaultDeliverErrorCommitLost, strconv.Itoa(childID))
-	e.diags.Seams().Inject(fault)
-	e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
-	assertFired(t, e, fault)
+	l := armLostReply(t, e, diagnostics.FaultDeliverErrorCommitLost, strconv.Itoa(childID))
+	swept := make(chan struct{})
+	go func() {
+		defer close(swept)
+		e.recoverWedgedSubgraphParks(ctx, db, shard, 0)
+	}()
+	committed := l.committed()
+	l.release()
+	<-swept
 	out := awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusFailed, out.Status)
 	assert.Contains(out.Error, "child boom")
 	assert.Equal(int32(1), xs.Load())
 	assert.Equal(int32(2), calls.Load(), "the caller ran other than to spawn and to take its child's failure")
-
-	before := enginetest.CaptureOutcomes(t, e)
-	sweepEveryDetector(t, e)
-	assert.Len(enginetest.AssertOutcomesKept(t, e, before), 0)
-	enginetest.AssertInvariants(t, e)
+	assertSettledClean(t, e, nil, committed)
 }
 
 // TestLostCommit_Create loses the acknowledgement of a flow's creation: the flow and its entry step are in, its
@@ -547,6 +642,7 @@ func TestLostCommit_Create(t *testing.T) {
 	assertFired(t, e, fault)
 	assert.Error(err)
 	assert.True(sequel.IsConnectionError(err), "a lost acknowledgement reads as a lost connection: %v", err)
+	committed := enginetest.CaptureOutcomes(t, e)
 
 	shard := e.db.Indices()[0]
 	sh, err := e.db.Shard(shard)
@@ -558,7 +654,7 @@ func TestLostCommit_Create(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(int32(1), a.Load())
 	assert.Equal(int32(1), b.Load())
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // TestLostCommit_Resume loses the acknowledgement of a Resume: the leaf is pending with the resume data and the flow
@@ -597,6 +693,7 @@ func TestLostCommit_Resume(t *testing.T) {
 	err := e.Resume(ctx, fk, map[string]any{"Answer": "yes"})
 	assertFired(t, e, fault)
 	assert.True(sequel.IsConnectionError(err), "a lost acknowledgement reads as a lost connection: %v", err)
+	committed := enginetest.CaptureOutcomes(t, e)
 	out := awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal("yes", out.State.GetString("answer"))
@@ -604,7 +701,7 @@ func TestLostCommit_Resume(t *testing.T) {
 	assert.Equal(int32(1), b.Load())
 	assert.Equal(http.StatusConflict, errors.StatusCode(e.Resume(ctx, fk, map[string]any{"Answer": "again"})),
 		"a retried Resume resumed a flow that was no longer interrupted")
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // TestLostCommit_Terminate loses the acknowledgement of a Terminate: the flow and its running step are terminated, and
@@ -631,6 +728,7 @@ func TestLostCommit_Terminate(t *testing.T) {
 	err = e.Terminate(ctx, fk, "stop")
 	assertFired(t, e, fault)
 	assert.True(sequel.IsConnectionError(err), "a lost acknowledgement reads as a lost connection: %v", err)
+	committed := enginetest.CaptureOutcomes(t, e)
 	out := awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusTerminated, out.Status)
 	assert.Equal("stop", out.TerminateReason)
@@ -644,7 +742,7 @@ func TestLostCommit_Terminate(t *testing.T) {
 	out = awaitBounded(t, e, fk)
 	assert.Equal(workflow.StatusTerminated, out.Status)
 	assert.Equal("stop", out.TerminateReason, "the retried Terminate rewrote the closed flow's reason")
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }
 
 // TestLostCommit_Fork loses the acknowledgement of a Fork: the clone is in and live, and Fork reports the lost
@@ -672,6 +770,7 @@ func TestLostCommit_Fork(t *testing.T) {
 	shard, _, flowID, _, _ := keys.ParseFlowKey(fk)
 	fault := diagnostics.Join(diagnostics.FaultForkCommitLost, strconv.Itoa(flowID))
 	e.diags.Seams().Inject(fault)
+	committed := enginetest.CaptureOutcomes(t, e) // the source's: a Fork never changes it
 	_, err = e.Fork(ctx, stepB, nil)
 	assertFired(t, e, fault)
 	assert.True(sequel.IsConnectionError(err), "a lost acknowledgement reads as a lost connection: %v", err)
@@ -685,5 +784,5 @@ func TestLostCommit_Fork(t *testing.T) {
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	assert.Equal(int32(1), a.Load(), "the fork re-ran a step before its fork point")
 	assert.Equal(int32(2), b.Load(), "the fork ran its fork step other than once")
-	assertSettledClean(t, e, reader)
+	assertSettledClean(t, e, reader, committed)
 }

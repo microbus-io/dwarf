@@ -28,6 +28,8 @@ completed with `advancing=0`, then compare a later moment by value (stored JSON 
 One kind of terminal step is deliberately not recorded, because a repair legitimately rewinds it: a completed step
 still `advancing` on an open flow, which the orphan sweep replays. A flow gone from the live
 tables is returned rather than failed, for the test to account for: a Delete, a Purge, or a move to the archive.
+`CaptureOutcomesIn` records the same from shard databases a test opened itself, for a moment when no engine runs
+there: after a process was killed and before its replacement starts, whose startup would begin recovering at once.
 
 ## Invariants
 
@@ -41,6 +43,8 @@ tables is returned rather than failed, for the test to account for: a Delete, a 
 | Cohort accounting | `cohort counter overshoot`, `cohort converged before it resolved, or with a loss` | `cohortbatch_test.go`, `cohortlock_test.go` |
 | A park is settled by the child that owns it | `waiting caller without an open child owning its park`, `open child whose caller does not hold its park`, `step neither waiting nor terminal still naming a park owner` | `subgraphspawn_test.go`, `ownershipfence_test.go` |
 | A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go` |
+| A closed outcome stays reachable while its tree moves to the archive | `AssertOutcomesKept`'s removed flows, each read again by key | `archivereach_test.go` |
+| A process's death strands no obligation: a replacement finishes each with its own recovery, waiting steps keep their deadlines, an interrupted step waits for Resume | the checker and `CaptureOutcomesIn` at the kill, read by the test's own connection before the replacement starts | `processkill_test.go` |
 | Generation ownership: a write by a worker that lost its lease changes nothing | not checkable at rest - a fenced write leaves no trace, so a snapshot cannot tell it from one never attempted | `leasefence_test.go`, `terminatefence_test.go`, `interruptfence_test.go`, `ownershipfence_test.go` |
 
 ## The mutation inventory
@@ -71,6 +75,15 @@ stop signal, a parent's revive - so each post-commit action needs a backstop, na
 | Recovery reset (`recoverStep`) | step `running` (contention) or `completed` (a transition that did not commit) | the step row | `status=<from> AND parked=0 AND lease_seq=?`: no-op | re-poll | none yet |
 | Lease recovery (`recoverExpiredLeases`) | step `running`, lease expired | by id | the predicate repeated: no-op | the piston | none yet |
 | Orphan repair (`recoverOrphanedFlows`) | step `completed`, `advancing=1`, lease expired, flow open | flow row, guarded `running`/`interrupted` | the step predicate repeated; the rewind bumps `lease_seq` | the piston | none yet |
+
+**A lost-reply test waits for the retry, and records its baseline before it.** What the commit wrote runs on - the
+successor dispatches, the flow closes - so an Await returns while the operation that lost its reply is still backing
+off, and the test's end then cancels the retry unrun; a baseline captured after the retry cannot see it rewrite an
+outcome. So the test holds the operation at `CheckpointCommitLost` (`armLostReply`), records the closed outcomes as
+the commit left them, releases it, waits for the dispatch that held it to return (`awaitDispatched`), and compares
+after the retry and again after every recovery detector (`assertSettledClean`). Measured: with persist's backoff at an
+hour, the transition and flow-completion tests passed when they only awaited the flow, and a retry rewriting a
+completed flow's final state went unseen.
 
 The janitor's transactions have their own lost-reply faults (`FaultJanitorLostResponse`, `FaultReapStageLost`) and
 tests in `internal/janitor` (`internal/janitor/CLAUDE.md`).

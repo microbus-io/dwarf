@@ -206,13 +206,20 @@ func TestCohortBatch_FiredFaultLeavesTheBatch(t *testing.T) {
 func TestCohortBatch_LostCommitAcknowledgement(t *testing.T) {
 	c := newBatchedCohort(t, 0)
 	b := c.batch()
-	fault := diagnostics.Join(diagnostics.FaultArrivalBatchCommitLost, "Branch")
-	c.e.diags.Seams().Inject(fault)
+	members := make([]int, 0, batchedWidth)
+	for _, m := range b.members {
+		members = append(members, m.stepID)
+	}
+	l := armLostReply(t, c.e, diagnostics.FaultArrivalBatchCommitLost, "Branch")
 	c.stripe.unlock()
+	committed := l.committed()
+	l.release()
+	for _, stepID := range members {
+		awaitDispatched(t, c.e, c.shard, stepID) // each member arrived alone after the batch
+	}
 	c.await(t)
 	<-b.done
-	testarossa.For(t).False(c.e.diags.Seams().IsFault(fault), "the fault never fired")
-	assertSettledClean(t, c.e, nil)
+	assertSettledClean(t, c.e, nil, committed)
 }
 
 // TestCohortBatch_LeaderPanicReleasesTheBatch pins the leader's cleanup over its WAIT, not only its work: a lease tick

@@ -3904,7 +3904,10 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   dropped mid-read, a directory day dropped and a tree removed mid-read each a 404; a Fork of an archived source at
   every step (a root's, a subgraph's, through a ref, a failed branch repaired) running as it did live, one whose
   source is archived meanwhile, one reading the archived graph on a cold replica, and the janitor held off a source
-  Fork has locked.
+  Fork has locked. And by `archivereach_test.go`: every read running continuously while trees move one at a time,
+  whole and staged, with faults before and after each move's commit, trees closing meanwhile and a Delete racing the
+  moves; every read returns what it did before its tree moved, or a 404 only for a deleted tree, and never finds a
+  tree again once it found nothing. With two-second days it also covers trees filed far from their creation day.
 - **The run's archives are published whole** (`archives`, an `atomic.Pointer`), like the role flags: a `PurgeBefore`
   straddling a Shutdown/Startup restart must read one run's set, never a map being assigned.
 
@@ -4425,6 +4428,17 @@ timeout also kills transactions that sit idle while a busy replica is slow.
   `advancing=1`), then `completeFlow`'s transaction sets the flow `completed`. A crash between leaves a completed,
   flagged step on a `running` flow; the orphan sweep (#3) rewinds it and the replay completes the flow. Self-healing.
 
+**Pinned with a real process death by `processkill_test.go`.** The test re-runs its own binary as a child
+(`TestProcessKill_Child`) on a database the parent made - a SQLite file, or a PostgreSQL database of its own,
+outside test mode, which salts each process's database name - holds it at a durable boundary and kills it with
+SIGKILL: a task running (the claim), a completion written before its transition, an arrival committed, inside a
+spawn's transaction, a child's completion committed before its caller's revive. Its siblings rest asleep, backing off
+a retry, interrupted and parked on a running child. A replacement engine on the database finishes the flow with its
+own recovery jobs, and the test requires every branch to arrive once, no waiting step to run before its deadline,
+the interrupted step not to run before its Resume, one child, every outcome at the kill unchanged and the
+invariants. The killed replica's peer row stays behind, as it would in production, so the replacement recovers
+under the stale-peer conditions too.
+
 ### Database Sharding
 
 `SetShard(ShardSpec)` (default: one shard) distributes flows across databases to scale write throughput and reduce
@@ -4552,6 +4566,20 @@ encodes its shard (`{shard}-{hour}-{id}-{token}`), so a flow created on a shard 
 (404) there - and there is no cross-replica agreement on the set nor any rebalancing of existing flows (they stay on
 their original shard). Doing dynamic growth *correctly* - cross-replica agreement plus rollout sequencing - was
 designed but deliberately deferred; until then the set is fixed per process.
+
+**What one impaired shard costs the others** (`impairedshard_test.go`, PostgreSQL behind a TCP proxy that refuses,
+slows or stops answering one of two shards). The healthy shard's dispatch, Create, Await, Snapshot and History keep
+their pace, and the replica's goroutines and crew stay where they were: each shard's piston, janitor and turnstile
+are its own, and an impaired shard's piston stops refilling its partition, so the workers it can tie up are bounded by
+what was cached. Four things couple the shards, each open rather than settled:
+- **Placement is health-blind:** a `Create` placed on the impaired shard fails or waits, so with two shards about
+  half of them do. `ShardSpec.Cordoned` is the operator's lever, at a restart.
+- **The lists read every shard:** `ListOpen` fails whole when one shard does, waiting out its ctx on a hung one.
+  `ShardInfo` reports each shard on its own.
+- **Startup opens and migrates every shard:** it fails at once against a refused shard and waits without bound on a
+  hung one, so a replica cannot start to serve the healthy shard while another is down.
+- **Shutdown waits for every step in flight:** a step blocked on a hung shard's statement holds it until the shard
+  answers.
 
 ## Test-only instrumentation seams (`engine/engineundertest.go`)
 

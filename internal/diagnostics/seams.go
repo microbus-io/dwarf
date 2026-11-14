@@ -114,6 +114,10 @@ const (
 	FaultResumeCommitLost       = "resumeCommitLost"       // by flow id: the Resume transaction
 	FaultTerminateCommitLost    = "terminateCommitLost"    // by the flow id of the subtree's top: the Terminate transaction, from Terminate, expiration or the orphaned-child sweep
 	FaultForkCommitLost         = "forkCommitLost"         // by the fork step's flow id: the Fork clone transaction
+	// CheckpointCommitLost, by the fault's name (not its target): one of the faults above fired - its transaction
+	// committed - and the operation is about to see the lost connection and retry. A test holds it there to record
+	// what the commit left before the retry can touch it.
+	CheckpointCommitLost = "commitLost"
 
 	// The refiller:
 	FaultRefillScanErr  = "refillScanErr"  // a shard's piston's priority-band scan errors

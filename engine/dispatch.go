@@ -1507,7 +1507,7 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 			return e.transitionTx(ctx, d, tx)
 		})
 		if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultAdvanceCommitLost, d.row.taskName)) {
-			err = commitLostErr(diagnostics.FaultAdvanceCommitLost, d.row.taskName)
+			err = e.commitLostErr(ctx, diagnostics.FaultAdvanceCommitLost, d.row.taskName)
 		}
 		if errors.Is(err, errTransitionFlowTerminal) {
 			d.txBytes = stateByteCount{} // nothing the transaction wrote survived the rollback
@@ -1746,8 +1746,10 @@ func (e *Engine) successorsOf(d *dispatch) successorBatch {
 }
 
 // commitLostErr is the error a lost-commit-acknowledgement fault reports for a transaction that committed: a lost
-// connection, as a COMMIT whose reply never arrived reports.
-func commitLostErr(fault, target string) error {
+// connection, as a COMMIT whose reply never arrived reports. It first passes CheckpointCommitLost for the fault, where
+// a test holds the operation between the commit and its retry. Called only once the fault fired, so only in a test.
+func (e *Engine) commitLostErr(ctx context.Context, fault, target string) error {
+	e.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointCommitLost, fault))
 	return errors.Join(errors.New("injected fault: "+fault+" "+target), driver.ErrBadConn)
 }
 

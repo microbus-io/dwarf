@@ -199,7 +199,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget s
 		return nil
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultFanInDirectCommitLost, d.row.taskName)) {
-		err = commitLostErr(diagnostics.FaultFanInDirectCommitLost, d.row.taskName)
+		err = e.commitLostErr(ctx, diagnostics.FaultFanInDirectCommitLost, d.row.taskName)
 	}
 	if err != nil {
 		return errors.Trace(err)
