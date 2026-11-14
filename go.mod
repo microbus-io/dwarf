@@ -8,7 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/microbus-io/boolexp v1.3.0
 	github.com/microbus-io/errors v1.0.1
-	github.com/microbus-io/seamster v0.4.0
+	github.com/microbus-io/seamster v0.4.1
 	github.com/microbus-io/sequel v1.19.0
 	github.com/microbus-io/testarossa v0.7.4
 	go.opentelemetry.io/otel v1.47.0
