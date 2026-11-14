@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,8 +143,8 @@ func TestJanitor_APauseOrShutdownCancelsABatchInFlight(t *testing.T) {
 }
 
 // TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain pins the drain order: a batch holding a connection - here
-// held at a breakpoint inside its transaction, as a statement with no deadline may hold one, while the test holds the
-// rest of the pool - is cancelled before Shutdown waits on the workers, so a worker in flight that needs a connection
+// held at a breakpoint inside its transaction, as a statement with no deadline may hold one, while the test holds
+// every other connection the pool gives - is cancelled before Shutdown waits on the workers, so a worker in flight that needs a connection
 // to record its step gets one and the drain ends. Cancelled after the workers' drain, the batch would hold its
 // connection for as long as the drain waited on the worker, which is forever.
 func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
@@ -154,6 +155,9 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseTask := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseTask() // a failure before the release would otherwise leave the deferred Shutdown waiting on the task
 	mux := hosts.NewMux()
 	g := workflow.NewGraph("Hold")
 	g.SetURL("Hold", "janitor/hold")
@@ -167,6 +171,7 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 	assert.NoError(e.SetHost(mux))
 	e.janitorManual = false
 	e.diags.Seams().Break(diagnostics.CheckpointReapBatchLocked)
+	defer e.diags.Seams().Resume(diagnostics.CheckpointReapBatchLocked)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))
@@ -188,15 +193,19 @@ func TestJanitor_ShutdownCancelsTheJobsBeforeTheWorkersDrain(t *testing.T) {
 			c.Close()
 		}
 	}()
-	// Bounded, so a pool that does not match the one connection held fails rather than waits for good.
-	taking, cancel := context.WithTimeout(t.Context(), 10*time.Second*enginetest.TimeoutScale())
-	defer cancel()
-	for len(conns) < db.Stats().MaxOpenConnections-1 {
+	// Every connection the pool gives within a short wait. The rest are the jobs': the one held at the breakpoint, and
+	// on SQLite any job whose write waits for the lock that transaction holds.
+	for {
+		taking, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond*enginetest.TimeoutScale())
 		c, err := db.DB.Conn(taking)
-		assert.Must(assert.NoError(err))
+		cancel()
+		if err != nil {
+			break
+		}
 		conns = append(conns, c)
 	}
-	close(release)
+	assert.Must(assert.True(len(conns) < db.Stats().MaxOpenConnections, "a job holds a connection"))
+	releaseTask()
 	time.Sleep(200 * time.Millisecond) // the worker is waiting for a connection
 
 	done := make(chan struct{})
