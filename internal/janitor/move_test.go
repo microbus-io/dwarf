@@ -424,11 +424,11 @@ func TestMove_AScanFailureAtRetentionZeroIsNoArchiveFailure(t *testing.T) {
 	}
 }
 
-// TestMove_NamesEveryFlowsColumn pins the move's column list against the flows table: every live column
-// but archived_at and the live-only archive_attempt_at, in table order, so a column added to dwarf_flows without being
-// added to the list fails here rather than being dropped from the archive. The day's flows table has the same columns,
-// and its steps table the live steps table's, in the same order.
-func TestMove_NamesEveryFlowsColumn(t *testing.T) {
+// TestMove_NamesEveryColumn pins the copies' column lists against the tables: the flows' every live column but
+// archived_at and the live-only archive_attempt_at, the steps' every one, so a column added to a live table without
+// being added to its list fails here rather than being dropped from the archive. The day's tables have the same
+// columns.
+func TestMove_NamesEveryColumn(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
@@ -439,9 +439,53 @@ func TestMove_NamesEveryFlowsColumn(t *testing.T) {
 	want := append(strings.Split(archivedFlowColumns, ", "), "archived_at")
 	assert.Equal(want, slices.DeleteFunc(columnNames(t, db, "dwarf_flows"), func(c string) bool { return c == liveOnlyColumn }))
 	assert.Equal(want, columnNames(t, db, migrations.FlowsTable(today)))
-	// The steps move by column order (RETURNING * and SELECT *), so the day's steps table has the live columns in the
-	// live order.
-	assert.Equal(columnNames(t, db, "dwarf_steps"), columnNames(t, db, migrations.StepsTable(today)))
+	// The steps are copied by name, so only the set of columns matters.
+	steps := slices.Sorted(slices.Values(strings.Split(archivedStepColumns, ", ")))
+	assert.Equal(steps, slices.Sorted(slices.Values(columnNames(t, db, "dwarf_steps"))))
+	assert.Equal(steps, slices.Sorted(slices.Values(columnNames(t, db, migrations.StepsTable(today)))))
+}
+
+// TestMove_StepsAreCopiedByName pins that a step row is copied into its day by column name: with a column of the day's
+// steps table moved to its end - where PostgreSQL, SQL Server and SQLite add a column to an existing table - a tree
+// moved whole and a tree archived in stages land every value in its own column.
+func TestMove_StepsAreCopiedByName(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	if r.db.DriverName() == "mssql" {
+		t.Skip("SQL Server drops a column with a default only with its constraint; the copy is the same statement")
+	}
+	today, err := r.archive.Today(ctx)
+	assert.Must(assert.NoError(err))
+	for _, s := range []string{
+		"ALTER TABLE " + migrations.StepsTable(today) + " DROP COLUMN changes_bytes",
+		"ALTER TABLE " + migrations.StepsTable(today) + " ADD COLUMN changes_bytes INT NOT NULL DEFAULT 0",
+	} {
+		_, err := r.db.ExecContext(ctx, s)
+		assert.Must(assert.NoError(err))
+	}
+	moved := seedTrees(t, r.db, 1, callShape)[0] // 4 rows: moved whole
+	staged := seedWideTree(t, r.db, 3, 10, 3)    // 44 rows: archived in stages
+	trees := "SELECT flow_id FROM dwarf_flows WHERE root_flow_id IN (?,?)"
+	_, err = r.db.ExecContext(ctx, "UPDATE dwarf_steps SET state_bytes=step_id, changes_bytes=step_id+1000000"+
+		" WHERE flow_id IN ("+trees+")", moved, staged)
+	assert.Must(assert.NoError(err))
+	var want int
+	assert.Must(assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id IN ("+trees+")",
+		moved, staged).Scan(&want)))
+
+	r.pass(ctx)
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed during the test")
+	}
+	var copied, right int
+	assert.Must(assert.NoError(r.db.QueryRowContext(ctx, "SELECT COUNT(*),"+
+		" COALESCE(SUM(CASE WHEN state_bytes=step_id AND changes_bytes=step_id+1000000 THEN 1 ELSE 0 END), 0)"+
+		" FROM "+migrations.StepsTable(today)+" WHERE flow_id IN (SELECT flow_id FROM "+migrations.FlowsTable(today)+
+		" WHERE root_flow_id IN (?,?))", moved, staged).Scan(&copied, &right)))
+	assert.Equal(want, copied, "every step of both trees archived")
+	assert.Equal(copied, right, "every value in its own column")
 }
 
 // TestMove_EveryArchivedFlowIsStampedWhenItWasArchived pins archived_at: a live flow holds the not-archived value,

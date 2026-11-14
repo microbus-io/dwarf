@@ -197,8 +197,9 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 // before midnight ran) - is named in the directory, in the same transaction, from the same rows the move takes.
 //
 // On PostgreSQL each table moves in one statement, so what is archived is exactly what is deleted, whatever a
-// descendant does between statements - only the roots are locked. RETURNING * is in column order, and the day tables
-// carry the live columns in the same order; the flows name theirs, to stamp archived_at. Elsewhere the rows are copied
+// descendant does between statements - only the roots are locked. Both tables name their columns
+// (archivedStepColumns, archivedFlowColumns), so neither depends on the tables' column order; the flows' list leaves
+// out archived_at, to stamp it. Elsewhere the rows are copied
 // here, then deleted by the plain statements: a descendant that changes between the copy and the delete - only a
 // fan-out straggler settling, or an orphan a bug left - is archived as it was at the copy.
 func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids string, idArgs []any, trees, steps, flows string) (stepsStmt string, stepsArgs []any, flowsStmt string, flowsArgs []any) {
@@ -207,7 +208,8 @@ func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids str
 	directory := "INSERT INTO " + archiver.DirectoryTable + " (flow_id, day) SELECT flow_id, " + strconv.Itoa(d.day) +
 		" FROM %s WHERE (created_hour<" + strconv.Itoa(before) + " OR created_hour>=" + strconv.Itoa(from) + ")"
 	if tx.DriverName() == "pgx" {
-		stepsStmt = "WITH moved AS (" + steps + " RETURNING *) INSERT INTO " + migrations.StepsTable(d.day) + " SELECT * FROM moved"
+		stepsStmt = "WITH moved AS (" + steps + " RETURNING " + archivedStepColumns + ") INSERT INTO " + migrations.StepsTable(d.day) +
+			" (" + archivedStepColumns + ") SELECT " + archivedStepColumns + " FROM moved"
 		flowsStmt = "WITH moved AS (" + flows + " RETURNING *)," +
 			" named AS (" + fmt.Sprintf(directory, "moved") + ")" +
 			" INSERT INTO " + migrations.FlowsTable(d.day) + " (" + archivedFlowColumns + ", archived_at)" +
@@ -219,7 +221,8 @@ func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids str
 	tx.ExecContext(ctx, "INSERT INTO "+migrations.FlowsTable(d.day)+" ("+archivedFlowColumns+", archived_at)"+
 		" SELECT "+archivedFlowColumns+", "+archivedAt+" FROM dwarf_flows WHERE root_flow_id IN ("+ids+")",
 		append(slices.Clone(archivedAtArgs), idArgs...)...)
-	tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(d.day)+" SELECT * FROM dwarf_steps WHERE flow_id IN ("+trees+")", idArgs...)
+	tx.ExecContext(ctx, "INSERT INTO "+migrations.StepsTable(d.day)+" ("+archivedStepColumns+") SELECT "+archivedStepColumns+
+		" FROM dwarf_steps WHERE flow_id IN ("+trees+")", idArgs...)
 	tx.ExecContext(ctx, fmt.Sprintf(directory, "dwarf_flows")+" AND root_flow_id IN ("+ids+")", idArgs...)
 	return steps, idArgs, flows, idArgs
 }
@@ -228,9 +231,23 @@ func archiveStatements(ctx context.Context, tx *sequel.Tx, d *filingDay, ids str
 // means nothing once the tree is archived.
 const liveOnlyColumn = "archive_attempt_at"
 
+// archivedStepColumns are the columns of dwarf_steps, every one, which the day's steps table has too. A move and a
+// staged copy name them, so a row is copied by name: an existing table whose added columns sit at its end - where
+// PostgreSQL, SQL Server and SQLite add a column - copies into a day made with them in place. A column added to
+// dwarf_steps must be added here too, or the archive drops it: TestMove_NamesEveryColumn compares the list with the
+// table.
+const archivedStepColumns = "step_id, flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, changes," +
+	" changes_bytes, interrupt_payload, interrupt_payload_bytes, state_refs, state_reduced, payload_deferrals," +
+	" status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures," +
+	" cohort_cancellations, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key," +
+	" fairness_weight, interrupt_done, resume_data, resume_data_bytes, subgraph_done, subgraph_result," +
+	" subgraph_result_bytes, subgraph_error, parked, parked_child_flow_id, cancelling, advancing," +
+	" advance_goto, advance_sleep_until, advance_on_error, not_before, lease_expires, lease_seq, engine_id," +
+	" flow_created_hour, created_at, started_at, updated_at"
+
 // archivedFlowColumns are the columns of dwarf_flows but archived_at and liveOnlyColumn, in table order. A move names
 // them, so the archive's row takes its archive time in place of the live row's "not archived" value. A column added
-// to dwarf_flows must be added here too, or the archive drops it: TestMove_NamesEveryFlowsColumn compares the list with
+// to dwarf_flows must be added here too, or the archive drops it: TestMove_NamesEveryColumn compares the list with
 // the table.
 const archivedFlowColumns = "flow_id, flow_token, workflow_url, workflow_name, graph, graph_bytes, graph_hash, payload_ver," +
 	" baggage, baggage_bytes, status, stopped_step_id, surgraph_flow_id, surgraph_step_id, root_flow_id, forked_from_step," +

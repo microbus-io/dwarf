@@ -94,7 +94,7 @@ The `migrations/*.sql` migration files carry **no prose comments by design** - o
 | `resume_data` | JSON inbound payload recorded by `Resume`; returned by `flow.Interrupt` on re-dispatch. `'{}'` until resumed |
 | `subgraph_done` | `1` once a `flow.Subgraph` park resolved; drives `flow.Subgraph`'s return-vs-arm decision. A retry clears it to re-run the child |
 | `subgraph_result` | JSON child `final_state` returned by `flow.Subgraph`. `'{}'` until resolved |
-| `state_bytes` / `changes_bytes` / `interrupt_payload_bytes` / `resume_data_bytes` / `subgraph_result_bytes` | The length of each payload column as the engine wrote it, set by the same statement that writes it; `0` for a value never written (the column's `'{}'` default). Each column sits right after its payload, in the live and the archive day tables alike, which keeps the column order the archive's `SELECT *` move needs. As `dwarf_flows`' `*_bytes` above: the written size, unindexed, and every writer sets its count (`TestPayloadBytes_EveryWriterCountsWhatItWrites`) |
+| `state_bytes` / `changes_bytes` / `interrupt_payload_bytes` / `resume_data_bytes` / `subgraph_result_bytes` | The length of each payload column as the engine wrote it, set by the same statement that writes it; `0` for a value never written (the column's `'{}'` default). Each column sits right after its payload, in the live and the archive day tables alike; an existing table added them at its end, which the archive's copies, by name, do not mind. As `dwarf_flows`' `*_bytes` above: the written size, unindexed, and every writer sets its count (`TestPayloadBytes_EveryWriterCountsWhatItWrites`) |
 | `subgraph_error` | JSON: the child's error as `TracedError` JSON (status code and properties kept, a cancellation marker among them) for a failed `flow.Subgraph` park, returned as the `err`. `'{}'` when none, which the claim read maps to no error (`subgraphErrorText`) |
 | `status` | Step lifecycle: `created`/`pending`/`running`/`interrupted`/`completed`/`failed`/`terminated`/`cancelled` |
 | `error` | Error text when `failed`; `''` otherwise |
@@ -245,12 +245,11 @@ Each day's archive tables (`dwarf_flows_archive_<n>`, `dwarf_steps_archive_<n>`)
 `ArchiveDay` (`internal/archiver/CLAUDE.md`). The files write the tables as `dwarf_flows_archive` and
 `dwarf_steps_archive`, stand-ins no table carries: `live/` makes no empty template tables, so nothing but a day
 ever exists under those names. So:
-- **The columns are the live tables', in the same order** - but `archive_attempt_at`, a live root's archive attempt,
-  which means nothing archived and is added to the live table alone - with the queue-only ones kept at their defaults; an
-  archived row is copied whole. **The order is load-bearing for the steps**: the janitor's move copies them by
-  position (`RETURNING *` into `SELECT *`), so a steps column added out of order lands in another column of the
-  archive, or fails the move. The flows are named (`archivedFlowColumns`). Both are pinned by `internal/janitor`'s
-  `TestMove_NamesEveryFlowsColumn`. **No auto-increment**: `flow_id` and `step_id` keep their live values, which keys
+- **The columns are the live tables'** - but `archive_attempt_at`, a live root's archive attempt, which means nothing
+  archived and is added to the live table alone - with the queue-only ones kept at their defaults; an archived row is
+  copied whole, **by name** (`internal/janitor`'s `archivedFlowColumns` and `archivedStepColumns`), so the order is not
+  load-bearing: an existing table gets an added column at its end on PostgreSQL, SQL Server and SQLite. A column added
+  to a live table is added to its list there too. Pinned by `internal/janitor`'s `TestMove_NamesEveryColumn`. **No auto-increment**: `flow_id` and `step_id` keep their live values, which keys
   and state refs carry. A column added to a live table in `live/` is added in `archive/` in the same release.
 - **Every index is named for its stand-in** (`idx_dwarf_flows_archive_root`, ...), so the substitution renames it
   too. An index with any other name collides across days on PostgreSQL and SQLite, where index names are per

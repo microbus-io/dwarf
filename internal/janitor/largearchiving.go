@@ -554,7 +554,8 @@ func (l *LargeArchiving) stageChunk(ctx context.Context, h handle, root int, pos
 				return nil
 			}
 			list, args := database.IDList(children[:run])
-			res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.flow_id IN ("+list+")"+
+			res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" ("+archivedStepColumns+") SELECT "+archivedStepColumns+
+				" FROM dwarf_steps s WHERE s.flow_id IN ("+list+")"+
 				" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)", args...)
 			if err != nil {
 				return errors.Trace(err)
@@ -650,7 +651,8 @@ func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after in
 	}
 	for chunk := range slices.Chunk(ids, database.MaxListIDs) {
 		ph, args := database.IDList(chunk)
-		res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" SELECT * FROM dwarf_steps s WHERE s.step_id IN ("+ph+")"+
+		res, err := tx.ExecContext(ctx, "INSERT INTO "+c.steps+" ("+archivedStepColumns+") SELECT "+archivedStepColumns+
+			" FROM dwarf_steps s WHERE s.step_id IN ("+ph+")"+
 			" AND NOT EXISTS (SELECT 1 FROM "+c.steps+" a WHERE a.step_id=s.step_id)", args...)
 		if err != nil {
 			return size{}, after, false, errors.Trace(err)

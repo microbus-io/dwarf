@@ -231,10 +231,13 @@ A batch of trees leaves the live tables in one transaction: moved into a day's a
 - **`archived_at` is the move's time, clamped to its filing day's last millisecond** (`archivedAtSQL`), so a day holds
   only rows archived on it. A quiet margin before the day's end (`quietMargin`: a minute, or an eighth of a short day)
   stops archive moves only; a test turns it off.
-- **The flows move by name, the steps by column order.** `archivedFlowColumns` names every flow column the day tables
-  have, `archived_at` apart, so not the live-only `archive_attempt_at`; the steps move with `RETURNING *` / `SELECT *`,
-  so the day's steps table must keep the live column order (a rule in `internal/migrations/CLAUDE.md`). Both pinned by
-  `TestMove_NamesEveryFlowsColumn`. On PostgreSQL each table moves in one `DELETE ... RETURNING` into an `INSERT`, so
+- **Both tables move by name.** `archivedFlowColumns` names every flow column the day tables have, `archived_at`
+  apart, so not the live-only `archive_attempt_at`; `archivedStepColumns` names every step column, in the move and
+  in the staged copy alike. **Do not copy a row by position** (`RETURNING *` into `SELECT *`): PostgreSQL, SQL Server
+  and SQLite add a column to an existing table at its end, so an upgraded live table and a day made with the column in
+  place disagree on order - the copy fails on PostgreSQL and SQL Server, and on SQLite writes values into the wrong
+  columns. Pinned by `TestMove_NamesEveryColumn` (each list against its tables) and `TestMove_StepsAreCopiedByName`
+  (a day's column moved to the end, a tree moved whole and one staged). On PostgreSQL each table moves in one `DELETE ... RETURNING` into an `INSERT`, so
   what is archived is exactly what is deleted; elsewhere it is copied, then deleted, and a straggler is archived as it
   was at the copy.
 - **The directory rows for a late or early filing are written in the move's transaction**, from the same rows;
