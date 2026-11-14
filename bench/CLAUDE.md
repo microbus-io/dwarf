@@ -264,6 +264,15 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
+- **Every rig runs the recommended database settings unless the run says otherwise (user):** `max_wal_size` 20 GB,
+  `checkpoint_timeout` 15 min, `wal_compression=lz4` - the deployment guidance on docs.dwarf.run, and the settings of
+  every published cloud number since 2026-11-06. **The orchestrators add them** (`x-rig.sh`, `xp-rig.sh`, `s2-rig.sh`,
+  `real-rig.sh`), with `autovacuum_work_mem`, to whatever `DBFLAGS` holds - so logging flags such as `auto_explain`
+  are added to them, not instead - and a flag `DBFLAGS` sets itself keeps its value: that is how a run goes off them
+  (`max_wal_size=1504` for Cloud SQL's own). Cloud SQL's defaults are 1.5 GB, 5 min and off. At saturation those checkpoint every 5-10 s, so nearly every page
+  written after a checkpoint is logged whole, and each minute's autovacuum of the live tables - which archiving
+  turns over every minute - queued every backend on `WALWrite` and cut commits ~40% for 5-10 s. A run off the
+  recommended settings states which it uses and why, beside its numbers.
 - **Gate every quoted rig on its draw:** `bench/gcp/dbcpu.sh -live 3` a few minutes into the first window reads CPU
   per step, `results[].db.flushMs` the flush under load, and `fsync.sh <dsn>` on the idle instance its WAL flush floor
   (one `psql` session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). Record

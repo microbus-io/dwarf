@@ -40,9 +40,12 @@ pass=$(cat $S/dbpass)
 authok
 
 log "creating $DB ($TIER, 1000 GB SSD) + $ADMIN (c4a-2) + $EA, $EB ($ETYPE); tag $TAG"
-# 1 GB of dead-row memory per autovacuum worker: at Cloud SQL's 64 MB default a vacuum pass rescans every index once
-# per ~11M dead rows. DBFLAGS may set its own value.
-[[ ,$DBFLAGS, == *,autovacuum_work_mem=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}autovacuum_work_mem=1048576
+# The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
+# unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
+# rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
+for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900 wal_compression=lz4; do
+  [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
+done
 gc sql instances create "$DB" --database-version=POSTGRES_16 --tier="$TIER" --edition=enterprise \
   --zone=$ZONE --storage-type=SSD --storage-size=1000 --insights-config-query-insights-enabled \
   --network="projects/$PROJECT/global/networks/dwarf-bench-net" --no-assign-ip \

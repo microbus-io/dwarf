@@ -21,7 +21,13 @@ R=$(cd "$D/../../.." && pwd)                          # the repository: dbcpu.sh
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-s2}
 TIER=${TIER:-db-custom-32-131072} WIN=${WIN:-16m}
-DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576}
+DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on}
+# The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
+# unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
+# rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
+for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900 wal_compression=lz4; do
+  [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
+done
 RTT_MAX=${RTT_MAX:-0.35}                              # ms, the idle RTT gate per engine host and shard
 DRAW_MAX=${DRAW_MAX:-1.35}                            # DB core-ms per step: ~1.1-1.2 normal, ~1.5 slow
 REDRAWS=${REDRAWS:-2}

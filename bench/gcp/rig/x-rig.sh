@@ -7,6 +7,7 @@ set -u
 NAME=$1 DISK=$2 STEP=$3 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
 # DBFLAGS (optional) passes Cloud SQL database flags, e.g. slow-statement plans and lock waits:
 #   DBFLAGS='cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on'
+# The recommended settings are added to it unless it sets its own value of one (see below).
 D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the step scripts and the VM-side helpers
 R=$(cd "$D/../../.." && pwd)                          # the repository; artifacts land in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
@@ -35,10 +36,14 @@ pass=$(cat $S/dbpass)
 authok
 
 log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"
-# 1 GB of dead-row memory per autovacuum worker: at Cloud SQL's 64 MB default a vacuum pass rescans every index once
-# per ~11M dead rows. DBFLAGS may set its own value.
 DBFLAGS=${DBFLAGS:-}
-[[ ,$DBFLAGS, == *,autovacuum_work_mem=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}autovacuum_work_mem=1048576
+# The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
+# unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
+# rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
+for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900 wal_compression=lz4; do
+  [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
+done
+log "database flags: $DBFLAGS"
 gc sql instances create "$DB" --database-version=POSTGRES_16 --tier=${TIER:-db-custom-32-131072} --edition=enterprise \
   --zone=$ZONE --storage-type=SSD --storage-size="$DISK" --insights-config-query-insights-enabled \
   --network="projects/$PROJECT/global/networks/dwarf-bench-net" --no-assign-ip \

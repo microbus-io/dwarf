@@ -33,6 +33,12 @@ S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-real}
 TIER=${TIER:-db-custom-32-131072}
 DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576,max_wal_size=20480,checkpoint_timeout=900,wal_compression=lz4,log_checkpoints=on}
+# The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
+# unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
+# rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
+for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900 wal_compression=lz4; do
+  [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
+done
 RTT_MAX=${RTT_MAX:-0.35} DRAW_MAX=${DRAW_MAX:-1.35} REDRAWS=${REDRAWS:-2}
 NIGHT=${NIGHT:-8000} DAY=${DAY:-12000} BURST=${BURST:-16000}
 RESTART_A=${RESTART_A:-137} RESTART_B=${RESTART_B:-141} # minutes into the run: period 2's day phase, clear of its bursts
