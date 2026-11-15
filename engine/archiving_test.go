@@ -55,6 +55,13 @@ func treeCount(t *testing.T, e *Engine, flowsTable, stepsTable string, rootID in
 	return flows, steps
 }
 
+// shortArchiveDay is the archive day of a test that needs days to pass while it runs. It must outlast a drain's pass
+// with room to spare: archive retention makes progress whenever a day has begun since its last round, and a drain
+// (reapDueFlows) ends only at a pass without progress, so on a day shorter than a pass it does not end. Measured on
+// SQL Server with eight such tests at once: on two-second days no drain ended in fifteen minutes, against 3 s alone.
+// A longer day also means fewer days of tables made ahead, which are the DDL every pass waits on.
+const shortArchiveDay = 8 * time.Second
+
 // archiveEngine starts an engine whose closed roots are due at once and whose janitors run only when the test drains them, so a
 // test drives each pass itself.
 func archiveEngine(t *testing.T, mux *hosts.Mux, retention int) *Engine {

@@ -68,7 +68,7 @@ func TestDirectory_ShortDaysNameMovesFarFromTheHour(t *testing.T) {
 	t.Cleanup(func() { e.Shutdown(ctx) })
 	e.SetHost(treeMux())
 	e.archiveGrace = 0
-	e.archiveDayOverride = 2 * time.Second
+	e.archiveDayOverride = shortArchiveDay
 	assert.NoError(e.SetRetention(100))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 

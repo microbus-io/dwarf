@@ -469,7 +469,7 @@ func TestStaged_APurgeDuringTheLiveCleanup(t *testing.T) {
 }
 
 // TestStaged_APurgeBeforeDuringTheLiveCleanup pins PurgeBefore dropping the day that holds a staged tree's published
-// copy while its live copy is still to be removed, on days of two seconds: the tree is listed nowhere, the cleanup
+// copy while its live copy is still to be removed, on short days: the tree is listed nowhere, the cleanup
 // still finishes, and the tree is then found nowhere.
 func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
 	t.Parallel()
@@ -479,7 +479,7 @@ func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(treeMux())
 	e.archiveGrace = 0
-	e.archiveDayOverride = 2 * time.Second
+	e.archiveDayOverride = shortArchiveDay
 	assert.NoError(e.SetRetention(100))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	e.reapStageRows, e.reapBatchRows = 1, 2
@@ -494,7 +494,7 @@ func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
 		assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE root_flow_id=?", rootID).Scan(&n))
 		return n
 	}
-	// A window of a minute: a call reads at most 31 days, a minute of two-second days.
+	// A window of forty seconds, well inside the 31 days a call reads.
 	listed := func() int {
 		got, err := e.ListClosed(ctx, workflow.Query{IncludeSubgraphs: true, Limit: 100,
 			FromTime: time.Now().Add(-30 * time.Second), ToTime: time.Now().Add(10 * time.Second)})
@@ -514,7 +514,7 @@ func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
 
 	// The published copy's day is at most the day it was published on: once that one is over, PurgeBefore drops it.
 	today := published
-	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	deadline := time.Now().Add(2 * shortArchiveDay * enginetest.TimeoutScale())
 	for today == published && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 		today, err = a.Today(ctx)

@@ -148,7 +148,7 @@ func TestRetention_PurgeBeforeDropsTheOlderDays(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(e.PurgeBefore(ctx, dayStart(today+2, dayLength))))
 }
 
-// TestRetention_TheLoopDropsExpiredDays pins archive retention running in the background on days of two seconds: a day
+// TestRetention_TheLoopDropsExpiredDays pins archive retention running in the background on short days: a day
 // past the retention is dropped, and the days ahead are made, without anyone asking.
 func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	t.Parallel()
@@ -157,7 +157,7 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
-	e.archiveDayOverride = 2 * time.Second
+	e.archiveDayOverride = shortArchiveDay
 	e.janitorManual = false // the janitor's jobs run in the background, archive retention every second at this length
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
@@ -169,9 +169,12 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	// migration then fails on a table already gone: a drop either way, so its error is not the test's.
 	_ = makeArchiveDay(t, e, today-5)
 
-	// Startup makes the 15 days ahead of its today at this length; the 16th after is made only once the day changes.
-	ahead := today + 16
-	deadline := time.Now().Add(10 * time.Second * enginetest.TimeoutScale())
+	// Startup makes the days ahead of its today; the first day past them is made only once the day changes.
+	ahead := today + 1
+	for hasArchiveDay(t, e, ahead) {
+		ahead++
+	}
+	deadline := time.Now().Add(3 * shortArchiveDay * enginetest.TimeoutScale())
 	for {
 		if !hasArchiveDay(t, e, today-5) && hasArchiveDay(t, e, ahead) {
 			break

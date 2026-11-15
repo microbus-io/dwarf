@@ -340,14 +340,14 @@ func (l *reachLog) delete(ctx context.Context, e *Engine, tr *reachTree) {
 // published live copy's deletion reply lost). Trees close while others move. Three trees are deleted - one live, one
 // while the moves run, one archived - and only theirs may go unfound, and never come back once a read found nothing.
 // At the end every other tree is in the archive and nowhere live, every outcome recorded before the moves is either
-// readable unchanged or deleted, and the live tables hold the invariants. Run with UTC days, and with two-second
-// days, so that most trees are archived a day or more after their creation and found through the directory.
+// readable unchanged or deleted, and the live tables hold the invariants. Run with UTC days, and with short days
+// (shortArchiveDay), so that most trees are archived a day or more after their creation and found through the directory.
 func TestArchiveReach_ReadsHoldWhileTreesMove(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		day  time.Duration
-	}{{"utc_days", 0}, {"short_days", 2 * time.Second}} {
+	}{{"utc_days", 0}, {"short_days", shortArchiveDay}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			readsWhileTreesMove(t, tc.day)
@@ -459,7 +459,10 @@ func readsWhileTreesMove(t *testing.T, day time.Duration) {
 		}
 		return n
 	}
-	deadline := time.Now().Add(time.Minute * enginetest.TimeoutScale())
+	// The ceiling is on drains that remove nothing, never on the whole loop: a slow database makes every drain slower,
+	// while one that stops archiving leaves the count where it was. With nothing left the loop ends by its fourth drain.
+	ceiling := time.Minute * enginetest.TimeoutScale()
+	live, deadline := liveTrees(), time.Now().Add(ceiling)
 	lateRead := false
 	for wave := 0; ; wave++ {
 		log.drains.Add(1)
@@ -489,11 +492,14 @@ func readsWhileTreesMove(t *testing.T, day time.Duration) {
 			reading.Store(&all)
 			lateRead = true
 		}
-		if wave >= 3 && liveTrees() == 0 {
+		if n := liveTrees(); n < live {
+			live, deadline = n, time.Now().Add(ceiling)
+		}
+		if wave >= 3 && live == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%d flows of the trees still live after %d drains", liveTrees(), wave+1)
+		if live > 0 && time.Now().After(deadline) {
+			t.Fatalf("%d flows of the trees still live after %d drains, none removed in the last %s", live, wave+1, ceiling)
 		}
 	}
 	log.delete(ctx, e, deletedArchived)
