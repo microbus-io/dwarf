@@ -3712,8 +3712,8 @@ wiring (`janitor.go`):
   The drain cancels them all before the workers (see "Shutdown ordering").
 - **A batch's turn is a common turn** (`WaitTurn`), dispatch's band, taken fresh on its shard for each batch.
 - **The jobs are built from the engine's fields** (`addJanitorJobs`: archive retention; the fast archiving jobs, each
-  with sweep archiving behind it, and large-tree archiving into the shard's archive; the fast deletion jobs, each with
-  sweep deletion behind it; live retention; the archive deletion sweep), at Startup. Archive retention is added first because a drain runs the jobs in
+  with sweep archiving behind it, and the large-tree archiving jobs into the shard's archive; the fast deletion jobs,
+  each with sweep deletion behind it; live retention; the archive deletion sweep), at Startup. Archive retention is added first because a drain runs the jobs in
   the order they were added: fast archiving archives only once tomorrow is whole, and in a test of short days with
   Manual janitors, nothing else makes the days ahead. Tests change those fields on a running engine, so `drainJanitors` rebuilds the jobs - adding
   new ones under the same names, which replace the old - when the settings differ from the ones they were built with
@@ -3722,14 +3722,16 @@ wiring (`janitor.go`):
 - **The recovery repairs are three more of its jobs** (`addRecoveryJobs`, `wedge.go`: `lease_recovery`,
   `orphan_repair`, `wedge_sweep`, each a `janitor.NewRecovery` running the engine's pass on the shard; see "Background
   Recovery"). They are added once, with the shard's actors, and the rebuild above leaves them alone.
-- **Two fast jobs of each kind, one on SQLite** (`fastArchivingJobs`, `fastDeletionJobs`, `fastJobs`; user): each
-  takes its share of the shard's roots and has a sweep of its own, all named by the share (`janitor.ShareName`:
-  `fast_archiving_1`, `sweep_archiving_1`). SQLite's single writer gains nothing from a second job. How the share
-  divides the roots is the janitor's (`internal/janitor/CLAUDE.md`, "Shares"). A test reading a gauge that has a series
-  per job reads them all (`gaugeOver`). Pinned by `TestJanitor_FastJobsOfEachKind`.
+- **Two fast jobs of each kind and two large-tree archiving jobs, one of each on SQLite** (`fastArchivingJobs`,
+  `fastDeletionJobs`, `largeArchivingJobs`, `fastJobs`; user): each takes its share of the shard's roots, a fast job
+  with a sweep of its own, all named by the share (`janitor.ShareName`: `fast_archiving_1`, `sweep_archiving_1`,
+  `large_archiving_1`). A shard has at most two dispatchers, so the jobs, not the replicas, sustain its archiving, and
+  one replica alone must keep up. SQLite's single writer gains nothing from a second job. How the share divides the
+  roots is the janitor's (`internal/janitor/CLAUDE.md`, "Shares"). A test reading a gauge that has a series per job
+  reads them all (`gaugeOver`). Pinned by `TestJanitor_TheJobsOfEachKind`.
 - **The engine reads only `JobAges`** (`dwarf_janitor_progress_age_seconds`), gated on dispatching like every
-  janitor gauge. The archive lag is the fast archiving jobs' own, the attempt gauge large-tree archiving's, the held-root
-  and sweep gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge;
+  janitor gauge. The archive lag is the fast archiving jobs' own, the attempt gauge the large-tree archiving jobs', the
+  held-root and sweep gauges the sweep jobs', each under its `kind`, and each archiving job reports its series of the failing gauge;
   each job's series is labelled by job; the archive deletion gauges are the archive deletion sweep's. **Every walk of the live tables is the
   janitor's**, and expiration is the janitor's expiration job, running the engine's pass (`expirePass`). `sweepOverdue` (30 s) is the
   window of every sweep behind a fast job: a test that wants a sweep to take what its fast job passed sets it to 0

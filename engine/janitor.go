@@ -59,14 +59,17 @@ func (e *Engine) janitorSettingsFor(grace time.Duration) janitorSettings {
 }
 
 // The fast jobs of each kind a shard's janitor runs, each taking its share of the shard's roots with a sweep of its
-// own behind it (fastJobs).
+// own behind it, and its large-tree archiving jobs, each copying the started archives of its share (fastJobs). A shard
+// has at most two dispatchers, so the jobs, not the replicas, are what sustain its archiving, and one replica alone
+// must keep up.
 const (
-	fastArchivingJobs = 2
-	fastDeletionJobs  = 2
+	fastArchivingJobs  = 2
+	largeArchivingJobs = 2
+	fastDeletionJobs   = 2
 )
 
-// fastJobs is how many fast jobs of a kind whose number is n a shard's janitor runs on a database of driver: n, and one
-// on SQLite, whose single writer a second job would only queue behind.
+// fastJobs is how many jobs of a kind whose number is n a shard's janitor runs on a database of driver: n, and one on
+// SQLite, whose single writer a second job would only queue behind.
 func fastJobs(n int, driver string) int {
 	if driver == "sqlite" {
 		return 1
@@ -110,10 +113,14 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, archive *archiver
 		sa.SetQuietMargin(!s.noQuietMargin)
 		j.AddJob(janitor.ShareName(janitor.JobSweepArchiving, k), sa)
 	}
-	la := janitor.NewLargeArchiving(archive, e.retentionDays)
-	la.SetBatch(s.batchRows, s.batchBytes)
-	la.SetQuietMargin(!s.noQuietMargin)
-	j.AddJob(janitor.JobLargeArchiving, la)
+	of = fastJobs(largeArchivingJobs, driver)
+	for k := 1; k <= of; k++ {
+		la := janitor.NewLargeArchiving(archive, e.retentionDays)
+		la.SetShare(k, of)
+		la.SetBatch(s.batchRows, s.batchBytes)
+		la.SetQuietMargin(!s.noQuietMargin)
+		j.AddJob(janitor.ShareName(janitor.JobLargeArchiving, k), la)
+	}
 	of = fastJobs(fastDeletionJobs, driver)
 	for k := 1; k <= of; k++ {
 		fd := janitor.NewFastDeletion()

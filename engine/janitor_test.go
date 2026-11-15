@@ -275,7 +275,7 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	driver := sh.DB().DriverName()
 	time.Sleep(100 * time.Millisecond)
 	got := ages()
-	assert.Len(got, 7+2*fastJobs(fastArchivingJobs, driver)+2*fastJobs(fastDeletionJobs, driver),
+	assert.Len(got, 6+2*fastJobs(fastArchivingJobs, driver)+fastJobs(largeArchivingJobs, driver)+2*fastJobs(fastDeletionJobs, driver),
 		"fast and sweep archiving, large-tree archiving, fast and sweep deletion, live retention, the archive deletion sweep, archive retention and the three recovery jobs are reported")
 	first := janitor.ShareName(janitor.JobFastArchiving, 1)
 	assert.True(got[first] >= 0.1 && got[first] < 10, "age %v", got)
@@ -284,10 +284,10 @@ func TestJanitor_TheProgressGauge(t *testing.T) {
 	assert.Len(ages(), 0, "a shard no longer dispatched is not reported")
 }
 
-// TestJanitor_FastJobsOfEachKind pins the fast jobs a shard's janitor runs: fastArchivingJobs fast archiving jobs and
-// fastDeletionJobs fast deletion jobs, each with the sweep behind it, all named by their share; and one of each kind on
-// SQLite.
-func TestJanitor_FastJobsOfEachKind(t *testing.T) {
+// TestJanitor_TheJobsOfEachKind pins the jobs a shard's janitor runs a share of: fastArchivingJobs fast archiving jobs
+// and fastDeletionJobs fast deletion jobs, each with the sweep behind it, and largeArchivingJobs large-tree archiving
+// jobs, all named by their share; and one of each kind on SQLite.
+func TestJanitor_TheJobsOfEachKind(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
@@ -299,6 +299,7 @@ func TestJanitor_FastJobsOfEachKind(t *testing.T) {
 	want := map[string]int{
 		janitor.JobFastArchiving:  fastArchivingJobs,
 		janitor.JobSweepArchiving: fastArchivingJobs,
+		janitor.JobLargeArchiving: largeArchivingJobs,
 		janitor.JobFastDeletion:   fastDeletionJobs,
 		janitor.JobSweepDeletion:  fastDeletionJobs,
 	}

@@ -57,6 +57,7 @@ type LargeArchiving struct {
 	batchRows     int
 	batchBytes    int
 	noQuietMargin bool
+	share         share
 
 	// j is the janitor the job is added to; the instruments are created on its meter, and record under shardAttr.
 	j         *Janitor
@@ -79,7 +80,7 @@ type LargeArchiving struct {
 	oldestSince time.Time
 	oldestOK    bool
 	// failSince is when the job began failing, zero while it is not. lapFailed is whether a chunk failed since the
-	// position last wrapped: a lap over every started archive that fails none ends the episode.
+	// position last wrapped: a lap over every started archive of the share that fails none ends the episode.
 	failSince time.Time
 	lapFailed bool
 }
@@ -107,6 +108,13 @@ func (l *LargeArchiving) SetBatch(rows, bytes int) {
 	l.batchRows, l.batchBytes = rows, bytes
 }
 
+// SetShare sets which of a shard's large-tree archiving jobs this one is, the k-th of of, from 1 (1 of 1, every
+// attempt): a shard's jobs of k from 1 to of each copy the started archives of their share of its roots, and none
+// copies another's. A share is by flow_id alone, with no residue class: every replica runs every share.
+func (l *LargeArchiving) SetShare(k, of int) {
+	l.share = share{k, of}
+}
+
 // SetQuietMargin sets whether an attempt replacing one whose day was dropped starts only up to a margin before the
 // day's end (on, the default), so its stamp groups have room in the day.
 func (l *LargeArchiving) SetQuietMargin(on bool) {
@@ -125,12 +133,11 @@ func (l *LargeArchiving) attach(j *Janitor, name string) {
 	l.archived, errs[0] = meter.Int64Counter("dwarf_flows_archived", metric.WithDescription(archivedDescription))
 	l.staged, errs[1] = meter.Int64Counter("dwarf_archive_staged_rows", metric.WithDescription(stagedRowsDescription))
 	oldest, err := meter.Float64ObservableGauge("dwarf_archive_oldest_attempt_seconds", metric.WithUnit("s"),
-		metric.WithDescription("Per shard: age of the oldest staged archive attempt not yet published, read about once a second while this replica dispatches the shard; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_staged_rows: growing while that moves is a large tree copying, growing while it is flat is a copy that is stuck. A replaced attempt starts its age again. Aggregate with max."))
+		metric.WithDescription("Per shard and large-tree archiving job: age of the oldest staged archive attempt of the job's share not yet published, read about once a second while this replica dispatches the shard; zero for none. A tree too large to archive in one transaction is copied in stages and then published; a value that keeps growing means one is not publishing, and the logs say why. Read beside dwarf_archive_staged_rows: growing while that moves is a large tree copying, growing while it is flat is a copy that is stuck. A replaced attempt starts its age again. Aggregate with max."))
 	errs[2] = err
 	failing, err := meter.Float64ObservableGauge("dwarf_archive_failing_seconds", metric.WithUnit("s"),
 		metric.WithDescription(failingDescription))
 	errs[3] = err
-	shard := metric.WithAttributes(l.shardAttr)
 	jobShard := metric.WithAttributes(l.shardAttr, attribute.String("job", name))
 	l.gauges, errs[4] = meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		if !j.isActive() {
@@ -138,7 +145,7 @@ func (l *LargeArchiving) attach(j *Janitor, name string) {
 		}
 		now := time.Now()
 		if age, ok := l.oldestAge(now); ok {
-			o.ObserveFloat64(oldest, age.Seconds(), shard)
+			o.ObserveFloat64(oldest, age.Seconds(), jobShard)
 		}
 		o.ObserveFloat64(failing, l.failingFor(now).Seconds(), jobShard)
 		return nil
@@ -184,8 +191,8 @@ func (l *LargeArchiving) failed(ctx context.Context) {
 	l.lapFailed = true
 }
 
-// lapped records that the position wrapped: a lap over every started archive ended, and one that failed none ends the
-// failure episode - every tree the failures were on was taken again, and copied, published, held or gone.
+// lapped records that the position wrapped: a lap over every started archive of the share ended, and one that failed
+// none ends the failure episode - every tree the failures were on was taken again, and copied, published, held or gone.
 func (l *LargeArchiving) lapped() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -359,9 +366,9 @@ func (l *LargeArchiving) remember(root int, pos stagePos) {
 	l.stages[root] = pos
 }
 
-// next returns the tree being copied, while its attempt is still there and unpublished, or else the first live root
-// after the last one finished whose archive attempt has started and is not published, with the attempt, wrapping to
-// the first when none is after it; wrapped is true when it read from the first - a lap ended, or none is left. It walks idx_dwarf_flows_attempt: keyed on flow_id over the
+// next returns the tree being copied, while its attempt is still there and unpublished, or else the first live root of
+// the job's share after the last one finished whose archive attempt has started and is not published, with the
+// attempt, wrapping to the first when none is after it; wrapped is true when it read from the first - a lap ended, or none is left. It walks idx_dwarf_flows_attempt: keyed on flow_id over the
 // roots with an attempt alone on PostgreSQL, SQL Server and SQLite, and named with FORCE INDEX on MySQL and MariaDB,
 // whose full index on the attempt reads every attempted root and sorts them - bounded by what has an attempt.
 func (l *LargeArchiving) next(ctx context.Context, q sequel.Executor) (root int, at time.Time, ok, wrapped bool, err error) {
@@ -370,11 +377,13 @@ func (l *LargeArchiving) next(ctx context.Context, q sequel.Executor) (root int,
 	if driver == "mysql" || driver == "mariadb" {
 		table += " FORCE INDEX (idx_dwarf_flows_attempt)"
 	}
+	inShare, shareArgs := l.share.sql(0, 0, false)
 	first := func(op string, from int) (int, time.Time, bool, error) {
 		var id int
 		var t time.Time
 		err := q.QueryRowContext(ctx, "SELECT flow_id, archive_attempt_at FROM "+table+" WHERE "+AttemptedSQL(driver)+
-			" AND delete_after_ms=0 AND surgraph_flow_id=0 AND flow_id"+op+"? ORDER BY flow_id LIMIT_OFFSET(1, 0)", from).Scan(&id, &t)
+			" AND delete_after_ms=0 AND surgraph_flow_id=0 AND flow_id"+op+"?"+inShare+" ORDER BY flow_id LIMIT_OFFSET(1, 0)",
+			append([]any{from}, shareArgs...)...).Scan(&id, &t)
 		if err == sql.ErrNoRows {
 			return 0, time.Time{}, false, nil
 		}
@@ -393,8 +402,8 @@ func (l *LargeArchiving) next(ctx context.Context, q sequel.Executor) (root int,
 	return root, at, ok, err == nil, err
 }
 
-// probe reads the age of the oldest unpublished archive attempt, for dwarf_archive_oldest_attempt_seconds, through
-// idx_dwarf_flows_attempt (named on MySQL and MariaDB, as next does).
+// probe reads the age of the oldest unpublished archive attempt of the job's share, for
+// dwarf_archive_oldest_attempt_seconds, through idx_dwarf_flows_attempt (named on MySQL and MariaDB, as next does).
 func (l *LargeArchiving) probe(ctx context.Context, q sequel.Executor) {
 	l.probedAt = time.Now()
 	var ageMs sql.NullFloat64 // fractional on SQLite; null for no attempt
@@ -403,8 +412,9 @@ func (l *LargeArchiving) probe(ctx context.Context, q sequel.Executor) {
 	if driver == "mysql" || driver == "mariadb" {
 		from += " FORCE INDEX (idx_dwarf_flows_attempt)"
 	}
+	inShare, shareArgs := l.share.sql(0, 0, false)
 	err := q.QueryRowContext(ctx, "SELECT DATE_DIFF_MILLIS(NOW_UTC(), MIN(archive_attempt_at)) FROM "+from+
-		" WHERE "+AttemptedSQL(driver)+" AND delete_after_ms=0 AND surgraph_flow_id=0").Scan(&ageMs)
+		" WHERE "+AttemptedSQL(driver)+" AND delete_after_ms=0 AND surgraph_flow_id=0"+inShare, shareArgs...).Scan(&ageMs)
 	if err != nil {
 		l.logError(ctx, "Janitor: reading the oldest archive attempt", "error", err)
 		return

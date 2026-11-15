@@ -113,12 +113,13 @@ failing cannot hang on it, and jobs that feed each other are run until both are 
 so a `Drain` beside the goroutines never overlaps a round (`TestJanitor_ADrainBesideTheGoroutineNeverOverlapsARound`).
 Pinned by `TestJanitor_DrainReturnsWhereAJobWouldWait`.
 
-## Shares: fast jobs of one kind side by side (`share.go`)
+## Shares: jobs of one kind side by side (`share.go`)
 
-A shard's janitor runs several fast archiving jobs and several fast deletion jobs, each told its share when it is made
-(`SetShare(k, of)`: the k-th of `of`, from 1) and added under `ShareName(kind, k)` - `fast_archiving_1`,
-`fast_archiving_2`, `fast_deletion_1` - with a sweep of its own behind it under the same share's name
-(`sweep_archiving_1`). How many is the engine's: two of each, one on SQLite (`engine/CLAUDE.md`).
+A shard's janitor runs several fast archiving jobs, several fast deletion jobs and several large-tree archiving jobs,
+each told its share when it is made (`SetShare(k, of)`: the k-th of `of`, from 1) and added under
+`ShareName(kind, k)` - `fast_archiving_1`, `fast_archiving_2`, `fast_deletion_1`, `large_archiving_1` - a fast job with
+a sweep of its own behind it under the same share's name (`sweep_archiving_1`). How many is the engine's: two of each,
+one on SQLite (`engine/CLAUDE.md`). Large-tree archiving's share is by `flow_id` alone, below.
 
 - **A root's share is `(flow_id / R) % of = k-1`**, R the residue class's count of dispatchers, or `flow_id % of = k-1`
   when the class restricts nothing. It is a conjunct beside the class (`closedResidency`, `stampedResidency`) and
@@ -627,7 +628,13 @@ stamped for deletion with its attempt kept. The protocol:
   archive that keeps nothing (`TestStage_RetentionZeroArchivesNothing`).
 - **No residue class.** A chunk locks its root, skipping a held one on PostgreSQL and MySQL, and writes only what is
   not there, so two replicas on one tree serialize per chunk and write the same rows (`TestStage_ConcurrentCopiers`).
-  Dividing the attempts would only leave a tree waiting for its replica.
+  Dividing the attempts between replicas would only leave a tree waiting for its replica.
+- **Shares, by `flow_id` alone** (`SetShare`): the job copies the attempts of its share, `flow_id % of = k-1`, in its
+  scan and its probe. Every replica runs every share, so no tree waits for a particular replica, and each job still
+  copies one tree at a time: two jobs copy two trees at once on one replica - a shard has at most two dispatchers, so
+  the jobs, not the replicas, are what let one replica alone keep up. With both replicas, PostgreSQL and MySQL copy up
+  to four (a held tree is skipped), SQL Server and SQLite two (it is waited for). Pinned by
+  `TestShare_EachLargeArchivingJobTakesItsShare`.
 - **Each copy's position is in memory**, at most `maxStages` (64) of them. A position advances only when a chunk
   commits, so it is kept on every path where one did - a copy waiting to publish, a lost response - and dropped only
   once the tree is published or gone. A position forgotten - at the bound, a restart - is read back from what the
@@ -636,16 +643,18 @@ stamped for deletion with its attempt kept. The protocol:
   rather than re-read a chunk's worth of rows under the root's lock each turn (`TestStage_TheCopiedRowsAreCounted`). **Do not bound
   the positions by recency**: the trees are visited in turn, which is the access pattern an LRU serves worst - past the
   bound it evicts the next tree to visit, every time. The job drops an arbitrary one.
-- **`dwarf_archive_oldest_attempt_seconds` is the job's own**, a probe of the oldest unpublished attempt at most once
-  a second while busy and in every round that finds nothing, observed only while the janitor is active. It goes on
+- **`dwarf_archive_oldest_attempt_seconds` is the job's own**, labelled by job, a probe of the oldest unpublished
+  attempt of its share at most once a second while busy and in every round that finds nothing, observed only while the
+  janitor is active; a shard's reading is the max of its jobs'. It goes on
   through a closed day (`TestStage_OldestAttemptDuringDayOutage`). **The reading goes on aging after its probe** (the
   probe records when the attempt began, not its age): a chunk that blocks stops the probes too, and a reading frozen at
   the last one would hide exactly the stuck copy the gauge is for (`TestStage_TheOldestUnpublishedAttemptIsObserved`). `dwarf_archive_staged_rows` counts each chunk's
   inserted rows, so a rewrite after a forgotten position adds nothing (`TestStage_TheCopiedRowsAreCounted`).
-- **Its failures are an episode of its own** - `dwarf_archive_failing_seconds{job="large_archiving"}`, beside fast
+- **Its failures are an episode of its own** - `dwarf_archive_failing_seconds{job="large_archiving_1"}`, beside fast
   archiving's series; each job owns its series, and a reader aggregates with max. It begins at a failed chunk or a
-  failed replacement of a dropped day's attempt, and ends once a lap over every started archive fails none: the
-  position wrapping is the lap's end, every tree having been taken again and copied, published, found held or gone.
+  failed replacement of a dropped day's attempt, and ends once a lap over every started archive of its share fails
+  none: the position wrapping is the lap's end, every tree having been taken again and copied, published, found held
+  or gone.
   **Only a scan that reads from the start is a wrap** - never one continuing the tree in progress, inferred from its
   `flow_id`: with that tree at `flow_id` 1 every chunk read as a wrap, and the episode ended while another tree was
   still failing (`TestStage_ContinuingATreeIsNoLap`).

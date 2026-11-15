@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -329,6 +330,102 @@ func TestShare_EachFastArchivingJobReportsItsLag(t *testing.T) {
 	older, newer := lags[jobOf(roots[0])], lags[jobOf(roots[1])]
 	assert.True(older >= 119 && older < 140, "the older root's share: %v", lags)
 	assert.True(newer >= 59 && newer < 80, "the newer root's share: %v", lags)
+}
+
+// TestShare_EachLargeArchivingJobTakesItsShare pins large-tree archiving's share: each of a shard's two jobs copies and
+// publishes the started archives of its own share alone - by flow_id, whatever the replica's residue class - and
+// together they publish every one; and each probes the oldest attempt of its own share, reporting under its own name.
+func TestShare_EachLargeArchivingJobTakesItsShare(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := stageRig(t)
+	today, err := r.archive.Today(ctx)
+	assert.Must(assert.NoError(err))
+	var roots []int
+	for range 6 {
+		roots = append(roots, seedWideTree(t, r.db, 2, 2, 2)) // three flows and nine rows, over the staging threshold of 8
+	}
+	// Each share's attempts began at a different time, so each job's reading says which share it probed.
+	began := map[int]time.Duration{1: 150 * time.Second, 2: 90 * time.Second}
+	shareOf := func(id int) int {
+		if inShare(id, 1, 2, 0) {
+			return 1
+		}
+		return 2
+	}
+	perShare := map[int]int{}
+	for _, id := range roots {
+		perShare[shareOf(id)]++
+	}
+	assert.Must(assert.True(perShare[1] >= 2 && perShare[2] >= 2, "trees in each share: %v", perShare))
+	r.startAttempts(ctx)
+	for _, id := range roots {
+		at := attemptAt(t, r, id)
+		assert.Must(assert.False(at.IsZero(), "root %d has an attempt", id))
+		at = at.Add(-began[shareOf(id)])
+		if archiver.DayOf(at, r.archive.DayLength()) != today {
+			t.Skip("too close to the start of the day")
+		}
+		setAttempt(t, r, id, at)
+	}
+	r.setResidency(2, 0, true) // a residue class, which the shares leave out
+	r.janitor()
+
+	reader := sdkmetric.NewManualReader()
+	d := diagnostics.New()
+	d.SetLogger(slog.New(r.logs))
+	d.SetSeams(r.seams)
+	d.SetMeter(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test"))
+	j := New(r.shard, d)
+	for k := 1; k <= 2; k++ {
+		la := NewLargeArchiving(r.archive, r.retention)
+		la.SetShare(k, 2)
+		la.SetBatch(r.settings.batchRows, r.settings.batchBytes)
+		la.SetQuietMargin(!r.settings.noQuietMargin)
+		j.AddJob(ShareName(JobLargeArchiving, k), la)
+	}
+	j.SetManual(true)
+	j.Start(ctx)
+	j.Resume()
+	t.Cleanup(j.Stop)
+	job := func(k int) *runningJob {
+		return j.jobs[slices.IndexFunc(j.jobs, func(rn *runningJob) bool { return rn.name == ShareName(JobLargeArchiving, k) })]
+	}
+
+	// One round of each: a probe of its share, and a chunk of one of its trees.
+	for k := 1; k <= 2; k++ {
+		assert.True(j.round(ctx, job(k)), "job %d copies a chunk", k)
+	}
+	var rm metricdata.ResourceMetrics
+	assert.Must(assert.NoError(reader.Collect(ctx, &rm)))
+	oldest := map[string]float64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if g, ok := m.Data.(metricdata.Gauge[float64]); ok && m.Name == "dwarf_archive_oldest_attempt_seconds" {
+				for _, dp := range g.DataPoints {
+					name, _ := dp.Attributes.Value("job")
+					oldest[name.AsString()] = dp.Value
+				}
+			}
+		}
+	}
+	assert.Len(oldest, 2, "a series per job: %v", oldest)
+	first, second := oldest[ShareName(JobLargeArchiving, 1)], oldest[ShareName(JobLargeArchiving, 2)]
+	assert.True(first >= 149 && first < 170, "the first share's oldest attempt: %v", oldest)
+	assert.True(second >= 89 && second < 110, "the second share's oldest attempt: %v", oldest)
+
+	for k := 1; k <= 2; k++ {
+		for j.round(ctx, job(k)) {
+		}
+		for _, id := range roots {
+			published := visibleInDay(t, r, today, id) > 0
+			assert.Equal(k == 2 || shareOf(id) == 1, published, "root %d after job %d", id, k)
+		}
+	}
+	if now, _ := r.archive.Today(ctx); now != today {
+		t.Skip("midnight passed")
+	}
 }
 
 // TestShare_TheScansWalkTheirIndexes pins the share's SQL on PostgreSQL, in a populated table with statistics: with a

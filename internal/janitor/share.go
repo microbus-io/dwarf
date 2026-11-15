@@ -18,14 +18,14 @@ package janitor
 
 import "strconv"
 
-// ShareName is the name of the k-th fast job of a kind on a shard, job its kind's name (JobFastArchiving,
-// JobFastDeletion), and of the sweep behind it (JobSweepArchiving, JobSweepDeletion): job_k.
+// ShareName is the name of the k-th job of a kind on a shard, job its kind's name (JobFastArchiving, JobFastDeletion,
+// JobLargeArchiving), and of the sweep behind a fast job (JobSweepArchiving, JobSweepDeletion): job_k.
 func ShareName(job string, k int) string {
 	return job + "_" + strconv.Itoa(k)
 }
 
-// share is which of a kind's fast jobs on a shard a job is, the k-th of of, from 1, and so which roots it takes - and
-// its sweep behind it. A share of one takes every root.
+// share is which of a kind's jobs on a shard a job is, the k-th of of, from 1, and so which roots it takes - and a fast
+// job's sweep behind it. A share of one takes every root.
 type share struct {
 	k, of int
 }
