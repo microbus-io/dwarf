@@ -1328,9 +1328,12 @@ func TestPeers_ReadFaultDrivesTheBlindPolicy(t *testing.T) {
 	sm := seamster.New(true)
 	r := newRigWith(t, seamsDiags(sm))
 
-	// A healthy fleet of three, two of them dispatching alongside us.
+	// A healthy fleet of three, two of them dispatching alongside us. The windows are widened because they are
+	// measured on the database clock: a stall of a few seconds before the first reading would age peer 10 past the
+	// 5s dispatch window, and the replica, a solo dispatcher, would partition nothing.
+	r.s.dispatch, r.s.fresh, r.s.straggler = time.Hour, time.Hour, 2*time.Hour
 	r.addPeer(t, 10, time.Second, time.Second)
-	r.addPeer(t, 20, time.Second, 10*time.Minute) // alive, but claims no work
+	r.addPeer(t, 20, time.Second, 2*time.Hour) // alive, but claims no work
 	assert.NoError(r.s.register(ctx))
 	var turns atomic.Uint64
 	var busy, idle atomic.Bool
