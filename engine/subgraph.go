@@ -144,20 +144,24 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			if e.diags.Seams().Enabled() {
 				e.diags.Seams().Variable(diagnostics.Join(diagnostics.VariableLockOrder, "terminate"), slices.Clone(lockIDs))
 			}
-			terminateSteps := func() {
+			terminateSteps := func() error {
 				for chunk := range slices.Chunk(lockIDs, inListChunk) {
-					ph, ids := inList(chunk)
-					tx.ExecContext(ctx,
-						"UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE flow_id IN ("+ph+") AND status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
-						append([]any{workflow.StatusTerminated, parkedNone}, ids...)...,
+					err := updateFlowSteps(ctx, tx, "status=?, parked=?, updated_at=NOW_UTC()", []any{workflow.StatusTerminated, parkedNone},
+						chunk, "status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 					)
+					if err != nil {
+						return err
+					}
 				}
+				return nil
 			}
 			// Write-first (the step-terminate UPDATE) per the flow-terminating-transaction rule, and steps before
 			// flows, the order Resume and handleInterrupt take the same rows in. The second step UPDATE below takes
 			// steps AFTER flows; it reaches only steps created in between, so it can cross only a transaction that
 			// took such a just-created step first.
-			terminateSteps()
+			if err := terminateSteps(); err != nil {
+				return err
+			}
 			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointTerminateAfterStepsLocked)
 			// Lock the flow rows, then terminate the steps again. A transition locks its flow row before it inserts
 			// a step, so once these rows are held no step can be added to these flows - but one that committed
@@ -176,18 +180,21 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 				settled = true
 				return errTreeClosed
 			}
-			terminateSteps()
+			if err := terminateSteps(); err != nil {
+				return err
+			}
 			// A step whose completion write landed before this transaction stays `completed` with advancing=1, and
 			// its worker still holds the generation its remaining writes are fenced on. A new generation turns each
 			// into a quiet abandon, as the orphan sweep's rewind does. The step keeps its status and flag, the state
 			// a dead worker leaves too. After the flow-row locks, in an ordinary transition's order; the crossing
 			// with the resolving cohort arrival and failStep is retried by Transact.
 			for chunk := range slices.Chunk(lockIDs, inListChunk) {
-				ph, ids := inList(chunk)
-				tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET lease_seq=lease_seq+1 WHERE flow_id IN ("+ph+") AND status='"+workflow.StatusCompleted+"' AND advancing=1",
-					ids...,
+				err := updateFlowSteps(ctx, tx, "lease_seq=lease_seq+1", nil,
+					chunk, "status='"+workflow.StatusCompleted+"' AND advancing=1",
 				)
+				if err != nil {
+					return err
+				}
 			}
 			// The scan before this transaction misses a child spawned since. A spawn parks its caller step in the
 			// transaction that inserts the child, and every live step of these flows is now locked here, so each

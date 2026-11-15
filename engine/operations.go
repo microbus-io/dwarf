@@ -995,18 +995,15 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 	// watermark committed, and its insert already decided its mark - inherited if its source was reached by
 	// this Cancel, not if its source was covered. Unbounded, the mark would catch the onError handler of a
 	// step preempted in the window between that commit and this statement, and deliver the cancellation a
-	// second time to the handler written to catch it. A chunk holds whole flows, so each flow is marked by one
-	// statement.
+	// second time to the handler written to catch it. A chunk holds whole flows; on SQL Server a flow of many steps is
+	// marked a list of steps at a time (updateFlowSteps).
 	for chunk := range slices.Chunk(allFlowIDs, inListChunk) {
 		if e.diags.Seams().IsFault(diagnostics.FaultCancelMarkErr) {
 			return errors.New("injected fault: " + diagnostics.FaultCancelMarkErr)
 		}
-		ph, ids := inList(chunk)
-		_, err = db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET cancelling=1 WHERE flow_id IN ("+ph+")"+
-				" AND status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
+		err = updateFlowSteps(ctx, db, "cancelling=1", nil, chunk,
+			"status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
 				" AND step_id <= (SELECT f.cancel_watermark FROM dwarf_flows f WHERE f.flow_id=dwarf_steps.flow_id)",
-			ids...,
 		)
 		if err != nil {
 			return errors.Trace(err)

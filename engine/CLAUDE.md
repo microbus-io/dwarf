@@ -322,6 +322,27 @@ zero-row flow UPDATE (a racing terminalization) **rolls the transaction back** r
 writes would otherwise flip a straggler on a frozen tree, and the post-commit loop would count every flow in
 it as ended a second time.
 
+**Every UPDATE of the steps of a list of flows goes through `updateFlowSteps` (`flowsteps.go`)** - Terminate's two
+step passes and its lease bump, Cancel's mark. A list of flows bounds nothing: a `forEach` keeps its branches in one
+flow, so one flow can hold any number of open steps, or of completed ones still advancing (queued at a fan-in, or
+left by a crashed worker until the orphan repair), and a statement over it can lock every flow on the shard out
+until the transaction commits:
+- **On SQL Server** a statement taking ~5,000 row locks on a table escalates to a table lock. The ids are read first
+  and updated by primary key, 2,000 a statement, which keeps Terminate one transaction: locks of earlier statements
+  do not count toward the threshold, and a Terminate of 131,072 steps held ~137,000 row locks without escalating.
+  `UPDATE TOP (n)` passes are no substitute: a pass ends only when its rows stop matching, and the lease bump's
+  never do.
+- **On MySQL and MariaDB** the statement names `idx_dwarf_steps_flow_id`. At REPEATABLE READ, with one flow 11% of
+  `dwarf_steps`, MariaDB scanned the whole table and locked every row, and MySQL served the lease bump from the
+  status index, whose range locks the gap every step completing on the shard inserts into. Either way every flow
+  on the shard waited; at READ COMMITTED neither did. The flow index still locks the gap after the flow's last step
+  until Terminate commits, and while the flow is the shard's newest, a new flow's first step waits on it.
+
+Pinned by `TestTerminate_AWideOpenFanOutLeavesTheTablesUnlocked` (8,192 open steps, and 8,192 advancing ones; the
+Terminate held after its rescan while a flow runs beside it, with a newer flow after the wide one) and
+`TestCancel_AWideOpenFanOutMarksWithoutEscalating` (SQL Server's escalation count; the mark runs outside a
+transaction).
+
 **Cancel** - The graceful counterpart of Terminate: a cancellation is delivered as an error on each covered
 step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and
 recover. Root-only (400 on a subgraph-child key), 404 on an unknown key, a no-op on a closed flow.
