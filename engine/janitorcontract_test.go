@@ -43,7 +43,7 @@ func holdARoot(t *testing.T, e *Engine, db *sequel.DB) {
 	root := seedTrees(t, db, 1, callShape)[0]
 	closeTreesAgo(t, db, 2*time.Minute, root)
 	// The sweep's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
-	// and DWARF_STAGE_ROWS would stage every tree.
+	// and DWARF_TESTING_STAGE_ROWS would stage every tree.
 	e.reapStageRows = 0
 	e.sweepOverdue = 0
 	e.reapBatch = 1

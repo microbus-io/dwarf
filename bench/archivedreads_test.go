@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -43,14 +44,14 @@ func TestArchivedReaders_ReportListErrors(t *testing.T) {
 }
 
 // TestArchivedListWindow_FitsTheArchiveLimit pins that the readers' window stays inside the archive days one
-// ListClosed reads. Under a 600s DWARF_ARCHIVE_DAY and a retention of 100 days, a fixed day-long window reaches 101
-// days and is refused on every refresh.
+// ListClosed reads. Under a 600s DWARF_TESTING_ARCHIVE_DAY and a retention of 100 days, a fixed day-long window
+// reaches 101 days and is refused on every refresh.
 func TestArchivedListWindow_FitsTheArchiveLimit(t *testing.T) {
 	assert := testarossa.For(t)
-	t.Setenv("DWARF_ARCHIVE_DAY", "")
+	t.Setenv("DWARF_TESTING_ARCHIVE_DAY", "")
 	assert.Equal(24*time.Hour, archivedListWindow())
 
-	t.Setenv("DWARF_ARCHIVE_DAY", "600s")
+	t.Setenv("DWARF_TESTING_ARCHIVE_DAY", "600s")
 	assert.Equal(5*time.Hour, archivedListWindow())
 
 	ctx := context.Background()
@@ -58,6 +59,7 @@ func TestArchivedListWindow_FitsTheArchiveLimit(t *testing.T) {
 	defer eng.Shutdown(ctx)
 	assert.NoError(eng.SetHost(hosts.NewMux()))
 	assert.NoError(eng.SetRetention(100))
+	assert.NoError(errors.Join(archiveOverrides(eng, slog.New(slog.DiscardHandler))...)) // the 600s day, as the rig sets it
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
 	now := time.Now()
 	_, err := eng.ListClosed(ctx, workflow.Query{FromTime: now.Add(-archivedListWindow()), ToTime: now, Limit: 10})
@@ -69,7 +71,7 @@ func TestArchivedListWindow_FitsTheArchiveLimit(t *testing.T) {
 func TestArchivedListWindow_CapsLargeDays(t *testing.T) {
 	for _, day := range []string{"48m", "24h", "87600h", "2562047h47m16s"} {
 		t.Run(day, func(t *testing.T) {
-			t.Setenv("DWARF_ARCHIVE_DAY", day)
+			t.Setenv("DWARF_TESTING_ARCHIVE_DAY", day)
 			if got := archivedListWindow(); got != 24*time.Hour {
 				t.Fatalf("archive day %s: window = %s, want 24h", day, got)
 			}

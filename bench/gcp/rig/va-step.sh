@@ -7,7 +7,7 @@
 #            6 min saturated probe on the empty database and at 25M / 50M / 100M, and History/Step of the first
 #            archived flow and ListClosed at each. Read: probe steps/s and p99 against the archive's size, the
 #            archived read latencies, v-mon's sizes and s-mon's waits (LWLock:LockManager among them).
-#   va-days  many days, rollovers and drops under load: DWARF_ARCHIVE_DAY=600s, -archive-retention 1, 30 min
+#   va-days  many days, rollovers and drops under load: DWARF_TESTING_ARCHIVE_DAY=600s, -archive-retention 1, 30 min
 #            saturated linear 0 B. A day rolls every 10 min and, from ~20 min, the oldest is dropped. Read: the
 #            10 s series around each rollover and drop, s-mon's waits, the database's checkpoint log.
 #   va-reads32 / va-reads128  lock-manager pressure: hr-sat's load plus 32 / 128 goroutines reading archived
@@ -39,7 +39,7 @@ drop "${IPS[0]}" "$db"
 sleep 20
 
 # ---- va-days
-RUN_ENV="DWARF_ARCHIVE_DAY=600s" WIN_MIN=30 one_run va-days $SAT -archive-retention 1
+RUN_ENV="DWARF_TESTING_ARCHIVE_DAY=600s" WIN_MIN=30 one_run va-days $SAT -archive-retention 1
 
 # ---- sustained load: the 100% and 95% rates come from hr-sat's window mean (10 s samples), in flows/s of the
 # 10-step chain.

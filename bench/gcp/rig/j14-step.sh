@@ -5,7 +5,7 @@
 #   j14-on     two jobs of each fast kind, archiving on: does archiving keep up? out/age-j14-on.log is the oldest closed
 #              root not archived every 10 s; out/j14-on.json the steps/s, p99, dwarf_flows_closed against
 #              dwarf_flows_archived, the lag gauges by job, dwarf_janitor_batch_seconds by job and part, the pool's wait.
-#   j14-off    archiving off (DWARF_ARCHIVE_GRACE=24h): what archiving costs dispatch.
+#   j14-off    archiving off (DWARF_TESTING_ARCHIVE_GRACE=24h): what archiving costs dispatch.
 #   j14-k3-on  three jobs of each fast kind, archiving on - only when $RIG_HOME/j14-decision says k3 (written after
 #              j14-on and j14-off are read; the rig waits up to 60 min for it, then skips the arm).
 #   j14-large  two jobs, archiving on, plus a few fan-outs of 270,000 branches - past the 256k staging threshold: the
@@ -29,7 +29,7 @@ ages() {
 }
 WIN_MIN=4 one_run j14-warm $SAT
 mon j14-on 14; WIN_MIN=14 one_run j14-on $SAT; ages j14-on
-mon j14-off 14; RUN_ENV="DWARF_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j14-off $SAT
+mon j14-off 14; RUN_ENV="DWARF_TESTING_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j14-off $SAT
 log "WAITING FOR DECISION: echo k3 > $S/j14-decision (or skip); 60 min"
 decision=skip
 for i in $(seq 1 120); do

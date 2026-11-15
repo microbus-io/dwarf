@@ -644,12 +644,12 @@ stamped for deletion with its attempt kept. The protocol:
   counting that wrap would credit the next round with a clean lap it never ran - ending the episode between two
   failing passes. Fast archiving's end rule (a probe of the unattempted roots) cannot serve here, since a staged
   tree is excluded from it by design (`TestStage_AFailingCopyIsAFailureUntilALapFailsNone`, and with
-  `DWARF_STAGE_ROWS=1` the engine's `TestArchiveMetrics_TheReaperCountsWhatItMoves`).
+  `DWARF_TESTING_STAGE_ROWS=1` the engine's `TestArchiveMetrics_TheReaperCountsWhatItMoves`).
 - **A published tree's live copy is fast deletion's** when a batch holds it, and otherwise sweep deletion's, in chunks:
   fast deletion passes a stamped tree larger than a batch, and its position is then past it.
 
 Staging is on past 256k rows or 128 MiB of payload by the engine's defaults (`engine/CLAUDE.md`). The engine and
-fixtures suites exercise it on every tree with `DWARF_STAGE_ROWS=1`.
+fixtures suites exercise it on every tree with `DWARF_TESTING_STAGE_ROWS=1`.
 
 ## The archive attempt (`attempt.go`) and publication accounting
 

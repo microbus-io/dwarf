@@ -479,7 +479,7 @@ func TestStaged_APurgeBeforeDuringTheLiveCleanup(t *testing.T) {
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(treeMux())
 	e.archiveGrace = 0
-	e.testArchiveDay = 2 * time.Second
+	e.archiveDayOverride = 2 * time.Second
 	assert.NoError(e.SetRetention(100))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	e.reapStageRows, e.reapBatchRows = 1, 2

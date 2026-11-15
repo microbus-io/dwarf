@@ -128,7 +128,7 @@ same bound). So nothing is dropped less than `retention` days after it was archi
 yesterday through the whole of today.
 
 **The day length is a parameter, for tests and the benchmark only.** Production days are `DefaultDayLength`; a test
-passes seconds, and the engine reads `DWARF_ARCHIVE_DAY` for the rig. Day numbers of different lengths are different
+passes seconds, and the bench sets one for the rig (`DWARF_TESTING_ARCHIVE_DAY`, through `accessors.SetArchiveDay`). Day numbers of different lengths are different
 counts, so a database must only ever see one length. `MigrateDays` refuses a day the catalog lists past the last day
 made ahead - a shorter length's numbering, seen by a longer one - so Startup fails rather than keep both. The other way round is not caught:
 a shorter length reads a longer one's days as long expired, and its retention drops them.
@@ -171,7 +171,7 @@ it for every archived read.
   day length. The hour comes from the column default, which `TestCreatedHour_EveryRowCarriesItsFlowsHour` (engine)
   pins, and the day from the database clock too. An hour computed in Go would let a replica with a skewed clock write
   a flow into a day its key does not name, with no directory row to say so. With days shorter than an hour (tests,
-  `DWARF_ARCHIVE_DAY`), the hour's day is the day the hour began, so every move but one within about two days of that
+  `DWARF_TESTING_ARCHIVE_DAY`), the hour's day is the day the hour began, so every move but one within about two days of that
   is named.
 - **It probes the days the archive knows** (`known`: the whole days at the last catalog read - Startup, every `ensure`,
   every maintenance pass, and `Refresh` on a replica that maintains nothing there - less the days this archive dropped

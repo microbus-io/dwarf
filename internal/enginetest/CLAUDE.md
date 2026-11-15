@@ -111,8 +111,8 @@ or call an operation between executions. What follows is what the code alone doe
 - **The floor is met by choosing seeds, never by tuning weights.** A default run takes seeds 1 to `hBaseSeeds`, then
   the lowest later seed for each `hFloor` situation they miss, found by generating from the model alone. Weights tuned
   until fixed seeds reach the floor reshuffle what every seed draws, so each change drops a different situation.
-- A failure prints the history as JSON; `DWARF_HISTORY` replays it on whichever database `SEQUEL_TESTING_DSN`
-  selects, and `DWARF_HISTORY_MINIMIZE` reduces it to the fewest events that still fail - any failure, so read the
+- A failure prints the history as JSON; `DWARF_TESTING_HISTORY` replays it on whichever database `SEQUEL_TESTING_DSN`
+  selects, and `DWARF_TESTING_HISTORY_MINIMIZE` reduces it to the fewest events that still fail - any failure, so read the
   last candidate's messages.
 
 ## The mutation inventory

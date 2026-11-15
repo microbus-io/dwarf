@@ -168,10 +168,10 @@ func startArchivedReaders(ctx context.Context, eng *engine.Engine, n int) (stop 
 }
 
 // archivedListWindow is how far back the readers list archived flows: the last day, or 30 archive days when the
-// rig's DWARF_ARCHIVE_DAY makes a day shorter than 48 minutes. ListClosed reads at most 31 archive days a call, so
-// a fixed day-long window over minute-long days is refused on every refresh and the readers never start.
+// rig's DWARF_TESTING_ARCHIVE_DAY makes a day shorter than 48 minutes. ListClosed reads at most 31 archive days a
+// call, so a fixed day-long window over minute-long days is refused on every refresh and the readers never start.
 func archivedListWindow() time.Duration {
-	day, err := time.ParseDuration(os.Getenv("DWARF_ARCHIVE_DAY"))
+	day, err := time.ParseDuration(os.Getenv("DWARF_TESTING_ARCHIVE_DAY"))
 	if err != nil || day <= 0 {
 		return 24 * time.Hour
 	}

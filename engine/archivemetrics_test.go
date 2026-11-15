@@ -324,7 +324,7 @@ func TestArchiveMetrics_TheSweepReportsHeldWork(t *testing.T) {
 	assert := testarossa.For(t)
 	e, reader := meteredArchiveEngine(t, treeMux(), 30)
 	// The sweep's held readings are of trees it archives itself; a staged tree's failures are large-tree archiving's,
-	// and DWARF_STAGE_ROWS would stage every tree.
+	// and DWARF_TESTING_STAGE_ROWS would stage every tree.
 	e.reapStageRows = 0
 	e.sweepOverdue = 0
 	roots := closedRoots(t, e, 3)

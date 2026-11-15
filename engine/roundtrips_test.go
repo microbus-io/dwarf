@@ -31,11 +31,11 @@ import (
 
 // TestRoundTrips_LinearStep measures k, the round trips one linear step makes, by charging every round trip a
 // simulated delay and timing linear flows of two lengths: the difference divided by the extra steps cancels the
-// fixed costs of creating, completing and awaiting a flow. Opt-in (DWARF_MEASURE_K=1), since it is slow by
+// fixed costs of creating, completing and awaiting a flow. Opt-in (DWARF_TESTING_MEASURE_K=1), since it is slow by
 // design; run it against the database whose k is wanted (SEQUEL_TESTING_DSN).
 func TestRoundTrips_LinearStep(t *testing.T) {
-	if os.Getenv("DWARF_MEASURE_K") == "" {
-		t.Skip("set DWARF_MEASURE_K=1 to measure")
+	if os.Getenv("DWARF_TESTING_MEASURE_K") == "" {
+		t.Skip("set DWARF_TESTING_MEASURE_K=1 to measure")
 	}
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -94,10 +94,10 @@ func TestRoundTrips_LinearStep(t *testing.T) {
 // TestRoundTrips_FanInCycle measures the round trips of one fan-out cycle - a source fanning out over two
 // elements, the two branch steps (one a plain arrival, one the arrival that resolves the cohort) and the fan-in
 // step - the same way TestRoundTrips_LinearStep measures a linear step: chains of cycles of two lengths, the
-// difference divided by the extra cycles. Opt-in (DWARF_MEASURE_K=1).
+// difference divided by the extra cycles. Opt-in (DWARF_TESTING_MEASURE_K=1).
 func TestRoundTrips_FanInCycle(t *testing.T) {
-	if os.Getenv("DWARF_MEASURE_K") == "" {
-		t.Skip("set DWARF_MEASURE_K=1 to measure")
+	if os.Getenv("DWARF_TESTING_MEASURE_K") == "" {
+		t.Skip("set DWARF_TESTING_MEASURE_K=1 to measure")
 	}
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -156,10 +156,10 @@ func TestRoundTrips_FanInCycle(t *testing.T) {
 
 // TestRoundTrips_OneStepFlow measures the round trips of a whole one-step flow - its creation, its one step, its
 // completion and the caller's await - by timing sequential runs under a simulated delay per round trip. Opt-in
-// (DWARF_MEASURE_K=1).
+// (DWARF_TESTING_MEASURE_K=1).
 func TestRoundTrips_OneStepFlow(t *testing.T) {
-	if os.Getenv("DWARF_MEASURE_K") == "" {
-		t.Skip("set DWARF_MEASURE_K=1 to measure")
+	if os.Getenv("DWARF_TESTING_MEASURE_K") == "" {
+		t.Skip("set DWARF_TESTING_MEASURE_K=1 to measure")
 	}
 	assert := testarossa.For(t)
 	ctx := context.Background()

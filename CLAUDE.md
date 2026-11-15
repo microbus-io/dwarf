@@ -98,8 +98,9 @@ matching one before working there:**
 - **`internal/migrations/CLAUDE.md`** - schema: the `dwarf_flows`/`dwarf_steps` column catalog, indexing strategy, and the
   SQL-authoring gotchas.
 - **`fixtures/CLAUDE.md`** - the test harness: the name-keyed `NewEngineUnderTest` test mode and its
-  caller-owned teardown, the per-test-engine rule under a `t.Parallel` suite (and which tests opt out), and
-  `hosts.Mux` conventions.
+  caller-owned teardown, the per-test-engine rule under a `t.Parallel` suite (and which tests opt out),
+  `hosts.Mux` conventions, and the table of every `DWARF_TESTING_*` environment variable a test or the bench reads
+  (the engine's production code reads none).
 - **`internal/enginetest/CLAUDE.md`** - the invariant checker (`AssertInvariants`, and `CaptureOutcomes` /
   `AssertOutcomesKept` for closed outcomes that must not move), generated operation histories against a reference
   model, and the mutation inventory: each engine transaction's starting state, guard, post-commit backstop and

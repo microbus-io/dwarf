@@ -295,14 +295,14 @@ type Engine struct {
 	janitorManual    bool
 
 	// Archive goroutine: refreshes the catalog of each shard's archive days (shardActors.archive) where this replica
-	// does not dispatch; the janitor's archive retention keeps the days elsewhere. testArchiveDay, when set, replaces
-	// the day's length for a test (archiveDayLength). noReapQuiet, set in test mode, lets the janitor's archiving jobs
+	// does not dispatch; the janitor's archive retention keeps the days elsewhere. archiveDayOverride, when set,
+	// replaces the day's length for a test or a benchmark (setArchiveDay). noReapQuiet, set in test mode, lets the janitor's archiving jobs
 	// archive into their day however late they run (their quiet margin off), so a test's round near midnight, or on a
 	// day of seconds, does what it does at noon. archiveCancel stops the loop between its statements.
-	testArchiveDay time.Duration
-	noReapQuiet    bool
-	archiveCancel  context.CancelFunc
-	archiveWorker  sync.WaitGroup
+	archiveDayOverride time.Duration
+	noReapQuiet        bool
+	archiveCancel      context.CancelFunc
+	archiveWorker      sync.WaitGroup
 
 	// Await latch: one board per shard for callers to park on (shardActors.latch), each with a detector goroutine
 	// that asks its shard which of those flows have settled. A stop this replica commits reaches its board instantly
@@ -785,17 +785,8 @@ func (e *Engine) Startup(ctx context.Context) error {
 	if e.testHashedID != "" {
 		testConnCap = e.testConnCap
 	}
-	// Before the shards open, so a bad value fails Startup with nothing to undo.
-	dayLength, err := e.archiveDayLength(ctx)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	if err := e.applyArchiveGraceEnv(ctx); err != nil {
-		return errors.Trace(err)
-	}
-	if err := e.applyStageEnv(ctx); err != nil {
-		return errors.Trace(err)
-	}
+	dayLength := e.archiveDayLength()
+	var err error
 	// Resolved before the shards open, so the migrations trace through the same provider as everything after.
 	e.initProviders()
 	err = e.db.Open(ctx, database.Config{

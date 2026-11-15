@@ -41,19 +41,19 @@ import (
 // (Terminate/Resume/Snapshot/History/Fork/Delete/duplicate work doorbell) at random flows, then drives every
 // flow to terminal and asserts (a) nothing wedged - every Await returns - (b) the structural invariants
 // are clean, and (c) the dwarf_steps_unwedged "latent bug" alarm never fired. The RNG seed is logged so a
-// failure reproduces (DWARF_SOAK_SEED overrides it).
+// failure reproduces (DWARF_TESTING_SOAK_SEED overrides it).
 func TestChaosSoak(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
 	seed := int64(20260703)
-	if s := os.Getenv("DWARF_SOAK_SEED"); s != "" {
+	if s := os.Getenv("DWARF_TESTING_SOAK_SEED"); s != "" {
 		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
 			seed = v
 		}
 	}
-	t.Logf("chaos soak seed=%d (set DWARF_SOAK_SEED to reproduce)", seed)
+	t.Logf("chaos soak seed=%d (set DWARF_TESTING_SOAK_SEED to reproduce)", seed)
 	rng := rand.New(rand.NewSource(seed))
 	var rngMu sync.Mutex
 	roll := func(n int) int { rngMu.Lock(); defer rngMu.Unlock(); return rng.Intn(n) }
@@ -327,22 +327,22 @@ func registerChaosGraphs(t *testing.T, mux *hosts.Mux) {
 // structural invariants are clean, and the always-on dwarf_steps_unwedged alarm reads zero. The alarm stays a
 // meaningful zero because the wedge sweep keeps its default 5m cadence/age-guard, so a fault that wedges a step
 // (e.g. subgraphReviveLost, leaseStaleWrite) is terminalized by the drain Terminate, never papered over by the
-// sweep within the window. Seed is logged (DWARF_SOAK_SEED overrides); DWARF_LONGSOAK=1 lengthens the window
+// sweep within the window. Seed is logged (DWARF_TESTING_SOAK_SEED overrides); DWARF_TESTING_LONGSOAK=1 lengthens the window
 // and raises fault density.
 func TestChaosSoak_Faults(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
 
-	longsoak := os.Getenv("DWARF_LONGSOAK") != ""
+	longsoak := os.Getenv("DWARF_TESTING_LONGSOAK") != ""
 
 	seed := int64(20260704)
-	if s := os.Getenv("DWARF_SOAK_SEED"); s != "" {
+	if s := os.Getenv("DWARF_TESTING_SOAK_SEED"); s != "" {
 		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
 			seed = v
 		}
 	}
-	t.Logf("fault chaos soak seed=%d longsoak=%v (set DWARF_SOAK_SEED to reproduce, DWARF_LONGSOAK=1 for the heavy run)", seed, longsoak)
+	t.Logf("fault chaos soak seed=%d longsoak=%v (set DWARF_TESTING_SOAK_SEED to reproduce, DWARF_TESTING_LONGSOAK=1 for the heavy run)", seed, longsoak)
 	rng := newLockedRNG(seed)
 
 	reader := sdkmetric.NewManualReader()
@@ -569,7 +569,7 @@ func TestChaosSoak_Faults(t *testing.T) {
 }
 
 // lockedRNG is a tiny mutex-guarded RNG so the lifecycle- and fault-chaos goroutines share one seeded stream
-// (reproducible under a fixed DWARF_SOAK_SEED).
+// (reproducible under a fixed DWARF_TESTING_SOAK_SEED).
 type lockedRNG struct {
 	mu  sync.Mutex
 	src *rand.Rand

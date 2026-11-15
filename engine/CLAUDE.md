@@ -3768,8 +3768,8 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `reapBatchBytes`), sized to stay under about 0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the
   aim), with its roots one bound list of a length `database.IDList` pads to, and a large tree's chunk two lists of step
   ids (user); a tree past a batch but
-  under the staging threshold moves alone, in one longer transaction. `DWARF_STAGE_ROWS`/`DWARF_STAGE_BYTES` replace
-  the thresholds for the rig and the staging-on suites. The reads around a copy need nothing of their own: it is
+  under the staging threshold moves alone, in one longer transaction. `setStageRows`/`setStageBytes` replace the
+  thresholds for the rig and the staging-on suites (below). The reads around a copy need nothing of their own: it is
   invisible until published, and a published tree is read from the archive
   (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
 - **`SetFlowExpiration(d)`, construction-time, default off** (`expiration.go`): a root still `running` or `interrupted`
@@ -3835,15 +3835,15 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   per shard; a 503 for a shard with no archive in the run its set came from (a call straddling a restart that
   changed the shards), and a 400 for a t after today: a dropped day is never made again (`internal/archiver/CLAUDE.md`),
   and only the oldest days go, so it leaves no gaps.
-- **`DWARF_ARCHIVE_DAY` shortens the day, for the benchmark rig only.** It is read at every Startup, before the
-  shards open (whole seconds, logged as a warning when set): the engine's test seams are inert in a bench binary, so
-  a rig cannot reach a test-only override, and a day of minutes is the only way to see rollover and retention under
-  load in one run. Engine tests set `testArchiveDay`. **`DWARF_ARCHIVE_GRACE`** sets the archive grace the same way
-  (a Go duration of at least 0, logged), for a run that must archive within its window, or hold closed flows live
-  longer; engine tests set `archiveGrace`. **`DWARF_STAGE_ROWS`** and **`DWARF_STAGE_BYTES`** set the staging
-  thresholds the same way (whole rows and whole payload bytes, at least 0, logged; rows start staging, bytes add a
-  threshold beside them), for a rig run that stages large trees and for the suites run with staging on; engine tests
-  set `reapStageRows` and `reapStageBytes`.
+- **The archive's day, grace and staging thresholds have construction-time setters, for the benchmark and tests
+  only** (`setArchiveDay`, `setArchiveGrace`, `setStageRows`, `setStageBytes`, each a 400 on a bad value and a 409
+  after Startup). The bench reaches them through `internal/accessors`, since the engine's test seams are inert in a
+  bench binary, and sets them from its `DWARF_TESTING_*` environment (`bench/CLAUDE.md`); **the engine reads no
+  environment.** A day of minutes (whole seconds, at least 1s) is the only way to see rollover and retention under
+  load in one run; the grace (at least 0) lets a run archive within its window or hold closed flows live longer; the
+  staging thresholds (whole rows and payload bytes, at least 0; rows start staging, bytes add a threshold beside
+  them) stage large trees, and `NewEngineUnderTest` reads `DWARF_TESTING_STAGE_ROWS`/`_BYTES` for the suites run
+  with staging on. Engine tests set `archiveDayOverride`, `archiveGrace`, `reapStageRows` and `reapStageBytes`.
 - **Reading an archived flow** (`queryLiveOrArchive`, `archive.go`). Only the read API reads the archive - `Snapshot`,
   `Fingerprint` (and so `Await`/`Poll`/`Run`, which build their outcome with `Snapshot`), `History`, `Step` and
   `Continue`'s source; dispatch and every write path never do, a moved tree being answered there by the zero-row

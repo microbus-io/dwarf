@@ -668,17 +668,19 @@ script, because no single artifact holds them; the rest read their artifacts und
 local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are
 missing, with a note).
 
-**Three archive settings come from the environment, for the rig only**, since the bench cannot reach the engine's
-test seams: `DWARF_ARCHIVE_DAY` shortens the archive's day (whole seconds), so one run sees day rollovers, several
-day tables and retention drops under load; `DWARF_ARCHIVE_GRACE` sets how long a closed flow waits before it is
-archived (a Go duration, `0s` and up), so an archived run's warmup can be short or a run can hold closed flows live
-longer. `DWARF_STAGE_ROWS` sets the size, in rows, above which a closed tree is archived in stages (whole rows, `0`
-off), and `DWARF_STAGE_BYTES` a size in payload bytes beside it (whole bytes, `0` none), since staged archival is off
-until its thresholds are qualified. The engine logs a warning when any is set. `-archive-retention N` sets `SetRetention` on every replica: a
+**Four archive settings come from the environment, for the rig only.** The bench reads them (`archiveOverrides`,
+`overrides.go`) and sets them on every replica before Startup through `internal/accessors`, since the engine reads no
+environment and a bench binary's test seams are inert: `DWARF_TESTING_ARCHIVE_DAY` shortens the archive's day (whole
+seconds), so one run sees day rollovers, several day tables and retention drops under load;
+`DWARF_TESTING_ARCHIVE_GRACE` sets how long a closed flow waits before it is archived (a Go duration, `0s` and up), so
+an archived run's warmup can be short or a run can hold closed flows live longer. `DWARF_TESTING_STAGE_ROWS` sets the
+size, in rows, above which a closed tree is archived in stages (whole rows, `0` off), and `DWARF_TESTING_STAGE_BYTES`
+a size in payload bytes beside it (whole bytes, `0` none), since staged archival is off until its thresholds are
+qualified. The bench logs a warning for each one set; a rig arm sets them in `RUN_ENV`. `-archive-retention N` sets `SetRetention` on every replica: a
 day of minutes under the default retention of 30 days drops nothing within a run, so pair a short day with a small
 `N` to see drops under load.
 
-**Start every run on a fresh database, and never change `DWARF_ARCHIVE_DAY` against one that holds archive day
+**Start every run on a fresh database, and never change `DWARF_TESTING_ARCHIVE_DAY` against one that holds archive day
 tables** - not to another value, not between set and unset. The day length is not stored: a day table's number is
 read in whatever unit the running replica has, so a shorter day makes every existing table look ancient, and
 retention maintenance drops them all, today's included, with every configuration check passing (shown: a normal

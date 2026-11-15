@@ -18,6 +18,7 @@ package engine
 
 import (
 	"context"
+	"github.com/microbus-io/dwarf/internal/accessors"
 	"net/http"
 	"testing"
 	"time"
@@ -156,7 +157,7 @@ func TestRetention_TheLoopDropsExpiredDays(t *testing.T) {
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
 	e.SetHost(hosts.NewMux())
-	e.testArchiveDay = 2 * time.Second
+	e.archiveDayOverride = 2 * time.Second
 	e.janitorManual = false // the janitor's jobs run in the background, archive retention every second at this length
 	assert.NoError(e.SetRetention(1))
 	assert.Must(assert.NoError(e.Startup(ctx)))
@@ -208,64 +209,80 @@ func TestRetention_ReadersKeepNoArchive(t *testing.T) {
 	assert.False(hasArchiveDay(t, e, today-5), "a dispatcher drops the expired day")
 }
 
-// TestRetention_ABadDayLengthFailsStartup pins the benchmark's day-length override: a value that is not a whole
-// number of seconds fails Startup with a 400 before any shard opens, and the engine starts once it is fixed. Not
-// parallel: it sets an environment variable.
-func TestRetention_ABadDayLengthFailsStartup(t *testing.T) {
+// TestRetention_TheDayLengthOverride pins the archive day a benchmark sets through accessors.SetArchiveDay: a value
+// that is not a whole number of seconds of at least 1s is a 400, the day it sets is the run's, and it cannot change
+// once the engine started.
+func TestRetention_TheDayLengthOverride(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(context.Background())
 	e.SetHost(hosts.NewMux())
-	for _, bad := range []string{"1.5s", "500ms", "soon"} {
-		t.Setenv(archiveDayEnv, bad)
-		err := e.Startup(t.Context())
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", bad)
-		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
+	for _, bad := range []time.Duration{1500 * time.Millisecond, 500 * time.Millisecond, 0, -time.Second} {
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(accessors.SetArchiveDay(e, bad)), "%s", bad)
 	}
-	t.Setenv(archiveDayEnv, "10s")
+	assert.NoError(accessors.SetArchiveDay(e, 10*time.Second))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(10*time.Second, e.dayLength())
+	assert.Equal(http.StatusConflict, errors.StatusCode(accessors.SetArchiveDay(e, 20*time.Second)))
 }
 
-// TestRetention_TheGraceFromTheEnvironment pins the benchmark's grace override: a value that is not a duration of at
-// least 0 fails Startup with a 400 before any shard opens, and a good one is the grace the janitor uses. Not parallel:
-// it sets an environment variable.
-func TestRetention_TheGraceFromTheEnvironment(t *testing.T) {
+// TestRetention_TheGraceOverride pins the archive grace a benchmark sets through accessors.SetArchiveGrace: a negative
+// value is a 400, the grace it sets is the janitor's, and it cannot change once the engine started.
+func TestRetention_TheGraceOverride(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(context.Background())
 	e.SetHost(hosts.NewMux())
-	for _, bad := range []string{"-1s", "soon"} {
-		t.Setenv(archiveGraceEnv, bad)
-		err := e.Startup(t.Context())
-		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", bad)
-		assert.Len(e.db.Indices(), 0, "%q left shards open", bad)
-	}
-	t.Setenv(archiveGraceEnv, "5s")
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(accessors.SetArchiveGrace(e, -time.Second)))
+	assert.NoError(accessors.SetArchiveGrace(e, 5*time.Second))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(5*time.Second, e.archiveGrace)
+	assert.Equal(http.StatusConflict, errors.StatusCode(accessors.SetArchiveGrace(e, time.Second)))
 }
 
-// TestRetention_TheStagingThresholdFromTheEnvironment pins the benchmark's staging overrides, in rows and in bytes: a
-// value that is not a whole number of at least 0 fails Startup with a 400 before any shard opens, and good ones are
-// the thresholds the janitor stages above. Not parallel: it sets an environment variable.
-func TestRetention_TheStagingThresholdFromTheEnvironment(t *testing.T) {
+// TestRetention_TheStagingOverrides pins the staging thresholds a benchmark sets through accessors.SetStageRows and
+// SetStageBytes: a negative value is a 400, each sets only its own threshold, and neither can change once the engine
+// started.
+func TestRetention_TheStagingOverrides(t *testing.T) {
+	t.Parallel()
 	assert := testarossa.For(t)
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(context.Background())
 	e.SetHost(hosts.NewMux())
-	for _, env := range []string{stageRowsEnv, stageBytesEnv} {
-		for _, bad := range []string{"-1", "lots", "1.5"} {
-			t.Setenv(env, bad)
-			err := e.Startup(t.Context())
-			assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%s=%q", env, bad)
-			assert.Len(e.db.Indices(), 0, "%s=%q left shards open", env, bad)
-		}
-		t.Setenv(env, "")
+	for _, set := range []func(any, int) error{accessors.SetStageRows, accessors.SetStageBytes} {
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(set(e, -1)))
 	}
-	t.Setenv(stageRowsEnv, "131072")
-	t.Setenv(stageBytesEnv, "67108864")
+	bytes := e.reapStageBytes
+	assert.NoError(accessors.SetStageRows(e, 131072))
+	assert.Equal(bytes, e.reapStageBytes, "setting the rows left the bytes alone")
+	assert.NoError(accessors.SetStageBytes(e, 67108864))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	assert.Equal(131072, e.reapStageRows)
 	assert.Equal(67108864, e.reapStageBytes)
+	for _, set := range []func(any, int) error{accessors.SetStageRows, accessors.SetStageBytes} {
+		assert.Equal(http.StatusConflict, errors.StatusCode(set(e, 1)))
+	}
+}
+
+// TestRetention_TheTestRunsStagingFromTheEnvironment pins what a staging-on run of the suite rests on: the test-mode
+// constructor reads DWARF_TESTING_STAGE_ROWS and DWARF_TESTING_STAGE_BYTES, and a value that is not a whole number of
+// at least 0 panics rather than run the suite unstaged. Not parallel: it sets environment variables.
+func TestRetention_TheTestRunsStagingFromTheEnvironment(t *testing.T) {
+	assert := testarossa.For(t)
+	t.Setenv("DWARF_TESTING_STAGE_ROWS", "7")
+	t.Setenv("DWARF_TESTING_STAGE_BYTES", "4096")
+	e := NewEngineUnderTest(t.Name())
+	assert.Equal(7, e.reapStageRows)
+	assert.Equal(4096, e.reapStageBytes)
+	for _, bad := range []string{"-1", "lots", "1.5"} {
+		t.Setenv("DWARF_TESTING_STAGE_ROWS", bad)
+		panicked := func() (p bool) {
+			defer func() { p = recover() != nil }()
+			NewEngineUnderTest(t.Name())
+			return false
+		}()
+		assert.True(panicked, "%q did not panic", bad)
+	}
 }

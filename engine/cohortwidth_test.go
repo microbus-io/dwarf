@@ -31,11 +31,11 @@ import (
 
 // TestCohortWidth_Measure times one wide forEach's arrivals: how long the fan-in waits after the last branch's task
 // returned, which is the time the cohort takes to absorb the arrivals still queued. A measurement, not a pin: it
-// runs only when DWARF_COHORT_WIDTH names the width.
+// runs only when DWARF_TESTING_COHORT_WIDTH names the width.
 func TestCohortWidth_Measure(t *testing.T) {
-	width, _ := strconv.Atoi(os.Getenv("DWARF_COHORT_WIDTH"))
+	width, _ := strconv.Atoi(os.Getenv("DWARF_TESTING_COHORT_WIDTH"))
 	if width <= 0 {
-		t.Skip("set DWARF_COHORT_WIDTH to measure")
+		t.Skip("set DWARF_TESTING_COHORT_WIDTH to measure")
 	}
 	assert := testarossa.For(t)
 	ctx := context.Background()

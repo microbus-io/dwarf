@@ -364,7 +364,7 @@ func runVolume(ctx context.Context, engines []*engine.Engine, readers []*sdkmetr
 		if side == volumeArchive {
 			cp.ArchivedHistoryMs, cp.ArchivedStepMs, cp.ListClosedMs, perr = probeArchivedReads(ctx, engines[0], firstKey.Load().(string))
 			if errors.StatusCode(perr) == http.StatusNotFound && prevKey != "" {
-				// The first flow's day was dropped by the retention (a short DWARF_ARCHIVE_DAY reaches it within a
+				// The first flow's day was dropped by the retention (a short DWARF_TESTING_ARCHIVE_DAY reaches it within a
 				// run): the archived probe moves to the flow sampled at the previous checkpoint, archived since.
 				cp.ArchivedProbeMoved = true
 				firstKey.Store(prevKey)

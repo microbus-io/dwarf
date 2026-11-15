@@ -6,7 +6,7 @@
 #   j15-on     two jobs of each fast kind, archiving on: does archiving keep up? out/age-j15-on.log is the oldest closed
 #              root not archived every 10 s; out/j15-on.json the steps/s, p99, dwarf_flows_closed against
 #              dwarf_flows_archived, the lag gauges by job, dwarf_janitor_batch_seconds by job and part, the pool's wait.
-#   j15-off    archiving off (DWARF_ARCHIVE_GRACE=24h): what archiving costs dispatch.
+#   j15-off    archiving off (DWARF_TESTING_ARCHIVE_GRACE=24h): what archiving costs dispatch.
 #   j15-k3-on  three jobs of each fast kind, archiving on - only when two did NOT keep up (user): the oldest unarchived
 #              root past 90 s (the 60 s grace and slack) at any sample from minute 5 of j15-on. $RIG_HOME/j15-decision
 #              (k3 or skip), when present, overrides.
@@ -31,7 +31,7 @@ ages() {
 }
 WIN_MIN=4 one_run j15-warm $SAT
 mon j15-on 14; WIN_MIN=14 one_run j15-on $SAT; ages j15-on
-mon j15-off 14; RUN_ENV="DWARF_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j15-off $SAT
+mon j15-off 14; RUN_ENV="DWARF_TESTING_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j15-off $SAT
 # Two jobs kept up unless the oldest unarchived root passed 90 s from minute 5 of j15-on.
 worst=$(vmssh "$ADMIN" "awk 'NR==1{t0=\$1} \$1-t0>=300 && \$2>m {m=\$2} END {print m+0}' out/age-j15-on.log")
 decision=skip; [[ "$worst" =~ ^[0-9]+$ ]] && (( worst > 90 )) && decision=k3

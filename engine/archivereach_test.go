@@ -364,10 +364,10 @@ func readsWhileTreesMove(t *testing.T, day time.Duration) {
 	t.Cleanup(gates.openAll) // runs first, so a failed test frees the workers
 	e.SetHost(reachMux(gates))
 	e.archiveGrace = 0
-	e.sweepOverdue = 0     // a root a failure left behind is retried by the next sweep
-	e.reapBatchRows = 10   // a batch holds one small tree (8 rows), so the small trees move one at a time
-	e.reapStageRows = 12   // a tree of width 16 (22 rows) is staged, in chunks of the batch
-	e.testArchiveDay = day // 0 is a UTC day
+	e.sweepOverdue = 0         // a root a failure left behind is retried by the next sweep
+	e.reapBatchRows = 10       // a batch holds one small tree (8 rows), so the small trees move one at a time
+	e.reapStageRows = 12       // a tree of width 16 (22 rows) is staged, in chunks of the batch
+	e.archiveDayOverride = day // 0 is a UTC day
 	assert.Must(assert.NoError(e.SetRetention(100)))
 	assert.Must(assert.NoError(e.Startup(ctx)))
 	enginetest.AwaitVisitCount(t, e.diags.Seams(), 1, 10*time.Second, diagnostics.CheckpointArchivePassDone)

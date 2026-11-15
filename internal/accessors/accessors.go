@@ -65,6 +65,22 @@ var FlowsClosed func(eng any) int64
 // short under -race; d <= 0 restores the derived period.
 var SetRefillInterval func(eng any, d time.Duration) error
 
+// SetArchiveDay replaces the length of the archive's day, a whole number of seconds of at least 1s, before Startup:
+// for a benchmark that shows day rollover and retention under load within one run.
+var SetArchiveDay func(eng any, d time.Duration) error
+
+// SetArchiveGrace sets how long a closed root waits in the live tables before it is archived, at least 0, before
+// Startup: for a benchmark that needs every closed flow archived within its window, or held longer.
+var SetArchiveGrace func(eng any, d time.Duration) error
+
+// SetStageRows sets the tree size in rows above which a closed tree is archived in stages (0, never), at least 0,
+// before Startup.
+var SetStageRows func(eng any, n int) error
+
+// SetStageBytes sets the tree payload in bytes above which a closed tree is archived in stages (0, no byte
+// threshold), at least 0, before Startup.
+var SetStageBytes func(eng any, n int) error
+
 // ShardBudget is the connection budget the engine derives for one PostgreSQL shard with no MaxConnections
 // declared, at rttMs of round-trip time against a server whose max_connections is serverMax (0 = unknown) -
 // the pool a lone replica opens. A benchmark computes it ahead of a run to pin exactly the pool that ships,

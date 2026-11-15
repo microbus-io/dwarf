@@ -44,7 +44,7 @@ import (
 
 // How TestProcessKill_DurableBoundaries works. A real process death cannot be staged inside one process - a killed
 // goroutine still runs its defers - so the test runs its own test binary again as a child process (os.Args[0], with
-// -test.run selecting TestProcessKill_Child), telling it through DWARF_KILL_POINT, DWARF_KILL_DSN and DWARF_KILL_LOG
+// -test.run selecting TestProcessKill_Child), telling it through DWARF_TESTING_KILL_POINT, DWARF_TESTING_KILL_DSN and DWARF_TESTING_KILL_LOG
 // where to stop, which database to use and where to log every task run. The child starts an engine, creates the flow,
 // lets its branches settle into their states, holds the victim at the kill point, prints READY with the flow's key,
 // and waits. The parent kills it with SIGKILL, reads the database with its own connection - what the dead process left
@@ -312,7 +312,7 @@ func killChild(t *testing.T, dsn, point, runLog string) (flowKey string) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*enginetest.TimeoutScale())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestProcessKill_Child$", "-test.count=1", "-test.timeout=10m")
-	cmd.Env = append(os.Environ(), "DWARF_KILL_POINT="+point, "DWARF_KILL_DSN="+dsn, "DWARF_KILL_LOG="+runLog)
+	cmd.Env = append(os.Environ(), "DWARF_TESTING_KILL_POINT="+point, "DWARF_TESTING_KILL_DSN="+dsn, "DWARF_TESTING_KILL_LOG="+runLog)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
@@ -343,13 +343,13 @@ func killChild(t *testing.T, dsn, point, runLog string) (flowKey string) {
 // TestProcessKill_Child is the process TestProcessKill_DurableBoundaries kills. It creates the flow, waits for its
 // branches to settle, lets the victim reach the kill point, reports READY with the flow's key, and waits to be killed.
 func TestProcessKill_Child(t *testing.T) {
-	point := os.Getenv("DWARF_KILL_POINT")
+	point := os.Getenv("DWARF_TESTING_KILL_POINT")
 	if point == "" {
 		t.Skip("the process TestProcessKill_DurableBoundaries starts and kills")
 	}
 	ctx := context.Background()
-	k := newKillHost(true, point, os.Getenv("DWARF_KILL_LOG"))
-	e := killEngine(t, os.Getenv("DWARF_KILL_DSN"), k)
+	k := newKillHost(true, point, os.Getenv("DWARF_TESTING_KILL_LOG"))
+	e := killEngine(t, os.Getenv("DWARF_TESTING_KILL_DSN"), k)
 	e.janitorManual = true // the child recovers nothing; its replacement does
 	if err := e.Startup(ctx); err != nil {
 		t.Fatal(err)

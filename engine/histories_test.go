@@ -105,15 +105,15 @@ import (
 // the lowest later seed for each floor situation they miss, chosen from the model alone before anything runs.
 //
 // A failing history prints itself as JSON with the command that replays it, on SQLite or any SEQUEL_TESTING_DSN;
-// DWARF_HISTORY_MINIMIZE then cuts it to the fewest events that still fail.
+// DWARF_TESTING_HISTORY_MINIMIZE then cuts it to the fewest events that still fail.
 //
 // Environment:
 //
-//	DWARF_HISTORY_SEEDS=n     run seeds 1..n instead of the default run (8 with -short), without the floor
-//	DWARF_HISTORY_SEED=s      run seed s alone
-//	DWARF_HISTORY='{...}'     replay one history, as a failure prints it ('@path' reads it from a file; a relative
+//	DWARF_TESTING_HISTORY_SEEDS=n     run seeds 1..n instead of the default run (8 with -short), without the floor
+//	DWARF_TESTING_HISTORY_SEED=s      run seed s alone
+//	DWARF_TESTING_HISTORY='{...}'     replay one history, as a failure prints it ('@path' reads it from a file; a relative
 //	                          path is from the package directory)
-//	DWARF_HISTORY_MINIMIZE=1  with DWARF_HISTORY, reduce the failing history it holds to a minimal one
+//	DWARF_TESTING_HISTORY_MINIMIZE=1  with DWARF_TESTING_HISTORY, reduce the failing history it holds to a minimal one
 
 const (
 	hSleepFor        = time.Hour // a sleep no operation can outlast; the driver ends it when the model wakes the step
@@ -1061,7 +1061,7 @@ func runHistory(t *testing.T, h hHistory, cov *hCoverage) {
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := json.Marshal(h)
-			t.Logf("replay with DWARF_HISTORY='%s'", b)
+			t.Logf("replay with DWARF_TESTING_HISTORY='%s'", b)
 			for i, ev := range h.Events {
 				t.Logf("  %2d %s", i, ev)
 			}
@@ -1164,7 +1164,7 @@ func minimizeHistory(t *testing.T, h hHistory) {
 		}
 	}
 	b, _ := json.Marshal(cur)
-	t.Logf("minimal history, %d of the %d events: DWARF_HISTORY='%s'", len(cur.Events), len(h.Events), b)
+	t.Logf("minimal history, %d of the %d events: DWARF_TESTING_HISTORY='%s'", len(cur.Events), len(h.Events), b)
 }
 
 // replayable reports whether the model accepts every event of h, returning h with a Terminate appended when its flow
@@ -1192,10 +1192,10 @@ const (
 // history does - read off the model alone, which generates a history in microseconds. A floor pattern no seed up to
 // hFloorSearch reaches fails the test: the generator no longer produces it.
 func historySeeds(t *testing.T, shape hShape) (seeds []uint64, floored bool) {
-	if s := os.Getenv("DWARF_HISTORY_SEED"); s != "" {
+	if s := os.Getenv("DWARF_TESTING_HISTORY_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
 		if err != nil {
-			t.Fatalf("DWARF_HISTORY_SEED: %v", err)
+			t.Fatalf("DWARF_TESTING_HISTORY_SEED: %v", err)
 		}
 		return []uint64{seed}, false
 	}
@@ -1203,10 +1203,10 @@ func historySeeds(t *testing.T, shape hShape) (seeds []uint64, floored bool) {
 	if testing.Short() {
 		n, explicit = 8, true
 	}
-	if s := os.Getenv("DWARF_HISTORY_SEEDS"); s != "" {
+	if s := os.Getenv("DWARF_TESTING_HISTORY_SEEDS"); s != "" {
 		var err error
 		if n, err = strconv.Atoi(s); err != nil {
-			t.Fatalf("DWARF_HISTORY_SEEDS: %v", err)
+			t.Fatalf("DWARF_TESTING_HISTORY_SEEDS: %v", err)
 		}
 		explicit = true
 	}
@@ -1297,10 +1297,10 @@ func checkFloor(t *testing.T, shape hShape, cov *hCoverage) {
 	}
 }
 
-// runHistories runs the seeded histories of shape, or the one DWARF_HISTORY holds.
+// runHistories runs the seeded histories of shape, or the one DWARF_TESTING_HISTORY holds.
 func runHistories(t *testing.T, shape hShape) {
 	cov := &hCoverage{counts: map[string]int{}}
-	if raw := os.Getenv("DWARF_HISTORY"); raw != "" {
+	if raw := os.Getenv("DWARF_TESTING_HISTORY"); raw != "" {
 		if path, ok := strings.CutPrefix(raw, "@"); ok {
 			b, err := os.ReadFile(path)
 			if err != nil {
@@ -1310,12 +1310,12 @@ func runHistories(t *testing.T, shape hShape) {
 		}
 		var h hHistory
 		if err := json.Unmarshal([]byte(raw), &h); err != nil {
-			t.Fatalf("DWARF_HISTORY: %v", err)
+			t.Fatalf("DWARF_TESTING_HISTORY: %v", err)
 		}
 		if h.Shape != shape {
-			t.Skipf("DWARF_HISTORY holds a %s history", h.Shape)
+			t.Skipf("DWARF_TESTING_HISTORY holds a %s history", h.Shape)
 		}
-		if os.Getenv("DWARF_HISTORY_MINIMIZE") != "" {
+		if os.Getenv("DWARF_TESTING_HISTORY_MINIMIZE") != "" {
 			minimizeHistory(t, h)
 			return
 		}

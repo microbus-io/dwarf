@@ -26,7 +26,7 @@ and calls `Startup` itself.
   fixtures carry an explicit note at their `defer close(release)`). A `t.Cleanup` release is worse still: it
   runs after ALL defers, including the shutdown.
 - **Logger default: stderr at Error** (the CI alarms: wedge/poll/refill faults; stderr not `t.Log`, since a
-  `go test` timeout panic drops buffered `t.Log` but not stderr). `DWARF_TEST_LOG_LEVEL` overrides the level
+  `go test` timeout panic drops buffered `t.Log` but not stderr). `DWARF_TESTING_LOG_LEVEL` overrides the level
   (`info`/`debug` for the flow-status play-by-play; `silent`/`off` forces discard). The constructor sees only
   a name, so it cannot tell a benchmark from a test: **a benchmark or fuzz target silences the engine** with
   `SetLogger(slog.New(slog.DiscardHandler))` (`fixtures/benchmark_test.go`) - per-iteration logging otherwise
@@ -34,9 +34,11 @@ and calls `Startup` itself.
 - **The janitors run their jobs only when a test drives them** - `accessors.ArchiveNow`, or an engine test's
   `reapDueFlows` - never in the background, so a fixture that holds a closed or stamped tree in the live tables
   (a Delete, then a Fork expecting 409) is not raced by them.
-- **`DWARF_STAGE_ROWS=<n>` runs the suite with staged archival on every tree over `n` rows**: every engine's Startup
-  reads it into `reapStageRows` (`internal/janitor/CLAUDE.md`). `1` stages every tree of more than one row. Unset, the
-  production threshold (256k rows) stands, which no fixture's tree reaches; the engine logs a warning when it is set.
+- **`DWARF_TESTING_STAGE_ROWS=<n>` runs the suite with staged archival on every tree over `n` rows** (and
+  `DWARF_TESTING_STAGE_BYTES` a payload size beside it): `NewEngineUnderTest` reads them into `reapStageRows` and
+  `reapStageBytes` (`internal/janitor/CLAUDE.md`), so a test that sets its own threshold overrides them. `1` stages
+  every tree of more than one row. Unset, the production threshold (256k rows) stands, which no fixture's tree
+  reaches; a value that is not a whole number of at least 0 panics the constructor.
 
 The `testHashedID` switches the open path into test mode: `resolveShardDSN` (`internal/database`)
 resolves the base DSN in three tiers - an explicitly-set DSN wins; else `SEQUEL_TESTING_DSN` (the same variable
@@ -209,10 +211,24 @@ A fixture needing a **non-default topology** (multiple `SetShard`s, `SetTimeBudg
 them on its own engine/mux between `NewEngineUnderTest` and `Startup` - the same per-test ownership, just with
 non-default knobs.
 
-**`DWARF_ARCHIVE_DAY` and `DWARF_ARCHIVE_GRACE` override a test engine too.** They are the rig's way in (the engine
-reads them at every Startup, test mode included, and `TestRetention_*` pins them), so either one left set in a shell
-replaces what a test set in `testArchiveDay` or `archiveGrace`, and the archiving tests fail far from the cause.
-Unset them before running the suite.
+#### The environment variables the tests and the bench read
+
+Every knob a test or the bench reads from the environment is named `DWARF_TESTING_*`, beside sequel's
+`SEQUEL_TESTING_DSN`, and **the engine's production code reads none.** The bench sets the archive overrides on its
+engines through `internal/accessors` (`SetArchiveDay`, `SetArchiveGrace`, `SetStageRows`, `SetStageBytes`), since a
+bench binary's test seams are inert. A new knob takes the prefix and a row here.
+
+| Variable | Read by | What it does |
+|---|---|---|
+| `SEQUEL_TESTING_DSN` | the test-mode open (`internal/database`) | runs the suite against a real server (above) |
+| `DWARF_TESTING_LOG_LEVEL` | `NewEngineUnderTest` | the test engines' log level on stderr: `error` by default, `info`/`debug`, `silent`/`off` |
+| `DWARF_TESTING_STAGE_ROWS`, `DWARF_TESTING_STAGE_BYTES` | `NewEngineUnderTest` | stage every tree over that size (above) |
+| `DWARF_TESTING_HISTORY`, `DWARF_TESTING_HISTORY_SEED`, `DWARF_TESTING_HISTORY_SEEDS`, `DWARF_TESTING_HISTORY_MINIMIZE` | `engine/histories_test.go` | replay one history, run one seed or seeds 1..n, minimize a failing history (the file's opening comment) |
+| `DWARF_TESTING_LONGSOAK`, `DWARF_TESTING_SOAK_SEED` | `engine/chaossoak_test.go` | lengthen the chaos soak's window; replay its seed |
+| `DWARF_TESTING_MEASURE_K` | `engine/roundtrips_test.go` | run the round-trips-per-step measurement (opt-in, slow) |
+| `DWARF_TESTING_COHORT_WIDTH` | `engine/cohortwidth_test.go` | run the wide-cohort measurement at that width |
+| `DWARF_TESTING_KILL_POINT`, `DWARF_TESTING_KILL_DSN`, `DWARF_TESTING_KILL_LOG` | `engine/processkill_test.go` | set by the test for the child process it kills, never by hand |
+| `DWARF_TESTING_ARCHIVE_DAY`, `DWARF_TESTING_ARCHIVE_GRACE`, `DWARF_TESTING_STAGE_ROWS`, `DWARF_TESTING_STAGE_BYTES` | the bench (`archiveOverrides`, `bench/overrides.go`) | the rig's archive day, grace and staging thresholds (`bench/CLAUDE.md`) |
 
 #### What a sleep is standing in for, and what to use instead
 

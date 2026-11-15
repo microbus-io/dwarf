@@ -6,7 +6,7 @@
 #              (against the batch's ~0.25 s aim), the pool's wait; out/age-j13-a-on.log, the oldest closed root not
 #              archived every 10 s; and the base run, out/mon-j13-a-on.log.tables (dwarf_flows n_live_tup and bytes).
 #   j13-b-on   build B ($BIN-turn: a batch takes a turn and no connection, its statements the pool's), archiving on.
-#   j13-a-off  build A, archiving off (DWARF_ARCHIVE_GRACE=24h): what archiving costs dispatch.
+#   j13-a-off  build A, archiving off (DWARF_TESTING_ARCHIVE_GRACE=24h): what archiving costs dispatch.
 #   j13-large  build A, archiving on, plus a few fan-outs of 270,000 branches - past the 256k staging threshold, so
 #              each is copied in stages and its live copy deleted in chunks, right after the grace, under the load:
 #              the large_archiving and sweep_deletion batch times, out/pgss-chunk-j13-large.txt (the chunks' step
@@ -28,7 +28,7 @@ mon j13-a-on 14; WIN_MIN=14 one_run j13-a-on $SAT
 vmssh "$ADMIN" 'ln -sf dwarf-bench-b.bin dwarf-bench' || { log "SWITCH TO B FAILED"; exit 1; }
 mon j13-b-on 14; WIN_MIN=14 one_run j13-b-on $SAT
 vmssh "$ADMIN" 'ln -sf dwarf-bench.bin dwarf-bench' || { log "SWITCH TO A FAILED"; exit 1; }
-mon j13-a-off 14; RUN_ENV="DWARF_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j13-a-off $SAT
+mon j13-a-off 14; RUN_ENV="DWARF_TESTING_ARCHIVE_GRACE=24h" WIN_MIN=14 one_run j13-a-off $SAT
 mon j13-large 14
 vmssh "$ADMIN" "setsid nohup ./pgss-chunk.sh $(( 30 + (2 + 14) * 60 - 60 )) out/pgss-chunk-j13-large.txt '$(dsn "${IPS[0]}" dwarf_j13_large)' > /dev/null 2>&1 < /dev/null &"
 WIN_MIN=14 one_run j13-large $SAT -mix "0.999997:linear:0,0.000003:fanout:0:270000"

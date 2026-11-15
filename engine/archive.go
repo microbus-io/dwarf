@@ -21,8 +21,6 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
-	"os"
-	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
@@ -241,83 +239,62 @@ func archiveFlowVisible(ctx context.Context, db *sequel.DB, t flowTables, flowID
 	return err == nil, errors.Trace(err)
 }
 
-// archiveDayEnv names the environment variable that shortens the archive's day for the benchmark rig, a whole number
-// of seconds as a Go duration. A rig cannot reach a test-only override, since the engine's test seams are inert in a
-// bench binary, and a day of minutes is what shows day rollover and retention under load in one run. Production
-// leaves it unset.
-const archiveDayEnv = "DWARF_ARCHIVE_DAY"
-
-// archiveGraceEnv names the environment variable that sets how long a closed root waits in the live tables before it
-// is archived, for the benchmark rig, as a Go duration of at least 0. A rig cannot reach a test-only override, and a
-// run that measures the archive's cost needs every closed flow archived within the window, or one that measures the
-// live tables needs them held longer. Production leaves it unset: the grace is a minute.
-const archiveGraceEnv = "DWARF_ARCHIVE_GRACE"
-
-// applyArchiveGraceEnv sets this run's archive grace from archiveGraceEnv, when it is set.
-func (e *Engine) applyArchiveGraceEnv(ctx context.Context) error {
-	v := os.Getenv(archiveGraceEnv)
-	if v == "" {
-		return nil
+// setArchiveDay replaces the length of the archive's day, a whole number of seconds of at least 1s: for a benchmark,
+// where a day of minutes shows day rollover and retention under load in one run, and reached through
+// accessors.SetArchiveDay, since the engine's test seams are inert in a bench binary. Construction-time only.
+func (e *Engine) setArchiveDay(d time.Duration) error {
+	if e.started.Load() {
+		return errSetAfterStartup("the archive day")
 	}
-	d, err := time.ParseDuration(v)
-	if err != nil || d < 0 {
-		return errors.New("%s must be a duration of at least 0, not %q", archiveGraceEnv, v, http.StatusBadRequest)
+	if d < time.Second || d%time.Second != 0 {
+		return errors.New("the archive day must be a whole number of seconds, at least 1s, not %s", d, http.StatusBadRequest)
 	}
-	// Loud, because a grace other than the minute changes when every closed flow leaves the live tables.
-	e.diags.Logger().WarnContext(ctx, "The archive's grace is set by "+archiveGraceEnv+"; it is for benchmarks only", "grace", d)
+	e.archiveDayOverride = d
+	return nil
+}
+
+// setArchiveGrace sets how long a closed root waits in the live tables before it is archived, at least 0: for a
+// benchmark that measures the archive's cost, which needs every closed flow archived within its window, or one that
+// measures the live tables, which needs them held longer. Construction-time only; production keeps the minute.
+func (e *Engine) setArchiveGrace(d time.Duration) error {
+	if e.started.Load() {
+		return errSetAfterStartup("the archive grace")
+	}
+	if d < 0 {
+		return errors.New("the archive grace must be at least 0, not %s", d, http.StatusBadRequest)
+	}
 	e.archiveGrace = d
 	return nil
 }
 
-// stageRowsEnv and stageBytesEnv name the environment variables that replace the size above which a closed tree is
-// archived in stages rather than in one transaction, for the benchmark rig and the staging-on test runs: in rows (0,
-// never staged), and in payload bytes, a threshold beside it (0, none), each a whole number of at least 0. A rig cannot
-// reach a test-only override. Production leaves them unset, and the defaults stand.
-const (
-	stageRowsEnv  = "DWARF_STAGE_ROWS"
-	stageBytesEnv = "DWARF_STAGE_BYTES"
-)
+// setStageRows and setStageBytes set the sizes above which a closed tree is archived in stages rather than in one
+// transaction: in rows (0, never staged) and in payload bytes beside it (0, no byte threshold), each at least 0. For a
+// benchmark, and for a test run that stages every tree. Construction-time only; production keeps the defaults.
+func (e *Engine) setStageRows(n int) error {
+	return e.setStageThreshold("the staging rows", &e.reapStageRows, n)
+}
 
-// applyStageEnv sets this run's staging thresholds from stageRowsEnv and stageBytesEnv, each when it is set.
-func (e *Engine) applyStageEnv(ctx context.Context) error {
-	for _, v := range []struct {
-		name, unit string
-		field      *int
-	}{
-		{stageRowsEnv, "rows", &e.reapStageRows},
-		{stageBytesEnv, "bytes", &e.reapStageBytes},
-	} {
-		s := os.Getenv(v.name)
-		if s == "" {
-			continue
-		}
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return errors.New("%s must be a whole number of %s, at least 0, not %q", v.name, v.unit, s, http.StatusBadRequest)
-		}
-		// Loud, because it changes how every large tree leaves the live tables.
-		e.diags.Logger().WarnContext(ctx, "Staged archival is set by "+v.name+"; it is for benchmarks only", v.unit, n)
-		*v.field = n
+func (e *Engine) setStageBytes(n int) error {
+	return e.setStageThreshold("the staging bytes", &e.reapStageBytes, n)
+}
+
+func (e *Engine) setStageThreshold(what string, field *int, n int) error {
+	if e.started.Load() {
+		return errSetAfterStartup(what)
 	}
+	if n < 0 {
+		return errors.New("%s must be at least 0, not %d", what, n, http.StatusBadRequest)
+	}
+	*field = n
 	return nil
 }
 
-// archiveDayLength is the length of this run's day: DefaultDayLength, a test's testArchiveDay, or archiveDayEnv.
-func (e *Engine) archiveDayLength(ctx context.Context) (time.Duration, error) {
-	dayLength := archiver.DefaultDayLength
-	if e.testArchiveDay > 0 {
-		dayLength = e.testArchiveDay
+// archiveDayLength is the length of this run's day: DefaultDayLength, or the one setArchiveDay or a test set.
+func (e *Engine) archiveDayLength() time.Duration {
+	if e.archiveDayOverride > 0 {
+		return e.archiveDayOverride
 	}
-	if v := os.Getenv(archiveDayEnv); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil || d < time.Second || d%time.Second != 0 {
-			return 0, errors.New("%s must be a whole number of seconds, at least 1s, not %q", archiveDayEnv, v, http.StatusBadRequest)
-		}
-		// Loud, because a short day under the default retention drops a day's records within hours.
-		e.diags.Logger().WarnContext(ctx, "The archive's day is shortened by "+archiveDayEnv+"; it is for benchmarks only", "day", d)
-		dayLength = d
-	}
-	return dayLength, nil
+	return archiver.DefaultDayLength
 }
 
 // startArchives makes sure each shard has the tables of today and of the days ahead of it before the replica serves,

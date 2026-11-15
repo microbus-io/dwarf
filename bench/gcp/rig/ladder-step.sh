@@ -22,7 +22,7 @@ vmssh "$ADMIN" "WARMUP=1m WINDOW=${win}m setsid nohup ./g-run.sh $tag $start '$(
 # The ladder starts once the bench is past its warmup and into its window.
 while (( $(date +%s) < start + 90 )); do sleep 10; done
 log "ladder: start"
-vmssh "$ADMIN" "SEQUEL_TESTING_DSN='postgres://postgres:${pass}@${IPS[0]}:5432/dwarftest_%d?sslmode=disable' DWARF_MEASURE_LADDER=1 DWARF_LADDER_OUT=out/ladder.csv setsid nohup sh -c './reaper-ladder.test -test.run TestMeasure_Ladder -test.v -test.timeout 40m > out/ladder.log 2>&1; echo exit \$? > out/ladder.done' > /dev/null 2>&1 < /dev/null &"
+vmssh "$ADMIN" "SEQUEL_TESTING_DSN='postgres://postgres:${pass}@${IPS[0]}:5432/dwarftest_%d?sslmode=disable' DWARF_TESTING_MEASURE_LADDER=1 DWARF_TESTING_LADDER_OUT=out/ladder.csv setsid nohup sh -c './reaper-ladder.test -test.run TestMeasure_Ladder -test.v -test.timeout 40m > out/ladder.log 2>&1; echo exit \$? > out/ladder.done' > /dev/null 2>&1 < /dev/null &"
 until vmssh "$ADMIN" "test -f out/ladder.done"; do authok; late; sleep 30; done
 log "ladder done: $(vmssh "$ADMIN" "cat out/ladder.done; wc -l < out/ladder.csv; grep -cE 'FAIL|panic' out/ladder.log" | tr '\n' ' ')"
 until vmssh "$ADMIN" "test -f out/$tag.done"; do late; sleep 20; done

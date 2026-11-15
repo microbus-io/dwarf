@@ -22,6 +22,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/accessors"
@@ -56,15 +57,19 @@ import (
 //
 // Logging default: stderr at Error, so a CI failure surfaces the engine's error-level alarms without the
 // Info-level play-by-play noise (stderr, not t.Log, because a `go test` timeout
-// panic drops buffered t.Log output but not stderr). DWARF_TEST_LOG_LEVEL overrides the level (e.g. "info"
+// panic drops buffered t.Log output but not stderr). DWARF_TESTING_LOG_LEVEL overrides the level (e.g. "info"
 // or "debug" for the flow-status play-by-play; "silent" or "off" for the discard logger). A benchmark or
 // fuzz target silences the engine itself with SetLogger, since per-iteration logging would dominate the
 // measurement / flood the fuzz output; SetLogger before Startup takes over entirely either way.
+//
+// DWARF_TESTING_STAGE_ROWS and DWARF_TESTING_STAGE_BYTES, whole numbers of at least 0, replace the sizes above which
+// a closed tree is archived in stages, to run a suite with staging on (1 stages every tree of more than one row). A
+// value that is not one panics: the run is misconfigured. A test that sets the thresholds itself overrides them.
 func NewEngineUnderTest(testName string) *Engine {
 	e := NewEngine()
 	level := slog.LevelError
 	silent := false
-	if s := os.Getenv("DWARF_TEST_LOG_LEVEL"); s != "" {
+	if s := os.Getenv("DWARF_TESTING_LOG_LEVEL"); s != "" {
 		switch s {
 		case "silent", "off":
 			silent = true
@@ -90,6 +95,20 @@ func NewEngineUnderTest(testName string) *Engine {
 	// second from Startup, they would race every test that holds a due tree in the live tables for a moment - a Delete
 	// then a Fork expecting 409, a root backdated past the grace. A test of the background running sets it false.
 	e.janitorManual = true
+	for _, v := range []struct {
+		name string
+		set  func(int) error
+	}{{"DWARF_TESTING_STAGE_ROWS", e.setStageRows}, {"DWARF_TESTING_STAGE_BYTES", e.setStageBytes}} {
+		if s := os.Getenv(v.name); s != "" {
+			n, err := strconv.Atoi(s)
+			if err == nil {
+				err = v.set(n)
+			}
+			if err != nil {
+				panic(v.name + " must be a whole number of at least 0, not " + strconv.Quote(s))
+			}
+		}
+	}
 	return e
 }
 
@@ -97,6 +116,10 @@ func init() {
 	accessors.DB = func(eng any) *database.ShardSet { return &eng.(*Engine).db }
 	accessors.Seams = func(eng any) *seamster.Seamster { return eng.(*Engine).diags.Seams() }
 	accessors.SetRefillInterval = func(eng any, d time.Duration) error { return eng.(*Engine).setRefillInterval(d) }
+	accessors.SetArchiveDay = func(eng any, d time.Duration) error { return eng.(*Engine).setArchiveDay(d) }
+	accessors.SetArchiveGrace = func(eng any, d time.Duration) error { return eng.(*Engine).setArchiveGrace(d) }
+	accessors.SetStageRows = func(eng any, n int) error { return eng.(*Engine).setStageRows(n) }
+	accessors.SetStageBytes = func(eng any, n int) error { return eng.(*Engine).setStageBytes(n) }
 	accessors.ListLive = func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
 		e := eng.(*Engine)
 		if err := e.ensureStarted(); err != nil {
