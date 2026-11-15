@@ -48,19 +48,33 @@ and give the statements an existing database needs by hand in the release notes,
   opening, under the new code, a database the previous tag made and filled - running, interrupted and archived
   flows - and driving those flows on, on every supported dialect, since each runs its own statements: every
   fixture makes a fresh database, so the suites cannot see this.
-- **A new file can run again from its first statement.** `sequel` runs each statement on its own, outside any
-  transaction, and marks the file complete only after the last: a statement that fails leaves the earlier ones
-  applied, and the next open runs the file again from the top. Guard each statement (`IF NOT EXISTS`; a
-  `sys.indexes` or `COL_LENGTH` check on SQL Server), and where a dialect has no guard (MySQL 8 has no
-  `IF NOT EXISTS` for `ADD COLUMN` or `CREATE INDEX`), make it that dialect's only statement in the file. A runner
-  that dies between that statement and the mark leaves it applied and the file unmarked, and every later open
-  fails on it (`already exists`). The repair is by hand: confirm every statement of the file applied, then mark
-  the number complete with `UPDATE sequel_migrations SET completed=TRUE WHERE
-  seq_name='github.com/microbus-io/dwarf' AND seq_num=<N>` (`completed=1` on SQL Server and SQLite). A file that
-  failed partway is repaired the same way, its remaining statements run by hand first, or by undoing what applied
-  and letting the next open run it whole. The shipped `live/` files are not guarded: they have only run on fresh
-  databases, where a failed first open is dropped and made again. The `archive/` files are (below), so a day's
-  sequence (`github.com/microbus-io/dwarf/archive/<day>`) needs no repair: the next run completes it.
+- **A new file applies whole, or can run again from its first statement - which one depends on the dialect and on
+  how many of its statements that dialect runs** (`sequel` counts them after `-- DRIVER:` filtering):
+  - **Two or more, on PostgreSQL, SQL Server and SQLite:** one transaction, with the completion mark inside it. A
+    failure leaves nothing applied and nothing marked, and the next open runs the file whole, so its statements need
+    no guard. Such a file cannot hold a statement that refuses a transaction (`CREATE INDEX CONCURRENTLY`, `VACUUM`,
+    `ALTER DATABASE`, `PRAGMA journal_mode`), nor begin or commit one itself. It holds every lock its statements take
+    until it commits - on SQLite the whole database's write lock - so a long backfill or index build on a populated
+    table goes in a file of its own.
+  - **One, or any number on MySQL and MariaDB:** each statement runs on its own, outside any transaction, and the
+    file is marked complete after the last: a statement that fails leaves the ones before it applied, and the next
+    open runs the file again from the top. Guard each statement (`IF NOT EXISTS`; a `sys.indexes` or `COL_LENGTH`
+    check on SQL Server), and where a dialect has no guard (MySQL 8 has no `IF NOT EXISTS` for `ADD COLUMN` or
+    `CREATE INDEX`), make it that dialect's only statement in the file. A runner that dies between a statement and
+    the mark leaves it applied and the file unmarked, and every later open fails on it (`already exists`). The
+    repair is by hand: confirm every statement of the file applied, then mark the number complete with
+    `UPDATE sequel_migrations SET completed=TRUE WHERE seq_name='github.com/microbus-io/dwarf' AND seq_num=<N>`
+    (`completed=1` on SQL Server and SQLite). A MySQL or MariaDB file that failed partway is repaired the same way,
+    its remaining statements run by hand first, or by undoing what applied and letting the next open run it whole.
+  - **A `CREATE INDEX CONCURRENTLY`, alone in its file, is written unguarded.** A build that fails or is cancelled
+    leaves an invalid index of its name, which `IF NOT EXISTS` would then skip for good: never used by the planner,
+    and maintained on every write. Unguarded, the next open fails on `already exists` until the index is dropped by
+    hand (`DROP INDEX CONCURRENTLY`). The re-run-safe pair, a drop then a create, is two statements, which this
+    dialect runs in a transaction that both refuse.
+
+  The shipped `live/` files are not guarded: they have only run on fresh databases, where a failed first open is
+  dropped and made again. The `archive/` files are (below), so a day's sequence
+  (`github.com/microbus-io/dwarf/archive/<day>`) needs no repair: the next run completes it.
 
 ## Schema Column Catalog
 
@@ -288,7 +302,7 @@ ever exists under those names. So:
   schema.
 - **Every statement is idempotent** (`IF NOT EXISTS`; `IF OBJECT_ID(...) IS NULL` / `sys.indexes` guards on SQL
   Server), because a day is made at runtime by any replica, and a runner that dies mid-migration leaves it to a peer
-  that runs it again.
+  that runs it again - over whatever it applied, on MySQL and MariaDB and for a one-statement file anywhere.
 - **`archive/` is its own sequence, numbered from 1, under the same rules as `live/`**: numbers only append, a
   shipped file is immutable from v1.0 on, a change is the next number. A file there names only the stand-ins, never
   a live table: the whole file runs once per day, so a live table in it would be changed once per day. The engine's

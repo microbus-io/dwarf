@@ -60,8 +60,8 @@ github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+
 github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
 github.com/microbus-io/seamster v0.4.1 h1:ISimdKG2YM+ARfndzf8AOqaYHLyt+IJPm8755clvSTY=
 github.com/microbus-io/seamster v0.4.1/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
-github.com/microbus-io/sequel v1.19.0 h1:0qZBaUc1gqyqd4/jWyoDIasyIDUmkQVAgsYeSZNiyx4=
-github.com/microbus-io/sequel v1.19.0/go.mod h1:t+6e/7Fl6OOyn8BgSiReMBTfwwCRY27vXrHu4THIUQk=
+github.com/microbus-io/sequel v1.20.0 h1:IE0bZKGkz0NOHxJt+LibHvtxEccAz5Oepyuc+0stflE=
+github.com/microbus-io/sequel v1.20.0/go.mod h1:t+6e/7Fl6OOyn8BgSiReMBTfwwCRY27vXrHu4THIUQk=
 github.com/microbus-io/testarossa v0.7.4 h1:q0gM+4mIY3EGDRe3TFcm1+Z0D3QQGmidpE6wqK7J78s=
 github.com/microbus-io/testarossa v0.7.4/go.mod h1:Sbv4Fon51vYNIpWMPn3fbjMLFQMeMR4B9mh+Y+xxhZo=
 github.com/microsoft/go-mssqldb v1.11.2 h1:FCgeBIK8um2+X4tbun6Q71N1KsfyCDPKY41e1yGVjSE=
