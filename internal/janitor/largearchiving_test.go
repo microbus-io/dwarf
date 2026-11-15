@@ -789,13 +789,14 @@ func TestStage_ConcurrentCopiers(t *testing.T) {
 	wantFlows, wantSteps := treeRows(t, r, "dwarf_flows", "dwarf_steps", root)
 	r.startAttempts(ctx)
 	copiers := []func(context.Context) bool{r.copier(), r.copier()}
+	// A hang ceiling, not a count of rounds: where a held root is skipped (PostgreSQL, MySQL, MariaDB) a copier's round
+	// while the other copies is a skip, and the skips per chunk grow with the server's load. Measured on MariaDB for
+	// this tree's ~31 chunks: ~93 rounds of the two copiers alone, up to 309 beside other suites.
+	deadline := time.Now().Add(time.Minute * timeoutScale)
 	var wg sync.WaitGroup
 	for _, copier := range copiers {
 		wg.Go(func() {
-			for range 200 {
-				if visibleInDay(t, r, today, root) > 0 {
-					return
-				}
+			for visibleInDay(t, r, today, root) == 0 && time.Now().Before(deadline) {
 				copier(ctx)
 			}
 		})

@@ -727,20 +727,12 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.dispatchFlag(2).Store(false)
-	for range 50 {
-		shard, err := e.pickShard(context.Background())
-		assert.NoError(err)
-		assert.Equal(1, shard, "only the dispatched shard takes new flows")
-	}
+	counts := steadyPlacements(t, e, 50)
+	assert.Equal(50, counts[1], "only the dispatched shard takes new flows (got %v)", counts)
 
 	e.dispatchFlag(1).Store(false)
-	seen := map[int]bool{}
-	for range 200 {
-		shard, err := e.pickShard(context.Background())
-		assert.NoError(err)
-		seen[shard] = true
-	}
-	assert.True(seen[1] && seen[2], "a replica dispatching nothing places across every shard")
+	counts = steadyPlacements(t, e, 200)
+	assert.True(counts[1] > 0 && counts[2] > 0, "a replica dispatching nothing places across every shard (got %v)", counts)
 }
 
 // TestDispatchers_FleetLimitWarnsOnTheEdge pins the advisory check: it flips when the fleet's connections
@@ -1250,12 +1242,7 @@ func TestDispatchers_WeightsOverrideTheOwnShardPreference(t *testing.T) {
 			e.Shutdown(t.Context())
 			continue
 		}
-		counts := map[int]int{}
-		for range 4000 {
-			idx, err := e.pickShard(context.Background())
-			assert.NoError(err)
-			counts[idx]++
-		}
+		counts := steadyPlacements(t, e, 4000)
 		if c.wantOnly {
 			assert.Equal(4000, counts[1], "%s: equal weights keep placement on the replica's own shard", c.name)
 		} else {

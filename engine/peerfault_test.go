@@ -188,6 +188,34 @@ func placements(t *testing.T, e *Engine, n int) map[int]int {
 	return counts
 }
 
+// steadyPlacements counts where n picks of pickShard land, in a sample begun and ended with no shard reading blind.
+// A slow registry read on a loaded server leaves a shard blind for a moment, and placement then rightly leaves it
+// out, so a sample a blind spell touched says nothing about any other rule of placement and is taken again.
+func steadyPlacements(t *testing.T, e *Engine, n int) map[int]int {
+	t.Helper()
+	anyBlind := func() bool {
+		for _, shard := range e.db.Indices() {
+			if e.blindOn(shard) {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
+	for {
+		if !anyBlind() {
+			counts := placements(t, e, n)
+			if !anyBlind() {
+				return counts
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a shard kept reading blind")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestPeerFault_PlacementLeavesOutABlindShard pins that a new flow is not placed on a shard this replica cannot read:
 // left out while its Sonar is blind, each placement counted against it, placed again once a reading lands, and placed
 // as if none were blind when every shard is, rather than failing, with nothing counted.
