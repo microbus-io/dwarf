@@ -42,6 +42,15 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// How TestProcessKill_DurableBoundaries works. A real process death cannot be staged inside one process - a killed
+// goroutine still runs its defers - so the test runs its own test binary again as a child process (os.Args[0], with
+// -test.run selecting TestProcessKill_Child), telling it through DWARF_KILL_POINT, DWARF_KILL_DSN and DWARF_KILL_LOG
+// where to stop, which database to use and where to log every task run. The child starts an engine, creates the flow,
+// lets its branches settle into their states, holds the victim at the kill point, prints READY with the flow's key,
+// and waits. The parent kills it with SIGKILL, reads the database with its own connection - what the dead process left
+// is checked, and its closed outcomes recorded, before anything recovers - then starts a replacement engine on the
+// same database and requires it to finish the flow with no repair but the engine's own.
+
 // The points TestProcessKill_DurableBoundaries kills its child process at.
 const (
 	killExecuting        = "executing"         // the victim's task is running: its claim is all that is durable

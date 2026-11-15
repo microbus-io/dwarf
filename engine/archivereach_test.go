@@ -41,6 +41,16 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// How TestArchiveReach works. Each tree is a root that seeds a large carried document, fans out over a list into a
+// fan-in, and calls a one-task subgraph child (reachMux); the child's outcome decides how the tree closes -
+// completed, failed, terminated or cancelled - and a child can wait at a named gate (reachGates), so the test decides
+// when that tree closes. Every tree is closed and read once before anything moves, by every read on every key it
+// has, and the answers are kept (reachTree.want). Readers then loop over every tree and every read while the test
+// drains the janitor in waves (reapDueFlows), with faults armed at the moves' steps and two trees still closing; each
+// read must answer what it answered before the move, compared by value. Three trees are deleted at different moments,
+// and only theirs may go unfound, and once unfound never answer again. The janitor runs only when driven in test
+// mode, so the waves are the test's own.
+
 // reachGates holds the gates a tree's child waits on: a child whose gate is named reports the name on started, then
 // waits for the gate to open.
 type reachGates struct {

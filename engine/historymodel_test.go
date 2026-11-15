@@ -25,10 +25,14 @@ import (
 	"github.com/microbus-io/dwarf/workflow"
 )
 
-// The reference model for generated operation histories. It is a second, deliberately small statement of what the
-// engine does to one tree of flows - which executions run, what each contributes, where an operation lands and what
-// it leaves - written as rules over the shapes it knows, not as a second engine. histories_test.go drives the
-// engine through a history one event at a time and compares it with the model after every event.
+// The reference model for generated operation histories, and the generator that draws them. What a history is and
+// how one is run against the engine is explained at the top of histories_test.go.
+//
+// The model is a second, deliberately small statement of what the engine does to one tree of flows - which
+// executions run, what each is handed and contributes, where an operation lands and what it leaves - written as
+// rules over the shapes it knows, not as a second engine. Applying an event to it (hModel.apply) moves it to where
+// the engine must stand once the event's work is done; it is a few lists and counters per flow and step (mFlow,
+// mStep), never a database.
 //
 // What a step carries is two lists of tokens, its state and its changes, each execution adding one token to the
 // trail field (an append reducer). The rules the model holds the engine to:
@@ -65,9 +69,19 @@ import (
 //   - Interrupted steps are addressed in the order they interrupted. Resume re-pends the first with the resume
 //     data, which its next execution receives; a flow runs again once none of its steps is interrupted. Resume of a
 //     tree that is not interrupted is refused. Cancel and Terminate of a closed tree change nothing.
-//   - Two executions admitted together are ordered by the model in the history's order. The generator admits
+//   - Lease recovery re-pends a running step whose lease lapsed, and the engine claims it again: a second execution,
+//     or a preemption if the step is marked. Every write the first execution makes after that claim is fenced. The
+//     orphan repair rewinds a completed step whose transition never committed and replays the transition without
+//     running the task; the held worker's own transition is fenced, so the step advances once, as without it.
+//   - A lost reply to a commit changes nothing the model holds: the outcome, and each task run as often, as without
+//     it. A Resume or Terminate whose reply was lost has landed; its caller is told the connection was lost.
+//   - An operation held midway around an execution: Cancel's watermark is set before it and its mark applied after
+//     it, so a successor the execution inserts is marked by the watermark alone; Terminate's scan runs before it and
+//     its transaction after, and still closes a child the execution spawned in between.
+//   - Two executions admitted together are ordered by the model in the history's order. Racing, the generator admits
 //     together only combinations that lead to the same place in either order: two interrupts do not (the first to
-//     commit is the one Resume addresses first), nor a sleep (the fan-in takes the last arrival's).
+//     commit is the one Resume addresses first), nor a sleep (the fan-in takes the last arrival's). Two interrupts
+//     held before their transactions are released in the history's order, and recorded in it.
 
 // hShape names a graph the model knows.
 type hShape string
@@ -118,6 +132,8 @@ const (
 	hMidTask          hPoint = "midTask"          // while the task runs, before it returns
 	hBeforeTransition hPoint = "beforeTransition" // after the completion write, before the transition
 	hBeforeRewind     hPoint = "beforeRewind"     // after the task asked for a retry, before the rewind
+	hBeforeInterrupt  hPoint = "beforeInterrupt"  // after the task asked to interrupt, before the interrupt's transaction
+	hAcross           hPoint = "across"           // the operation is held midway, and the whole execution runs inside it
 )
 
 // hOp is an operation a history applies, always to the root.
@@ -127,6 +143,10 @@ const (
 	hCancel    hOp = "cancel"
 	hTerminate hOp = "terminate"
 	hResume    hOp = "resume"
+
+	// Recovery, landing on a held execution rather than called on the root:
+	hLeaseExpiry  hOp = "leaseExpiry"  // at midTask: the execution's lease lapses and lease recovery runs
+	hOrphanRepair hOp = "orphanRepair" // at beforeTransition: the lease lapses and the orphan repair runs
 )
 
 // hEvent is one event of a history:
@@ -142,11 +162,12 @@ type hEvent struct {
 	WithBehavior hBehavior `json:"withBehavior,omitempty"`
 	At           hPoint    `json:"at,omitempty"`
 	Op           hOp       `json:"op,omitempty"`
+	Lost         bool      `json:"lost,omitempty"` // the reply to the event's commit is lost: the execution's transaction, or the operation's
 }
 
 func (ev hEvent) String() string {
 	if ev.Task == "" {
-		return string(ev.Op)
+		return string(ev.Op) + map[bool]string{true: " (reply lost)"}[ev.Lost]
 	}
 	s := ev.Task + ":" + string(ev.Behavior)
 	if ev.With != "" {
@@ -154,6 +175,9 @@ func (ev hEvent) String() string {
 	}
 	if ev.Op != "" {
 		s += " +" + string(ev.Op) + "@" + string(ev.At)
+	}
+	if ev.Lost {
+		s += " (reply lost)"
 	}
 	return s
 }
@@ -231,8 +255,11 @@ type hModel struct {
 	reaped     int      // children deleted by their caller's retry
 	ops        int      // Cancel and Terminate events applied
 	interrupts []*mStep // interrupted steps, in the order they are addressed
+	recoveries int      // lease expiries and orphan repairs applied
 	preempted  []*mStep // the steps the last event preempted, which the engine does in a dispatch of their own
 	routes     []string // how each step the last event routed to its handler got there, for coverage
+	midDoor    []*mStep // for an event across an operation: the steps at the door once the execution ran, before the operation's second half
+	midPreempt []*mStep // and the steps the execution itself preempted, before the operation's second half
 }
 
 func newHModel(shape hShape) *hModel {
@@ -376,10 +403,13 @@ func (m *hModel) token(s *mStep) string {
 // apply advances the model by one event and reports whether the operation it applies is expected to be refused.
 // It returns an error for an event the model's state does not allow, as a hand-edited history can hold.
 func (m *hModel) apply(ev hEvent) (refused bool, err error) {
-	m.preempted, m.routes = nil, nil
+	m.preempted, m.routes, m.midDoor, m.midPreempt = nil, nil, nil, nil
 	if ev.Task == "" {
 		if m.closed() && ev.Op == "" {
 			return false, fmt.Errorf("an empty event")
+		}
+		if ev.Lost && !m.opCommits(ev.Op) {
+			return false, fmt.Errorf("event %s: the operation commits nothing to lose the reply of", ev)
 		}
 		refused = m.op(ev.Op)
 		m.wake()
@@ -396,8 +426,34 @@ func (m *hModel) apply(ev hEvent) (refused bool, err error) {
 	if ev.Op != "" && !reaches(s, ev.Behavior, ev.At) {
 		return false, fmt.Errorf("event %s: %s does not reach %s", ev, ev.Behavior, ev.At)
 	}
+	if ev.Lost && (ev.Op != "" || lostCommit(s, ev.Behavior) == "") {
+		return false, fmt.Errorf("event %s: no transaction of it has a reply to lose", ev)
+	}
+	if ev.At == hAcross {
+		m.ops++
+		if ev.Op == hCancel {
+			m.cancelWatermark()
+		}
+		m.run(s, ev.Behavior)
+		m.midDoor, m.midPreempt = m.atDoor(), slices.Clone(m.preempted)
+		if ev.Op == hCancel {
+			m.cancelMark()
+		} else {
+			m.ops--
+			m.op(ev.Op)
+		}
+		return false, nil
+	}
 	tok := m.start(s)
-	if ev.At == hMidTask {
+	switch {
+	case ev.Op == hLeaseExpiry:
+		// The held execution's writes are all fenced. Lease recovery re-pends the step, and the engine claims it
+		// again at once: a second execution, unless the step is marked and so preempted at that claim.
+		m.recoveries++
+		s.status = workflow.StatusPending
+		m.preempt(s)
+		return false, nil
+	case ev.At == hMidTask || ev.At == hBeforeInterrupt:
 		refused = m.op(ev.Op)
 	}
 	rewindOp := hOp("")
@@ -419,6 +475,54 @@ func (m *hModel) apply(ev hEvent) (refused bool, err error) {
 	return refused, nil
 }
 
+// run is one execution of s with behavior b and no operation landing in it.
+func (m *hModel) run(s *mStep, b hBehavior) {
+	tok := m.start(s)
+	if completed, _ := m.finish(s, b, tok, ""); completed {
+		m.transition(s)
+	}
+}
+
+// lostCommit names the transaction an execution of s with behavior b commits last, whose reply a history can
+// lose: advance (a transition, a branch's arrival, a route to a handler), completeFlow, failStep or spawn. A retry
+// and an interrupt have no lost-reply fault, and name none.
+func lostCommit(s *mStep, b hBehavior) string {
+	handler := s.flow.g.onError[s.task] != ""
+	switch b {
+	case hSpawn:
+		return "spawn"
+	case hFail:
+		if handler {
+			return "advance"
+		}
+		return "failStep"
+	case hOK, hSleep:
+		switch {
+		case s.cancelling && !handler:
+			return "failStep"
+		case s.cancelling, s.branch, s.flow.g.branches[s.task] != nil:
+			return "advance"
+		}
+		if _, ok := s.flow.g.next[s.task]; ok {
+			return "advance"
+		}
+		return "completeFlow"
+	}
+	return ""
+}
+
+// opCommits reports whether op on the tree as it stands commits anything, whose reply a history can lose: a Resume
+// of an interrupted tree and a Terminate of an open one. Cancel has no lost-reply fault.
+func (m *hModel) opCommits(op hOp) bool {
+	switch op {
+	case hResume:
+		return m.root.status == workflow.StatusInterrupted
+	case hTerminate:
+		return !m.closed()
+	}
+	return false
+}
+
 // applyTogether admits two executions at once.
 func (m *hModel) applyTogether(ev hEvent) (refused bool, err error) {
 	a, err := m.runnableTask(ev.Task, ev.Behavior)
@@ -429,10 +533,20 @@ func (m *hModel) applyTogether(ev hEvent) (refused bool, err error) {
 	if err != nil || a == b {
 		return false, fmt.Errorf("event %s: %w", ev, err)
 	}
-	if !togetherFits(ev.Behavior, ev.WithBehavior, ev.Op) || ev.Op != "" && (!reaches(a, ev.Behavior, ev.At) || !reaches(b, ev.WithBehavior, ev.At)) {
+	if !togetherFits(ev.Behavior, ev.WithBehavior, ev.Op, ev.At) || ev.At != "" && (!reaches(a, ev.Behavior, ev.At) || !reaches(b, ev.WithBehavior, ev.At)) {
 		return false, fmt.Errorf("event %s: not order-independent", ev)
 	}
 	ta, tb := m.start(a), m.start(b)
+	if ev.At == hBeforeInterrupt {
+		// Both are held before their interrupt's transaction, then released in the event's order, so the one
+		// released first is the one recorded first.
+		if ev.Op != "" {
+			refused = m.op(ev.Op)
+		}
+		m.finish(a, ev.Behavior, ta, "")
+		m.finish(b, ev.WithBehavior, tb, "")
+		return refused, nil
+	}
 	if ev.Op == "" {
 		if done, _ := m.finish(a, ev.Behavior, ta, ""); done {
 			m.transition(a)
@@ -457,13 +571,18 @@ func (m *hModel) applyTogether(ev hEvent) (refused bool, err error) {
 }
 
 // togetherFits reports whether two executions with behaviors a and b, admitted together, lead to one place in
-// either order: no sleep, not two interrupts, and an operation only on two completions held before their
-// transitions.
-func togetherFits(a, b hBehavior, op hOp) bool {
-	if op != "" {
+// either order, or are held where the event's order decides: racing, no sleep and not two interrupts; held before
+// their transitions, two completions; held before their interrupts' transactions, two interrupts.
+func togetherFits(a, b hBehavior, op hOp, at hPoint) bool {
+	switch at {
+	case hBeforeTransition:
 		return a == hOK && b == hOK
+	case hBeforeInterrupt:
+		return a == hInterrupt && b == hInterrupt
+	case "":
+		return op == "" && a != hSleep && b != hSleep && !(a == hInterrupt && b == hInterrupt)
 	}
-	return a != hSleep && b != hSleep && !(a == hInterrupt && b == hInterrupt)
+	return false
 }
 
 // runnableTask is task's step if a run event can execute it with behavior.
@@ -647,14 +766,18 @@ func reaches(s *mStep, b hBehavior, p hPoint) bool {
 		return (b == hOK || b == hSleep) && (!s.cancelling || handler) || b == hFail && handler
 	case hBeforeRewind:
 		return b == hRetry
+	case hBeforeInterrupt:
+		return b == hInterrupt
+	case hAcross:
+		return true
 	}
 	return false
 }
 
 // preempt cancels a marked step at its claim, without running it.
 func (m *hModel) preempt(s *mStep) {
-	if s.status != workflow.StatusPending || !s.cancelling || s.claimed || s.flow.closed() {
-		return
+	if s.status != workflow.StatusPending || !s.cancelling || s.claimed || s.subgraphDone || s.flow.closed() {
+		return // a caller resuming after its child runs once more, marked or not
 	}
 	s.sleeping = false
 	m.preempted = append(m.preempted, s)
@@ -676,28 +799,12 @@ func (m *hModel) op(op hOp) (refused bool) {
 		if m.closed() {
 			return false
 		}
-		first := m.root.watermark < 0
-		for _, f := range m.flows {
-			if f.closed() {
-				continue
-			}
-			if first {
-				f.watermark = m.inserted - 1
-			}
-			for _, s := range f.steps {
-				if s.idx > f.watermark {
-					continue
-				}
-				switch s.status {
-				case workflow.StatusPending, workflow.StatusRunning, workflow.StatusInterrupted:
-					s.claimed = s.claimed || s.status == workflow.StatusPending && !s.sleeping
-					s.cancelling = true
-				}
-			}
-		}
-		for _, s := range slices.Clone(m.steps) {
-			m.preempt(s) // a sleeping step is preempted when it wakes and is claimed
-		}
+		m.cancelWatermark()
+		m.cancelMark()
+		return false
+	case hOrphanRepair:
+		// The repair replays the held step's transition, and the held worker's own is fenced: once, as without it.
+		m.recoveries++
 		return false
 	case hTerminate:
 		m.ops++
@@ -746,12 +853,113 @@ func (m *hModel) url(f *mFlow) string {
 	return "history/" + string(m.shape)
 }
 
+// cancelWatermark is Cancel's first half: each open flow's watermark at the newest step. A tree is cancelled once,
+// so a repeat sets none.
+func (m *hModel) cancelWatermark() {
+	if m.root.watermark >= 0 || m.closed() {
+		return
+	}
+	for _, f := range m.flows {
+		if !f.closed() {
+			f.watermark = m.inserted - 1
+		}
+	}
+}
+
+// cancelMark is Cancel's second half: it marks every pending, running and interrupted step at or under its flow's
+// watermark. A pending step that is awake has been claimed and runs on, covered; one asleep is preempted when it
+// wakes.
+func (m *hModel) cancelMark() {
+	for _, f := range m.flows {
+		if f.closed() {
+			continue
+		}
+		for _, s := range f.steps {
+			if s.idx > f.watermark {
+				continue
+			}
+			switch s.status {
+			case workflow.StatusPending, workflow.StatusRunning, workflow.StatusInterrupted:
+				s.claimed = s.claimed || s.status == workflow.StatusPending && !s.sleeping
+				s.cancelling = true
+			}
+		}
+	}
+	for _, s := range slices.Clone(m.steps) {
+		m.preempt(s)
+	}
+}
+
 // snapshotStep is the step an interrupted root's Snapshot reports: the first interrupted step, or, for one in a
 // child, the root's step on its chain.
 func (m *hModel) snapshotStep() *mStep {
 	s := m.interrupts[0]
 	for s.flow.caller != nil {
 		s = s.flow.caller
+	}
+	return s
+}
+
+// --- Situations ---
+
+// situation names ev as it lands on the model's state now, before it is applied: what the histories' coverage
+// counts, and the floor is written against.
+func (m *hModel) situation(ev hEvent) string {
+	switch {
+	case ev.Task == "":
+		return fmt.Sprintf("op %s%s on %s", ev.Op, map[bool]string{true: " (reply lost)"}[ev.Lost], m.restingAs())
+	case ev.With != "":
+		if ev.At == "" {
+			pair := []string{string(ev.Behavior), string(ev.WithBehavior)}
+			slices.Sort(pair)
+			return fmt.Sprintf("together %s & %s", pair[0], pair[1])
+		}
+		return fmt.Sprintf("together %s & %s, held @%s%s", ev.Behavior, ev.WithBehavior, ev.At, map[bool]string{true: " +" + string(ev.Op)}[ev.Op != ""])
+	}
+	s := m.step(ev.Task)
+	if s == nil {
+		return "run " + string(ev.Behavior)
+	}
+	label := string(ev.Behavior)
+	switch {
+	case s.resumeData != "":
+		label += " resumed"
+	case s.subgraphDone:
+		label += " after its child"
+	}
+	switch {
+	case ev.Op != "":
+		return fmt.Sprintf("run %s +%s@%s on %s", label, ev.Op, ev.At, ev.Task)
+	case ev.Lost:
+		return fmt.Sprintf("run %s, the reply to its %s lost", label, lostCommit(s, ev.Behavior))
+	}
+	return "run " + label
+}
+
+// settled names what the event just applied left: each route to a handler, and the root's close, the first time it
+// closes.
+func (m *hModel) settled(wasClosed bool) []string {
+	var out []string
+	for _, route := range m.routes {
+		out = append(out, "routed to a handler by "+route)
+	}
+	if !wasClosed && m.closed() {
+		out = append(out, fmt.Sprintf("closed %s by %s", m.root.status, m.root.closedBy))
+	}
+	return out
+}
+
+// restingAs names the state an operation between executions lands on.
+func (m *hModel) restingAs() string {
+	s := m.root.status
+	if s == workflow.StatusRunning {
+		s = fmt.Sprintf("running with %d at the door", len(m.atDoor()))
+		if slices.ContainsFunc(m.steps, func(s *mStep) bool { return s.sleeping }) {
+			s = "asleep"
+		}
+	}
+	if m.root.watermark >= 0 && !m.closed() {
+		s += " cancelling"
 	}
 	return s
 }
@@ -788,8 +996,8 @@ func behaviorsFor(s *mStep) []hChoice {
 }
 
 // choices lists the events the model allows now, weighted. A history runs at most two Cancel or Terminate events
-// before its flow closes, and a closed flow takes at most one more operation. With mustClose it offers only events
-// that close the flow.
+// before its flow closes and at most two recoveries, and a closed flow takes at most one more operation. With
+// mustClose it offers only events that close the flow.
 func (m *hModel) choices(postClose int, mustClose bool) []hChoice {
 	if m.closed() {
 		if postClose > 0 {
@@ -801,44 +1009,72 @@ func (m *hModel) choices(postClose int, mustClose bool) []hChoice {
 		return []hChoice{{hEvent{Op: hTerminate}, 1}}
 	}
 	var out []hChoice
-	opsLeft := m.ops < 2
+	opsLeft, recoveriesLeft := m.ops < 2, m.recoveries < 2
+	// Operations between executions, the ones that commit sometimes with their reply lost.
+	rest := func(op hOp, weight int) {
+		out = append(out, hChoice{hEvent{Op: op}, weight})
+		if m.opCommits(op) {
+			out = append(out, hChoice{hEvent{Op: op, Lost: true}, (weight + 1) / 2})
+		}
+	}
 	sleeping := slices.ContainsFunc(m.steps, func(s *mStep) bool { return s.sleeping })
 	switch {
 	case m.root.status == workflow.StatusInterrupted:
-		out = append(out, hChoice{hEvent{Op: hResume}, 160})
+		rest(hResume, 160)
 		if opsLeft {
-			out = append(out, hChoice{hEvent{Op: hCancel}, 40}, hChoice{hEvent{Op: hTerminate}, 20})
+			rest(hCancel, 40)
+			rest(hTerminate, 20)
 		}
 	case sleeping:
 		if opsLeft {
-			out = append(out, hChoice{hEvent{Op: hCancel}, 40}, hChoice{hEvent{Op: hTerminate}, 20})
+			rest(hCancel, 40)
+			rest(hTerminate, 20)
 		}
-		out = append(out, hChoice{hEvent{Op: hResume}, 10})
+		rest(hResume, 10)
 	default:
 		if opsLeft {
-			out = append(out, hChoice{hEvent{Op: hCancel}, 6}, hChoice{hEvent{Op: hTerminate}, 3})
+			rest(hCancel, 6)
+			rest(hTerminate, 3)
 		}
-		out = append(out, hChoice{hEvent{Op: hResume}, 2})
+		rest(hResume, 2)
 	}
 	runnable := m.runnable()
 	for _, s := range runnable {
 		for _, b := range behaviorsFor(s) {
 			out = append(out, hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior}, b.weight * 20})
-			if !opsLeft {
-				continue
+			switch lostCommit(s, b.ev.Behavior) {
+			case "":
+			case "completeFlow":
+				out = append(out, hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, Lost: true}, b.weight * 6})
+			default:
+				out = append(out, hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, Lost: true}, b.weight * 2})
 			}
-			for _, at := range []hPoint{hMidTask, hBeforeTransition, hBeforeRewind} {
-				if !reaches(s, b.ev.Behavior, at) {
-					continue
+			if opsLeft {
+				for _, at := range []hPoint{hMidTask, hBeforeTransition, hBeforeRewind, hBeforeInterrupt, hAcross} {
+					if !reaches(s, b.ev.Behavior, at) {
+						continue
+					}
+					cancel, terminate := b.weight, (b.weight+1)/2
+					if b.ev.Behavior == hSpawn {
+						cancel, terminate = 2*b.weight, 2*b.weight // the spawn honored under a mark; the rescan for a child
+					}
+					out = append(out,
+						hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: at, Op: hCancel}, cancel},
+						hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: at, Op: hTerminate}, terminate},
+					)
 				}
-				out = append(out,
-					hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: at, Op: hCancel}, b.weight},
-					hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: at, Op: hTerminate}, (b.weight + 1) / 2},
-				)
+			}
+			if recoveriesLeft && reaches(s, b.ev.Behavior, hBeforeTransition) {
+				out = append(out, hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: hBeforeTransition, Op: hOrphanRepair}, b.weight * 3})
 			}
 		}
+		if recoveriesLeft {
+			// The delayed worker's writes are all fenced, so what it does is immaterial.
+			out = append(out, hChoice{hEvent{Task: s.task, Behavior: hOK, At: hMidTask, Op: hLeaseExpiry}, 12})
+		}
 	}
-	// Two branches admitted together: racing, or held before their transitions while an operation lands.
+	// Two branches admitted together: racing; held before their transitions while an operation lands; or both
+	// interrupting, held before their interrupts' transactions and released in order.
 	for i, a := range runnable {
 		for _, b := range runnable[i+1:] {
 			if !a.branch || !b.branch {
@@ -846,16 +1082,26 @@ func (m *hModel) choices(postClose int, mustClose bool) []hChoice {
 			}
 			for _, ba := range behaviorsFor(a) {
 				for _, bb := range behaviorsFor(b) {
-					if togetherFits(ba.ev.Behavior, bb.ev.Behavior, "") {
+					if togetherFits(ba.ev.Behavior, bb.ev.Behavior, "", "") {
 						out = append(out, hChoice{hEvent{Task: a.task, Behavior: ba.ev.Behavior, With: b.task, WithBehavior: bb.ev.Behavior}, ba.weight * bb.weight})
+					}
+				}
+			}
+			if !a.interruptDone && !b.interruptDone && a.execs < 3 && b.execs < 3 {
+				for _, pair := range [][2]*mStep{{a, b}, {b, a}} {
+					out = append(out, hChoice{hEvent{Task: pair[0].task, Behavior: hInterrupt, With: pair[1].task, WithBehavior: hInterrupt, At: hBeforeInterrupt}, 6})
+					if opsLeft {
+						for _, op := range []hOp{hCancel, hTerminate} {
+							out = append(out, hChoice{hEvent{Task: pair[0].task, Behavior: hInterrupt, With: pair[1].task, WithBehavior: hInterrupt, At: hBeforeInterrupt, Op: op}, 3})
+						}
 					}
 				}
 			}
 			if opsLeft && !a.cancelling && !b.cancelling {
 				for _, op := range []hOp{hCancel, hTerminate} {
 					out = append(out,
-						hChoice{hEvent{Task: a.task, Behavior: hOK, With: b.task, WithBehavior: hOK, At: hBeforeTransition, Op: op}, 6},
-						hChoice{hEvent{Task: b.task, Behavior: hOK, With: a.task, WithBehavior: hOK, At: hBeforeTransition, Op: op}, 6},
+						hChoice{hEvent{Task: a.task, Behavior: hOK, With: b.task, WithBehavior: hOK, At: hBeforeTransition, Op: op}, 12},
+						hChoice{hEvent{Task: b.task, Behavior: hOK, With: a.task, WithBehavior: hOK, At: hBeforeTransition, Op: op}, 12},
 					)
 				}
 			}
@@ -865,11 +1111,11 @@ func (m *hModel) choices(postClose int, mustClose bool) []hChoice {
 }
 
 // generateHistory draws a history of shape from seed: the model is run forward, each event drawn from the ones it
-// allows, until the flow closed and took its last operation.
-func generateHistory(shape hShape, seed uint64) hHistory {
+// allows, until the flow closed and took its last operation. It returns the situations the history reaches.
+func generateHistory(shape hShape, seed uint64) (h hHistory, situations []string) {
 	rng := rand.New(rand.NewPCG(seed, 0x6869_7374_6f72_79))
 	m := newHModel(shape)
-	h := hHistory{Shape: shape, Seed: seed}
+	h = hHistory{Shape: shape, Seed: seed}
 	postClose := 0
 	for {
 		choices := m.choices(postClose, len(h.Events) >= hMaxEvents)
@@ -892,13 +1138,16 @@ func generateHistory(shape hShape, seed uint64) hHistory {
 		if ev == (hEvent{}) {
 			break // a closed flow, left alone
 		}
-		if m.closed() {
+		wasClosed := m.closed()
+		if wasClosed {
 			postClose++
 		}
+		situations = append(situations, m.situation(ev))
 		if _, err := m.apply(ev); err != nil {
 			panic(err) // the model offered an event it then refused
 		}
+		situations = append(situations, m.settled(wasClosed)...)
 		h.Events = append(h.Events, ev)
 	}
-	return h
+	return h, situations
 }

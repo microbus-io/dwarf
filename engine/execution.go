@@ -92,6 +92,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 	}
 
 	payloadLen := 0
+	e.diags.CheckpointBy(ctx, diagnostics.CheckpointBeforeInterruptTx, shardNum, stepID)
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
 		payloadLen = 0
 		// Steps-first-then-flow lock ordering, matching resume and Terminate (which walk this same surgraph

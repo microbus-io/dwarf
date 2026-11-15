@@ -37,6 +37,13 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// How TestImpairedShard works. The engine has two shards on PostgreSQL, and the second shard's connections go through
+// a TCP proxy in the test (shardProxy) that can forward, refuse, delay or freeze them on demand - a server that is
+// down, slow or hung, without touching the server. The test measures how long a flow takes from Create to Await on the
+// healthy shard with the proxy forwarding, impairs the other shard, measures again, and compares; it also
+// counts the replica's goroutines and its worker crew, and requires the impaired shard's own flows to complete once
+// the proxy forwards again.
+
 // The ways shardProxy impairs the connections it carries.
 const (
 	proxyPass   int32 = iota // forwards both ways

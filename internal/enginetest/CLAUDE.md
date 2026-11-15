@@ -45,26 +45,39 @@ there: after a process was killed and before its replacement starts, whose start
 | A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go`, `histories_test.go` |
 | A closed outcome stays reachable while its tree moves to the archive | `AssertOutcomesKept`'s removed flows, each read again by key | `archivereach_test.go` |
 | A process's death strands no obligation: a replacement finishes each with its own recovery, waiting steps keep their deadlines, an interrupted step waits for Resume | the checker and `CaptureOutcomesIn` at the kill, read by the test's own connection before the replacement starts | `processkill_test.go` |
-| An operation leaves what the reference model says at each point a history lands it - inside a task, before a transition or a rewind, between executions: which executions run, what each contributes, the outcome, its reason and prompt | the model, after every event of a generated history | `histories_test.go` |
+| An operation, a recovery or a lost reply leaves what the reference model says at each point a history lands it - inside a task, before a transition, a rewind or an interrupt, across an operation's midpoint, between executions: which executions run, what each is handed and contributes, the outcome, its reason and prompt | the model, after every event of a generated history | `histories_test.go` |
 | Generation ownership: a write by a worker that lost its lease changes nothing | not checkable at rest - a fenced write leaves no trace, so a snapshot cannot tell it from one never attempted | `leasefence_test.go`, `terminatefence_test.go`, `interruptfence_test.go`, `ownershipfence_test.go` |
+
+## The tests the checker serves, and how each works
+
+Each of these drives the engine into a state that is hard to reach on demand, then holds it to the invariants, the
+recorded outcomes, or both. The file's opening comment explains its mechanism; this is the map.
+
+| Test | What it proves | How it gets there |
+|---|---|---|
+| `engine/lostcommit_test.go` | A commit whose reply is lost costs nothing: one advancement, no moved outcome, the operation's result as without the fault | A fault commits, then reports a lost connection; a hold between the commit and the engine's retry (`armLostReply`) records the outcomes before the retry can touch them |
+| `engine/archivereach_test.go` | A closed tree answers every read the same while the janitor moves it to the archive, through faults and deletes | Every read of every tree recorded before the moves, then readers looping while the test drives the janitor in waves |
+| `engine/processkill_test.go` | A process killed at a durable boundary strands nothing a replacement cannot finish with the engine's own recovery | The test binary re-runs itself as a child process, held at the kill point and killed with SIGKILL; the parent reads the database itself, then starts a replacement |
+| `engine/impairedshard_test.go` | A refused, slow or hung shard does not slow the healthy one | A TCP proxy in front of one shard's server, switched between forwarding, refusing, delaying and freezing |
+| `engine/histories_test.go` | Every operation, recovery and lost reply leaves what a reference model says, wherever a history lands it | Seeded scripts of events run in lockstep with the model, every execution admitted one at a time (below) |
 
 ## Generated histories
 
-`engine/histories_test.go` draws short histories from seeds and drives an engine through each in lockstep with a
-reference model (`engine/historymodel_test.go`), over four shapes - a linear flow, a two-branch cohort, a caller
-with one subgraph child, and a step with an error handler: a task's next execution and what it does (complete,
-sleep, retry, interrupt, fail, spawn its child), two branches admitted together, an operation landing at a point of
-an execution, or an operation between executions. The model predicts where the tree stands after every event; at
-the end the outcome, the step and flow rows and the executions must be its, no closed outcome may move, through later
-operations and every recovery detector, and the checker must find nothing.
+`engine/histories_test.go` explains what a history is and how one runs; `engine/historymodel_test.go` holds the
+model's rules. Four shapes - a linear flow, a two-branch cohort, a caller with one subgraph child, a step with an
+error handler - and events that run an execution (complete, sleep, retry, interrupt, fail, spawn), land Cancel or
+Terminate at a point of it or across it, lapse its lease, lose the reply to its commit, admit two branches together,
+or call an operation between executions. What follows is what the code alone does not tell you.
 
 - **Every execution waits at the task handler's door until the driver admits it.** That makes the order the engine
   runs things in the history's order rather than the scheduler's, so a seed replays the same schedule, and an
-  execution the model did not predict is caught at the door rather than inferred from timing. An operation lands at
-  its point by a hold: inside the task, or at the step's own `CheckpointBeforeTransitionTx` or
-  `CheckpointBeforeRetryRewind` (targeted, so two branches can be held there at once); between executions it may
-  find a step asleep. **No point overlaps an engine transaction**, so neither a successor's insert reading a stale
-  watermark nor a Cancel between a child's completion and its caller's revive is exercised here.
+  execution the model did not predict is caught at the door rather than inferred from timing.
+- **The handler checks what it is handed, not only what it writes.** Measured: with the carrier handed its input
+  without the earlier runs' changes, all 128 default histories passed while only the written tokens were checked.
+- **An operation overlaps engine work only where it is held at its own midpoint** - Cancel between its watermark's
+  commit and its mark, Terminate between its scan and its transaction - with a whole execution run inside. No hold
+  is inside an engine transaction: on SQLite a held transaction serializes every writer, so an overlap inside one is
+  a PostgreSQL lock-order question this test does not ask.
 - **A sleep is an hour, and the driver ends it where the model wakes the step** - `not_before` brought to now, and
   the step offered to the dispatcher, whose piston would otherwise look again only an hour on. A sleep short enough
   to wait out makes an operation meant to land while the step sleeps race its wake, and lose under load.
@@ -76,23 +89,31 @@ operations and every recovery detector, and the checker must find nothing.
   wakes a marked sleeper at once. Measured: without the wait, a Terminate in the next event found a preempted branch
   still pending under parallel sweeps, while the same history replayed alone passed. A trunk step's preemption
   closes the flow, and the wait for the close hid it.
-- **Two executions are admitted together only when either order leads to the same place.** Two interrupts do not:
-  the first to commit is the one Resume addresses first, and a history that went on to run the other was
-  unreplayable when the engine committed them the other way. Their race is `TestConcurrentInterrupt_FirstWriterWins`'s.
+- **A delayed worker is let go only after its step is claimed again.** Lease recovery re-pends the step without a
+  new generation; the next claim makes one, and fences every write the worker makes after. Measured: let go before
+  the claim that preempted a marked branch, the worker's completion landed on the re-pended row.
+- **Two executions are admitted together only where the history's order decides.** Racing, two interrupts do not
+  lead to one place - the first to commit is the one Resume addresses first - so two interrupting branches are held
+  before their transactions and released in order. A history that let them race was unreplayable when the engine
+  committed them the other way. The free race is `TestConcurrentInterrupt_FirstWriterWins`'s.
 - **The model is a set of rules over the shapes it knows, never a second engine.** Its header states the accepted
   contribution and cancellation policies. A disagreement is an engine defect or a policy the model failed to state;
   settle which before changing either. Extend it a rule at a time.
 - **Every closed outcome is recorded when its flow closes and compared after every later event** - a child's as
   well as the root's - and each flow's final state is checked against the model's, frozen at its close. A Terminate
-  under a held execution records them there, before the execution goes on, as a lost-reply test records its
-  baseline before the retry. Measured: with the retry rewind's `status='running'` guard removed, every seed passed
-  while the record was taken after the held dispatch returned, the rewind having rewritten the terminated step by
-  then; and a child's final state rewritten after its delivery passed while only the root's close was recorded.
+  under a held execution, or a commit whose reply was lost, records them there, before the execution or the retry
+  goes on, as a lost-reply test records its baseline before the retry. Measured: with the retry rewind's
+  `status='running'` guard removed, every seed passed while the record was taken after the held dispatch returned,
+  the rewind having rewritten the terminated step by then; and a child's final state rewritten after its delivery
+  passed while only the root's close was recorded.
 - **An event's checks wait for every dispatch it set going**: the execution it admitted, each preemption, and each
   execution a Terminate let go from the door, whose fenced writes otherwise land after the checks.
+- **The floor is met by choosing seeds, never by tuning weights.** A default run takes seeds 1 to `hBaseSeeds`, then
+  the lowest later seed for each `hFloor` situation they miss, found by generating from the model alone. Weights tuned
+  until fixed seeds reach the floor reshuffle what every seed draws, so each change drops a different situation.
 - A failure prints the history as JSON; `DWARF_HISTORY` replays it on whichever database `SEQUEL_TESTING_DSN`
-  selects. The test logs the situations its histories reached - each event kind in the state it landed on, each way a
-  flow closed - because a seed count says nothing about breadth.
+  selects, and `DWARF_HISTORY_MINIMIZE` reduces it to the fewest events that still fail - any failure, so read the
+  last candidate's messages.
 
 ## The mutation inventory
 

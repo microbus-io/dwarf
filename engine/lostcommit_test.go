@@ -44,6 +44,12 @@ import (
 // holds it between the commit and the retry, records what the commit left, and waits for the retry to have run
 // before it compares: an operation the test does not wait for can be cancelled by the test's end before it retries,
 // and a baseline taken after the retry cannot see the retry rewrite anything.
+//
+// The shape of a test here: armLostReply arms the fault for one target and a hold on CheckpointCommitLost, which the
+// operation passes once its transaction committed and before it retries; committed waits for the hold and records
+// the closed outcomes the commit left; release lets the retry run; awaitDispatched waits for the dispatch that held
+// it to return; assertSettledClean compares the outcomes after the retry and again after every recovery detector, and
+// runs the invariant checker.
 
 // newLostCommitEngine starts an engine on mux with persist's retry ladder shortened to milliseconds.
 func newLostCommitEngine(t *testing.T, mux *hosts.Mux) (*Engine, sdkmetric.Reader) {

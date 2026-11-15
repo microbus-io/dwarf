@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -35,28 +37,83 @@ import (
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
-// Generated operation histories. Each history is a list of events drawn from a seed by the reference model
-// (historymodel_test.go): a task's next execution with what it does, two executions admitted together, an
-// operation landing at a chosen point of an execution, or an operation landing between executions. The test drives
-// one engine through the history in lockstep with the model. Every execution enters the test's task handler and
-// waits there to be admitted, so the order the engine runs things in is the history's order and not the
-// scheduler's, and an execution the model did not predict is caught at the door. An operation lands at its point
-// by a hold: inside the task, or at the step's checkpoint after the completion write or before the retry's rewind.
-// Before any operation lands, every step the engine has claimed is at the door, so the operation finds it running.
+// Generated operation histories: the engine against a reference model, over thousands of small scripted scenarios.
 //
-// After every event the flow must stand where the model says, and at the end its outcome, its step rows and its
-// executions must be the model's, no closed outcome may have moved - through the operations a history applies
-// after the close, and through every recovery detector - and the invariant checker must find nothing.
+// # What a history is
+//
+// A history is a script for one flow: a short list of events, each saying what happens next. An event is one of:
+//
+//   - an execution: "task B runs once and does X" - completes, sleeps, retries, interrupts, fails or spawns its
+//     child - optionally with something landing at a chosen point inside it: a Cancel or Terminate, the loss of its
+//     lease, or the loss of the reply to its commit;
+//   - two executions at once: two fan-out branches admitted together, racing, or both held at one point;
+//   - an operation between executions: Cancel, Terminate or Resume of the root, sometimes with its reply lost.
+//
+// For example, in the linear shape (A -> B -> C):
+//
+//	A:ok                          A runs and completes
+//	B:interrupt                   B runs and interrupts the flow
+//	cancel                        Cancel lands while the flow waits
+//	resume                        Resume re-pends B, which Cancel has marked: it must be cancelled, not run
+//
+// A history is data (hHistory, JSON), so it can be printed, edited and replayed. The generator draws one from a seed
+// by running the model forward, each event chosen at random among those the model allows at that moment, so every
+// history is valid and a seed always gives the same one.
+//
+// # How one is run, and what is checked
+//
+// The model (historymodel_test.go) is a small statement of what the engine must do: a few lists and counters per
+// flow and step, and rules - not a second engine. The test runs one fresh engine through the history, in lockstep:
+// each event is applied to the model, which says where the tree must stand afterwards, and then driven on the
+// engine, which must stand there too. What the model predicts is concrete: each task's executions write one token
+// to a "trail" field (an append reducer), so the trail a step is handed and a flow's final state show exactly which
+// executions counted, in which order.
+//
+// Checked after every event: the root's status, an interrupted root's state and prompt, every flow's status and a
+// closed flow's final state, that no closed outcome moved since it closed, and that no execution ran which the
+// model did not predict. At the end: the step rows, every recovery detector run once more with nothing to change,
+// and the invariant checker (internal/enginetest).
+//
+// # The patterns that make it deterministic
+//
+//   - The door. Every task runs through the test's own handler, which reports its arrival and waits to be admitted.
+//     So the engine runs executions in the history's order, not the scheduler's, and an execution nobody predicted
+//     is caught where it arrives (expected, receive).
+//   - Holds. Something lands at a point by holding the execution there: inside the task (the handler waits), or at
+//     a targeted checkpoint - after the completion write, before a retry's rewind, before an interrupt's transaction
+//     - armed for that step alone (holdAt). Two branches can be held at once and released in the event's order.
+//   - Across. An operation is held at its own midpoint while a whole execution runs inside it: Cancel between its
+//     watermark's commit and its mark, Terminate between its scan and its transaction (runAcross).
+//   - Claimed before an operation lands. A pending step that is awake is claimed within moments, and an operation
+//     racing that claim finds it pending or running, which the model cannot predict; so every such step is pulled
+//     to the door first (ensureAtDoor), and the operation finds it running.
+//   - Sleep and lease by hand. A sleep is an hour, ended by the driver where the model wakes the step
+//     (wakeSleepers); a lost lease is a backdated lease_expires and a recovery pass the driver runs itself
+//     (recover). Neither races a clock.
+//   - Every dispatch awaited. An event's checks wait for each dispatch it set going - the execution it admitted, each
+//     preemption (a dispatch of its own), each execution a Terminate let go - by counting ClaimedDispatchDone.
+//
+// # Coverage, the floor, replay and minimizing
+//
+// Each event is named as the situation it landed on (hModel.situation: "run ok +cancel@beforeTransition", "op
+// resume on interrupted"), and a run logs how often each was reached: a count of seeds says nothing about breadth.
+// hFloor lists, per shape, the situations a default run must reach; a default run takes seeds 1 to hBaseSeeds, then
+// the lowest later seed for each floor situation they miss, chosen from the model alone before anything runs.
+//
+// A failing history prints itself as JSON with the command that replays it, on SQLite or any SEQUEL_TESTING_DSN;
+// DWARF_HISTORY_MINIMIZE then cuts it to the fewest events that still fail.
 //
 // Environment:
 //
-//	DWARF_HISTORY_SEEDS=n     run seeds 1..n (default 32; 8 with -short)
+//	DWARF_HISTORY_SEEDS=n     run seeds 1..n instead of the default run (8 with -short), without the floor
 //	DWARF_HISTORY_SEED=s      run seed s alone
 //	DWARF_HISTORY='{...}'     replay one history, as a failure prints it ('@path' reads it from a file; a relative
 //	                          path is from the package directory)
+//	DWARF_HISTORY_MINIMIZE=1  with DWARF_HISTORY, reduce the failing history it holds to a minimal one
 
 const (
 	hSleepFor        = time.Hour // a sleep no operation can outlast; the driver ends it when the model wakes the step
@@ -69,6 +126,7 @@ const (
 type hArrival struct {
 	task   string
 	shard  int
+	flowID int
 	stepID int
 	admit  chan hDirective
 }
@@ -76,6 +134,7 @@ type hArrival struct {
 // hDirective is what an admitted execution does.
 type hDirective struct {
 	behavior hBehavior
+	input    []string      // the trail the task must be handed: the model's view of the step's input
 	token    string        // the token it contributes, before the resume data it receives
 	resumed  bool          // it reads the resume data first
 	child    string        // the workflow URL of the child it runs: spawned, or read back once it closed
@@ -100,6 +159,7 @@ type hRunner struct {
 	waiting  map[string]*hArrival // executions at the door that no event admitted yet, by task
 	refs     map[*mStep][2]int    // each step's shard and id
 	claims   map[*mStep]int       // the dispatches of each step that won their claim
+	awaited  map[*mStep]bool      // the preempted steps whose preempting dispatch was awaited
 	done     chan struct{}
 	released []*mStep // executions let go from the door by a Terminate, whose dispatches the event awaits
 
@@ -163,11 +223,11 @@ func (r *hRunner) serve(mux *hosts.Mux, shape hShape) {
 
 func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flow) error {
 	return func(ctx context.Context, f *workflow.Flow) error {
-		shard, _, _, stepID, _, err := keys.ParseStepKey(f.StepKey())
+		shard, _, flowID, stepID, _, err := keys.ParseStepKey(f.StepKey())
 		if err != nil {
 			return err
 		}
-		a := &hArrival{task: task, shard: shard, stepID: stepID, admit: make(chan hDirective, 1)}
+		a := &hArrival{task: task, shard: shard, flowID: flowID, stepID: stepID, admit: make(chan hDirective, 1)}
 		select {
 		case r.arrivals <- a:
 		case <-r.done:
@@ -185,6 +245,9 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 		}
 		if d.abandon {
 			return errors.New("the flow was terminated")
+		}
+		if got := nonNil(f.GetStrings("trail")); !slices.Equal(got, nonNil(d.input)) {
+			r.report("%s: execution %s was handed the trail %v, the model has %v", task, d.token, got, d.input)
 		}
 		tok := d.token
 		if d.resumed {
@@ -351,25 +414,82 @@ func (r *hRunner) ensureAtDoor(steps []*mStep) {
 	}
 }
 
-// applyOp runs op on the flow and checks the engine refuses it exactly when the model says it does.
-func (r *hRunner) applyOp(op hOp, refused bool) {
-	r.t.Helper()
-	ctx := r.t.Context()
-	var err error
+// callOp calls op on the root and returns what the engine answered.
+func (r *hRunner) callOp(ctx context.Context, op hOp) error {
 	switch op {
 	case hCancel:
-		err = r.e.Cancel(ctx, r.flowKey, hCancelReason)
+		return r.e.Cancel(ctx, r.flowKey, hCancelReason)
 	case hTerminate:
-		err = r.e.Terminate(ctx, r.flowKey, hTerminateReason)
+		return r.e.Terminate(ctx, r.flowKey, hTerminateReason)
 	case hResume:
-		err = r.e.Resume(ctx, r.flowKey, map[string]any{"answer": fmt.Sprintf("r%d", r.m.resumes)})
+		return r.e.Resume(ctx, r.flowKey, map[string]any{"answer": fmt.Sprintf("r%d", r.m.resumes)})
 	}
+	return nil
+}
+
+// checkAnswer checks the engine's answer to op: refused exactly when the model says it is, and, for an operation
+// whose reply was lost, the lost connection the caller sees although the operation landed.
+func (r *hRunner) checkAnswer(op hOp, refused, lost bool, err error) {
+	r.t.Helper()
 	assert := testarossa.For(r.t)
-	if refused {
+	switch {
+	case lost:
+		assert.True(sequel.IsConnectionError(err), "%s with its reply lost answers a lost connection: %v", op, err)
+	case refused:
 		assert.Error(err, "%s was expected to be refused", op)
-	} else {
+	default:
 		assert.NoError(err, "%s", op)
 	}
+}
+
+// applyOp runs op on the root and checks the answer.
+func (r *hRunner) applyOp(op hOp, refused bool) {
+	r.t.Helper()
+	r.checkAnswer(op, refused, false, r.callOp(r.t.Context(), op))
+}
+
+// recover runs recovery on the held execution a: its lease lapses, then lease recovery or the orphan repair runs on
+// its shard, as the janitor's job would.
+func (r *hRunner) recover(op hOp, a *hArrival) {
+	r.t.Helper()
+	ctx := r.t.Context()
+	sh, err := r.e.db.Shard(a.shard)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := sh.DB().ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -60000) WHERE step_id=?", a.stepID); err != nil {
+		r.t.Fatal(err)
+	}
+	switch op {
+	case hLeaseExpiry:
+		r.e.recoverLeases(ctx)
+	case hOrphanRepair:
+		if err := r.e.recoverOrphanedFlows(ctx, sh.DB(), a.shard); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+}
+
+// lostReplyOf arms the loss of the reply to the commit kind (lostCommit) an execution of task makes; a is the
+// execution, child the workflow URL it spawns. The loss is held before the engine's retry, except a spawn's: its
+// fault reports an error of its own and passes no CheckpointCommitLost, and a spawn closes no outcome its retry
+// could rewrite, so it is only armed (the returned hold is nil) and checked to have fired.
+func (r *hRunner) lostReplyOf(kind, task string, a *hArrival, child string) (l *lostReply, fault string) {
+	switch kind {
+	case "advance":
+		l = armLostReply(r.t, r.e, diagnostics.FaultAdvanceCommitLost, task)
+	case "completeFlow":
+		l = armLostReply(r.t, r.e, diagnostics.FaultCompleteFlowCommitLost, strconv.Itoa(a.flowID))
+	case "failStep":
+		l = armLostReply(r.t, r.e, diagnostics.FaultFailStepCommitLost, task)
+	case "spawn":
+		fault = diagnostics.Join(diagnostics.FaultSubgraphSpawnCommitLost, child)
+		r.e.diags.Seams().Inject(fault)
+		return nil, fault
+	default:
+		r.t.Fatalf("no lost reply for %s", kind)
+	}
+	return l, l.fault
 }
 
 // afterOp follows an operation that just landed. A Terminate that closed the tree records the closed outcomes
@@ -422,17 +542,27 @@ func (r *hRunner) awaitPreempted() {
 	r.t.Helper()
 	r.wakeSleepers(true)
 	for _, s := range r.m.preempted {
-		if _, ok := r.refs[s]; !ok {
-			r.refs[s] = [2]int{r.shard, r.newestStepID(s.task)}
-		}
-		r.claims[s]++
-		r.awaitDispatches(s)
+		r.awaitPreemption(s)
 	}
+}
+
+// awaitPreemption waits once for the dispatch that preempts s.
+func (r *hRunner) awaitPreemption(s *mStep) {
+	r.t.Helper()
+	if r.awaited[s] {
+		return
+	}
+	r.awaited[s] = true
+	if _, ok := r.refs[s]; !ok {
+		r.refs[s] = [2]int{r.shard, r.newestStepID(s.task)}
+	}
+	r.claims[s]++
+	r.awaitDispatches(s)
 }
 
 // directive is what the next execution of s does with behavior.
 func (r *hRunner) directive(s *mStep, behavior hBehavior) hDirective {
-	d := hDirective{behavior: behavior, token: fmt.Sprintf("%s%d", s.task, s.execs+1), resumed: s.resumeData != "", reentry: s.subgraphDone, onErr: s.onErr != ""}
+	d := hDirective{behavior: behavior, input: s.merged(), token: fmt.Sprintf("%s%d", s.task, s.execs+1), resumed: s.resumeData != "", reentry: s.subgraphDone, onErr: s.onErr != ""}
 	if child := s.flow.g.calls[s.task]; child != "" {
 		d.child = "history/" + string(child)
 	}
@@ -458,6 +588,8 @@ func holdAt(point hPoint, a *hArrival) string {
 		return diagnostics.Join(diagnostics.CheckpointBeforeTransitionTx, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
 	case hBeforeRewind:
 		return diagnostics.Join(diagnostics.CheckpointBeforeRetryRewind, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
+	case hBeforeInterrupt:
+		return diagnostics.Join(diagnostics.CheckpointBeforeInterruptTx, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
 	}
 	return ""
 }
@@ -476,17 +608,27 @@ func (r *hRunner) others(except ...string) []*mStep {
 // step runs one event on the engine and the model.
 func (r *hRunner) step(ev hEvent) {
 	r.t.Helper()
+	wasClosed := r.m.closed()
+	r.cov.add("%s", r.m.situation(ev))
 	switch {
 	case ev.Task == "":
 		r.restOp(ev)
 	case ev.With != "":
 		r.runTogether(ev)
+	case ev.At == hAcross:
+		r.runAcross(ev)
 	default:
 		r.runOne(ev)
 	}
-	for _, route := range r.m.routes {
-		r.cov.add("routed to a handler by %s", route)
+	for _, name := range r.m.settled(wasClosed) {
+		r.cov.add("%s", name)
 	}
+	r.mu.Lock()
+	for _, p := range r.problems {
+		r.t.Errorf("event %s: %s", ev, p)
+	}
+	r.problems = nil
+	r.mu.Unlock()
 	if r.t.Failed() {
 		return
 	}
@@ -498,13 +640,21 @@ func (r *hRunner) step(ev hEvent) {
 // restOp applies an operation between executions.
 func (r *hRunner) restOp(ev hEvent) {
 	r.t.Helper()
-	r.cov.add("op %s on %s", ev.Op, r.restingAs())
 	r.ensureAtDoor(r.m.atDoor())
+	fault := ""
+	if ev.Lost {
+		fault = map[hOp]string{hResume: diagnostics.FaultResumeCommitLost, hTerminate: diagnostics.FaultTerminateCommitLost}[ev.Op]
+		fault = diagnostics.Join(fault, strconv.Itoa(r.flowID))
+		r.e.diags.Seams().Inject(fault)
+	}
 	refused, err := r.m.apply(ev)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	r.applyOp(ev.Op, refused)
+	r.checkAnswer(ev.Op, refused, ev.Lost, r.callOp(r.t.Context(), ev.Op))
+	if ev.Lost {
+		assertFired(r.t, r.e, fault)
+	}
 	r.afterOp(ev.Op)
 	r.wakeSleepers(false)
 	r.awaitPreempted()
@@ -523,10 +673,9 @@ func (r *hRunner) runOne(ev hEvent) {
 		r.t.Fatalf("event %s: %v", ev, err)
 	}
 	d := r.directive(s, ev.Behavior)
-	if ev.Op == "" {
-		r.cov.add("run %s%s", ev.Behavior, map[bool]string{true: " resumed"}[d.resumed])
-	} else {
-		r.cov.add("run %s%s +%s@%s on %s", ev.Behavior, map[bool]string{true: " resumed"}[d.resumed], ev.Op, ev.At, ev.Task)
+	lost := ""
+	if ev.Lost {
+		lost = lostCommit(s, ev.Behavior)
 	}
 	others := r.others(ev.Task)
 	a := r.takeArrival(ev.Task)
@@ -541,32 +690,135 @@ func (r *hRunner) runOne(ev hEvent) {
 		seams.Break(hold)
 		r.t.Cleanup(func() { seams.Resume(hold) })
 	}
+	var l *lostReply
+	fault := ""
+	if lost != "" {
+		l, fault = r.lostReplyOf(lost, ev.Task, a, d.child)
+	}
 	refused, err := r.m.apply(ev)
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	r.admit(s, a, d)
 	switch {
-	case d.inside != nil:
-		select {
-		case <-d.inside:
-		case <-time.After(r.scaled()):
-			r.t.Fatalf("event %s: the task never ran", ev)
+	case ev.Op == hLeaseExpiry:
+		// The execution is held inside its task while its lease lapses and recovery re-pends the step. It is let
+		// go only once the step is claimed again, which bumps the generation its every write is fenced on: let go
+		// before, its completion would land on the step recovery had re-pended.
+		r.awaitInside(ev, d)
+		r.ensureAtDoor(others)
+		r.recover(ev.Op, a)
+		if s.status == workflow.StatusPending {
+			r.ensureAtDoor([]*mStep{s})
+		} else {
+			// A marked step is preempted by that claim instead: its dispatch returns while the held one is
+			// still held.
+			r.awaited[s] = true
+			r.claims[s]++
+			name := diagnostics.Join(diagnostics.CheckpointClaimedDispatchDone, strconv.Itoa(a.shard), strconv.Itoa(a.stepID))
+			enginetest.AwaitVisitCount(r.t, r.e.diags.Seams(), r.claims[s]-1, r.timeout(), name)
 		}
+		close(d.hold)
+	case ev.Op == hOrphanRepair:
+		// The execution is held after its completion write while its lease lapses and the orphan repair rewinds the
+		// step for a replay. The replay - a dispatch that runs no task - and the held worker's own transition then
+		// race to transition it, and the worker's is fenced.
+		r.awaitHold(ev, hold)
+		r.ensureAtDoor(others)
+		r.recover(ev.Op, a)
+		r.claims[s]++ // the replay
+		seams.Resume(hold)
+	case d.inside != nil:
+		r.awaitInside(ev, d)
 		r.ensureAtDoor(others)
 		r.applyOp(ev.Op, refused)
 		r.afterOp(ev.Op)
 		close(d.hold)
 	case hold != "":
-		if !seams.WaitTimeout(r.t.Context(), hold, r.scaled()) {
-			r.t.Fatalf("event %s: the engine never reached %s", ev, hold)
-		}
+		r.awaitHold(ev, hold)
 		r.ensureAtDoor(others)
 		r.applyOp(ev.Op, refused)
 		r.afterOp(ev.Op)
 		seams.Resume(hold)
+	case l != nil:
+		// The commit landed and its reply is lost: the outcomes it left are checked against the model before the
+		// retry that follows can touch them, and again after.
+		l.committed()
+		r.checkKept()
+		r.keep()
+		l.release()
 	}
 	r.awaitDispatches(s)
+	if fault != "" {
+		assertFired(r.t, r.e, fault)
+	}
+	r.awaitPreempted()
+	r.awaitReleased()
+	r.settle()
+}
+
+// awaitInside waits for an execution admitted with d to be held inside its task.
+func (r *hRunner) awaitInside(ev hEvent, d hDirective) {
+	r.t.Helper()
+	select {
+	case <-d.inside:
+	case <-time.After(r.scaled()):
+		r.t.Fatalf("event %s: the task never ran", ev)
+	}
+}
+
+// awaitHold waits for the engine to be held at checkpoint hold.
+func (r *hRunner) awaitHold(ev hEvent, hold string) {
+	r.t.Helper()
+	if !r.e.diags.Seams().WaitTimeout(r.t.Context(), hold, r.scaled()) {
+		r.t.Fatalf("event %s: the engine never reached %s", ev, hold)
+	}
+}
+
+// runAcross runs one execution while an operation is held midway: Cancel between its watermark's commit and its
+// mark, Terminate between its scan of the tree and its transaction. The execution starts after the operation's
+// first half and ends before its second, which is the overlap neither half alone produces: a successor inserted
+// after the watermark, a child spawned after the scan.
+func (r *hRunner) runAcross(ev hEvent) {
+	r.t.Helper()
+	seams := r.e.diags.Seams()
+	r.m.wake()
+	r.wakeSleepers(false)
+	s, err := r.m.runnableTask(ev.Task, ev.Behavior)
+	if err != nil {
+		r.t.Fatalf("event %s: %v", ev, err)
+	}
+	d := r.directive(s, ev.Behavior)
+	others := r.others(ev.Task)
+	a := r.takeArrival(ev.Task)
+	r.ensureAtDoor(others)
+	hold := map[hOp]string{hCancel: diagnostics.CheckpointCancelBeforeMark, hTerminate: diagnostics.CheckpointTerminateAfterScan}[ev.Op]
+	seams.Break(hold)
+	r.t.Cleanup(func() { seams.Resume(hold) })
+	if _, err := r.m.apply(ev); err != nil {
+		r.t.Fatal(err)
+	}
+	answered := make(chan error, 1)
+	go func() { answered <- r.callOp(r.t.Context(), ev.Op) }()
+	r.awaitHold(ev, hold)
+	r.admit(s, a, d)
+	r.awaitDispatches(s)
+	// What the execution itself preempted - a successor inserted marked after Cancel's watermark - goes now, a
+	// sleeper woken for it; then every step at the door is claimed before the second half lands, as it would be
+	// before any operation.
+	r.wakeSleepers(true)
+	for _, p := range r.m.midPreempt {
+		r.awaitPreemption(p)
+	}
+	r.ensureAtDoor(r.m.midDoor)
+	seams.Resume(hold)
+	select {
+	case err := <-answered:
+		r.checkAnswer(ev.Op, false, false, err)
+	case <-time.After(r.scaled()):
+		r.t.Fatalf("event %s: %s never returned", ev, ev.Op)
+	}
+	r.afterOp(ev.Op)
 	r.awaitPreempted()
 	r.awaitReleased()
 	r.settle()
@@ -588,17 +840,10 @@ func (r *hRunner) runTogether(ev hEvent) {
 		r.t.Fatalf("event %s: %v", ev, err)
 	}
 	da, db := r.directive(sa, ev.Behavior), r.directive(sb, ev.WithBehavior)
-	if ev.Op == "" {
-		pair := []string{string(ev.Behavior), string(ev.WithBehavior)}
-		sort.Strings(pair)
-		r.cov.add("together %s & %s", pair[0], pair[1])
-	} else {
-		r.cov.add("together held +%s@%s", ev.Op, ev.At)
-	}
 	others := r.others(ev.Task, ev.With)
 	a, b := r.takeArrival(ev.Task), r.takeArrival(ev.With)
 	holdA, holdB := "", ""
-	if ev.Op != "" {
+	if ev.At != "" {
 		holdA, holdB = holdAt(ev.At, a), holdAt(ev.At, b)
 		seams.Break(holdA)
 		seams.Break(holdB)
@@ -610,15 +855,15 @@ func (r *hRunner) runTogether(ev hEvent) {
 	}
 	r.admit(sa, a, da)
 	r.admit(sb, b, db)
-	if ev.Op != "" {
+	if ev.At != "" {
 		for _, hold := range []string{holdA, holdB} {
-			if !seams.WaitTimeout(r.t.Context(), hold, r.scaled()) {
-				r.t.Fatalf("event %s: the engine never reached %s", ev, hold)
-			}
+			r.awaitHold(ev, hold)
 		}
 		r.ensureAtDoor(others)
-		r.applyOp(ev.Op, refused)
-		r.afterOp(ev.Op)
+		if ev.Op != "" {
+			r.applyOp(ev.Op, refused)
+			r.afterOp(ev.Op)
+		}
 		seams.Resume(holdA)
 		r.awaitDispatches(sa)
 		seams.Resume(holdB)
@@ -628,21 +873,6 @@ func (r *hRunner) runTogether(ev hEvent) {
 	r.awaitPreempted()
 	r.awaitReleased()
 	r.settle()
-}
-
-// restingAs names the state an operation event lands on, for coverage.
-func (r *hRunner) restingAs() string {
-	s := r.m.root.status
-	if r.m.root.status == workflow.StatusRunning {
-		s = fmt.Sprintf("running with %d at the door", len(r.m.atDoor()))
-		if slices.ContainsFunc(r.m.steps, func(s *mStep) bool { return s.sleeping }) {
-			s = "asleep"
-		}
-	}
-	if r.m.root.watermark >= 0 && !r.m.closed() {
-		s += " cancelling"
-	}
-	return s
 }
 
 // settle waits for the flow to stand where the model says once an event's work is done, and checks it there: an
@@ -711,9 +941,6 @@ func (r *hRunner) keep() {
 	for _, f := range r.m.flows {
 		if f.closed() && !r.keptFlows[f] {
 			r.keptFlows[f], newly = true, true
-			if f == r.m.root {
-				r.cov.add("closed %s by %s", f.status, f.closedBy)
-			}
 		}
 	}
 	if newly {
@@ -830,7 +1057,7 @@ func (r *hRunner) noStray(when string) {
 // runHistory drives a fresh engine through h and checks it against the model.
 func runHistory(t *testing.T, h hHistory, cov *hCoverage) {
 	assert := testarossa.For(t)
-	r := &hRunner{t: t, h: h, m: newHModel(h.Shape), cov: cov, arrivals: make(chan *hArrival), waiting: map[string]*hArrival{}, refs: map[*mStep][2]int{}, claims: map[*mStep]int{}, done: make(chan struct{}), keptFlows: map[*mFlow]bool{}}
+	r := &hRunner{t: t, h: h, m: newHModel(h.Shape), cov: cov, arrivals: make(chan *hArrival), waiting: map[string]*hArrival{}, refs: map[*mStep][2]int{}, claims: map[*mStep]int{}, awaited: map[*mStep]bool{}, done: make(chan struct{}), keptFlows: map[*mFlow]bool{}}
 	t.Cleanup(func() {
 		if t.Failed() {
 			b, _ := json.Marshal(h)
@@ -908,30 +1135,166 @@ func (c *hCoverage) log(t *testing.T) {
 	t.Logf("situations reached: %d%s", len(names), b.String())
 }
 
-// historySeeds is the seeds a run explores, from the environment.
-func historySeeds(t *testing.T) []uint64 {
+// minimizeHistory reduces a failing history to one from which no single event can be removed and the history still
+// fail, and logs it for replay. Each candidate is h without one event - kept only if the model still accepts every
+// event, a Terminate appended if the flow would end open - run as a subtest on a fresh engine: a candidate that
+// fails replaces h, and the passes repeat until one removes nothing. It keeps any failure, not only the original's,
+// so the messages of the last failing candidate are the ones to read. The test fails, as the history it was given
+// does.
+func minimizeHistory(t *testing.T, h hHistory) {
+	cov := &hCoverage{counts: map[string]int{}}
+	fails := func(name string, c hHistory) bool {
+		return !t.Run(name, func(t *testing.T) { runHistory(t, c, cov) })
+	}
+	if !fails("given", h) {
+		t.Log("the history passes; nothing to minimize")
+		return
+	}
+	cur := h
+	for pass := 1; ; pass++ {
+		removed := false
+		for i := len(cur.Events) - 1; i >= 0; i-- {
+			cand, ok := replayable(hHistory{Shape: cur.Shape, Events: slices.Delete(slices.Clone(cur.Events), i, i+1)})
+			if ok && fails(fmt.Sprintf("pass%d/without%d", pass, i), cand) {
+				cur, removed = cand, true
+			}
+		}
+		if !removed {
+			break
+		}
+	}
+	b, _ := json.Marshal(cur)
+	t.Logf("minimal history, %d of the %d events: DWARF_HISTORY='%s'", len(cur.Events), len(h.Events), b)
+}
+
+// replayable reports whether the model accepts every event of h, returning h with a Terminate appended when its flow
+// would end open.
+func replayable(h hHistory) (hHistory, bool) {
+	m := newHModel(h.Shape)
+	for _, ev := range h.Events {
+		if _, err := m.apply(ev); err != nil {
+			return h, false
+		}
+	}
+	if !m.closed() {
+		h.Events = append(h.Events, hEvent{Op: hTerminate})
+	}
+	return h, true
+}
+
+const (
+	hBaseSeeds   = 24     // the seeds a default run takes in order, before the floor's own
+	hFloorSearch = 20_000 // the last seed searched for a floor situation the base seeds miss
+)
+
+// historySeeds is the seeds a run explores, and whether they are the default run's, which the floor holds to. A
+// default run takes seeds 1 to hBaseSeeds, then for each floor pattern they do not reach, the lowest later seed whose
+// history does - read off the model alone, which generates a history in microseconds. A floor pattern no seed up to
+// hFloorSearch reaches fails the test: the generator no longer produces it.
+func historySeeds(t *testing.T, shape hShape) (seeds []uint64, floored bool) {
 	if s := os.Getenv("DWARF_HISTORY_SEED"); s != "" {
 		seed, err := strconv.ParseUint(s, 10, 64)
 		if err != nil {
 			t.Fatalf("DWARF_HISTORY_SEED: %v", err)
 		}
-		return []uint64{seed}
+		return []uint64{seed}, false
 	}
-	n := 32
+	n, explicit := hBaseSeeds, false
 	if testing.Short() {
-		n = 8
+		n, explicit = 8, true
 	}
 	if s := os.Getenv("DWARF_HISTORY_SEEDS"); s != "" {
 		var err error
 		if n, err = strconv.Atoi(s); err != nil {
 			t.Fatalf("DWARF_HISTORY_SEEDS: %v", err)
 		}
+		explicit = true
 	}
-	seeds := make([]uint64, n)
-	for i := range seeds {
-		seeds[i] = uint64(i + 1)
+	var reached []string
+	for seed := uint64(1); seed <= uint64(n); seed++ {
+		seeds = append(seeds, seed)
+		_, sits := generateHistory(shape, seed)
+		reached = append(reached, sits...)
 	}
-	return seeds
+	if explicit {
+		return seeds, false
+	}
+	generated := map[uint64][]string{}
+	for _, pattern := range hFloor[shape] {
+		re := regexp.MustCompile(pattern)
+		if slices.ContainsFunc(reached, re.MatchString) {
+			continue
+		}
+		found := false
+		for seed := uint64(n + 1); seed <= hFloorSearch && !found; seed++ {
+			sits, ok := generated[seed]
+			if !ok {
+				_, sits = generateHistory(shape, seed)
+				generated[seed] = sits
+			}
+			if slices.ContainsFunc(sits, re.MatchString) {
+				seeds, reached, found = append(seeds, seed), append(reached, sits...), true
+			}
+		}
+		if !found {
+			t.Errorf("no seed up to %d generates a situation matching %q: the generator no longer produces it", hFloorSearch, pattern)
+		}
+	}
+	return seeds, true
+}
+
+// hFloor is, per shape, the situations a default run must reach - each a pattern over the coverage's names. It names
+// what the histories exist to exercise: every way an operation or a recovery lands, every way a flow closes, every
+// lost reply the shape commits, and the shape's own mechanisms. historySeeds adds a seed for each pattern the base
+// seeds miss, so the floor holds as long as the generator can produce every situation on it.
+var hFloor = map[hShape][]string{
+	hLinear: {
+		`closed completed`, `closed failed`, `closed cancelled`, `closed terminated`,
+		`run (ok|sleep) \+cancel@midTask`, `run (ok|sleep) \+cancel@beforeTransition`, `run retry \+cancel@beforeRewind`,
+		`run \w+ \+cancel@across`, `run \w+ \+terminate@(midTask|beforeTransition)`, `run \w+ \+terminate@across`,
+		`run interrupt \+(cancel|terminate)@beforeInterrupt`,
+		`run ok \+leaseExpiry@midTask`, `run \w+ \+orphanRepair@beforeTransition`,
+		`the reply to its advance lost`, `the reply to its completeFlow lost`, `the reply to its failStep lost`,
+		`op resume on interrupted`, `op cancel on interrupted`, `op cancel on asleep`, `op terminate on interrupted`,
+		`op resume \(reply lost\)`, `op terminate \(reply lost\)`,
+		`run \w+ resumed`,
+	},
+	hCohort: {
+		`closed completed`, `closed failed by cohort failed`, `closed cancelled by cohort cancelled`, `closed terminated`,
+		`together ok & ok, held @beforeTransition \+cancel`, `together ok & ok, held @beforeTransition \+terminate`,
+		`together interrupt & interrupt, held @beforeInterrupt`, `together \w+ & \w+$`,
+		`run \w+ \+cancel@across`, `run \w+ \+terminate@across`,
+		`run ok \+leaseExpiry@midTask`, `run \w+ \+orphanRepair@beforeTransition`, `the reply to its advance lost`,
+		`op resume on interrupted`, `op cancel on interrupted`,
+	},
+	hChild: {
+		`closed completed`, `closed failed`, `closed cancelled`, `closed terminated`,
+		`run spawn$`, `run spawn \+cancel@midTask`, `run spawn \+terminate@across`, `run \w+ after its child`,
+		`run \w+ \+cancel@across`, `run ok \+leaseExpiry@midTask`, `run \w+ \+orphanRepair@beforeTransition`,
+		`the reply to its spawn lost`, `the reply to its completeFlow lost`,
+		`op resume on interrupted`, `op cancel on interrupted`, `op resume \(reply lost\)`,
+	},
+	hRecover: {
+		`closed completed`, `closed failed`, `closed cancelled`, `closed terminated`,
+		`routed to a handler by an error$`, `routed to a handler by an error while marked`,
+		`routed to a handler by a covered completion`, `routed to a handler by a preemption`,
+		`run \w+ \+cancel@across`, `run ok \+leaseExpiry@midTask`, `run fail \+orphanRepair@beforeTransition`,
+		`the reply to its advance lost`,
+	},
+}
+
+// checkFloor fails the test for every pattern of shape's floor that no situation the run reached matches.
+func checkFloor(t *testing.T, shape hShape, cov *hCoverage) {
+	t.Helper()
+	cov.mu.Lock()
+	defer cov.mu.Unlock()
+	reached := slices.Collect(maps.Keys(cov.counts))
+	for _, pattern := range hFloor[shape] {
+		re := regexp.MustCompile(pattern)
+		if !slices.ContainsFunc(reached, re.MatchString) {
+			t.Errorf("the default seeds no longer reach a situation matching %q: raise their count or the weight that draws it", pattern)
+		}
+	}
 }
 
 // runHistories runs the seeded histories of shape, or the one DWARF_HISTORY holds.
@@ -952,12 +1315,22 @@ func runHistories(t *testing.T, shape hShape) {
 		if h.Shape != shape {
 			t.Skipf("DWARF_HISTORY holds a %s history", h.Shape)
 		}
+		if os.Getenv("DWARF_HISTORY_MINIMIZE") != "" {
+			minimizeHistory(t, h)
+			return
+		}
 		runHistory(t, h, cov)
 		return
 	}
-	t.Cleanup(func() { cov.log(t) })
-	for _, seed := range historySeeds(t) {
-		h := generateHistory(shape, seed)
+	seeds, floored := historySeeds(t, shape)
+	t.Cleanup(func() {
+		cov.log(t)
+		if floored && !t.Failed() {
+			checkFloor(t, shape, cov)
+		}
+	})
+	for _, seed := range seeds {
+		h, _ := generateHistory(shape, seed)
 		t.Run("seed="+strconv.FormatUint(seed, 10), func(t *testing.T) {
 			t.Parallel()
 			runHistory(t, h, cov)
