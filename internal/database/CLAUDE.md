@@ -74,13 +74,17 @@ storage layer), so it behaves as the matching PG major version - verify with `EX
 so a dwarf shard on Limitless is double-sharded, and its distributed planner is unknown territory. **Do not
 assume; `EXPLAIN` on the actual target.**
 
-**MySQL / MariaDB - supported, expect tuning.** InnoDB at default `REPEATABLE READ` takes next-key (row + gap) locks
-on every secondary-index touch; two concurrent flow creations on a shard can deadlock on overlapping index ranges.
-`createWithGraph` retries on `sequel.IsLockContentionError`, hiding most, but a sustained deadlock rate degrades
-throughput. To minimize: `transaction-isolation = READ-COMMITTED` (drops gap locks; the largest single reduction);
-`innodb_autoinc_lock_mode = 2` with `binlog_format = ROW`; `innodb_lock_wait_timeout` 5-10s; keep
-`innodb_deadlock_detect = ON`. Per-shard databases: every shard's DB must exist before startup (the engine migrates
-schema but does not `CREATE DATABASE`). MariaDB 10.5+ for `JSON`.
+**MySQL / MariaDB - supported, at `READ-COMMITTED`.** The deployment guide recommends
+`transaction-isolation = READ-COMMITTED`, and CI runs both servers at it (set globally before the suite). At the
+default `REPEATABLE READ`, InnoDB takes next-key (row + gap) locks on every secondary-index touch: a statement over a
+wide flow's steps that does not go through the flow index locks every flow on the shard (why `Terminate` names
+`idx_dwarf_steps_flow_id`), and the gap after the shard's newest flow holds a new flow's first step until `Terminate`
+commits (`engine/CLAUDE.md`). Every engine transaction reruns
+on lock contention through `sequel` (`IsLockContentionError`: 1213, a deadlock, and 1205, a lock-wait timeout), so a
+short `innodb_lock_wait_timeout` turns a long wait into a rerun; only the default has run against the engine. The
+engine needs no particular `innodb_autoinc_lock_mode`: it inserts MySQL successors row by row and reads each
+`LastInsertId` (`engine/successors.go`). Per-shard databases: every shard's DB must exist before startup (the engine
+migrates schema but does not `CREATE DATABASE`). MySQL 8.0+ or MariaDB 10.6+, for the `SKIP LOCKED` archiving uses.
 
 **MariaDB has two driver names, and every MySQL branch must answer to both.** sequel reports `mariadb` for a database
 opened with the `mariadb` driver name or a `mariadb://` URL, and `mysql` for a MariaDB opened from a DSN in the MySQL
@@ -92,23 +96,18 @@ which then has no tables. A switch whose `default` arm is the MySQL form needs n
 **SQL Server.** Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and
 near-zero deadlock risk. No other tuning mandatory.
 
-**SQLite - testing and single-instance dev only.** Single-writer means deadlocks are structurally impossible (writes
-serialize) but throughput tops out at one transaction at a time. Used automatically by `NewEngineUnderTest` with an empty DSN.
-The injected `busy_timeout` keeps workers from immediately failing on `SQLITE_BUSY` during fan-out; do not remove it.
-Do not run SQLite in production.
+**SQLite - one replica at a modest flow rate.** Single-writer means deadlocks are structurally impossible (writes
+serialize) but throughput tops out at one transaction at a time. Supported in production for one replica on a file
+with write-ahead logging; used in memory by `NewEngineUnderTest` with an empty DSN. `sequel` injects a `busy_timeout`
+(2,000 ms unless the DSN sets one), which keeps workers from failing at once on `SQLITE_BUSY` during fan-out.
 
 ## Sharding guidance & topology
 
-Registering multiple shards with `SetShard(ShardSpec{Index, DSN, ...})` partitions flows across databases (or schemas). Shard count
-should equal or exceed steady-state concurrent flow-creating threads divided by the per-shard write contention the
-engine tolerates. Rough sizing:
-
-| Engine | Concurrent INSERT/sec per shard before contention | Suggested shards |
-|---|---|---|
-| PostgreSQL | 1000+ | 1-4 |
-| SQL Server (RCSI) | 500-1000 | 2-4 |
-| MariaDB/MySQL (RC) | 200-500 | 4-8 |
-| MariaDB/MySQL (RR) | 50-200 | 8-16 |
+Registering multiple shards with `SetShard(ShardSpec{Index, DSN, ...})` partitions flows across databases (or schemas).
+Size the shard count from measured per-shard throughput: one 32 vCPU PostgreSQL shard sustains about 18,000 steps/s
+of steps carrying little state, and shards add throughput linearly (four ran 3.87x one); once steps carry state,
+throughput follows the payload bytes each step writes. The rates by payload size are on
+[Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/); no other dialect is measured at that scale.
 
 The shard set is fixed for the engine's life (`SetShard` is construction-time only); changing it requires a
 coordinated restart of every replica - see `engine/CLAUDE.md` §"Database Sharding" for why (flow keys encode the

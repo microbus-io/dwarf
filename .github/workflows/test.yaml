@@ -91,6 +91,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # The deployment guide recommends READ-COMMITTED, so the suite runs at it. A service container takes no server
+      # arguments, so the level is set globally, for every connection the tests open.
+      - name: Set READ-COMMITTED
+        run: |
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -proot \
+            -e "SET GLOBAL transaction_isolation = 'READ-COMMITTED'"
+          level=$(docker exec ${{ job.services.mysql.id }} mysql -uroot -proot -N -B \
+            -e "SELECT @@GLOBAL.transaction_isolation")
+          test "$level" = READ-COMMITTED
       - name: Test (MySQL)
         run: go test ./... -count=1 -timeout 10m
 
@@ -119,6 +128,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # READ-COMMITTED, as for MySQL. MariaDB 10.6 names the variable tx_isolation.
+      - name: Set READ-COMMITTED
+        run: |
+          docker exec ${{ job.services.mariadb.id }} mariadb -uroot -proot \
+            -e "SET GLOBAL tx_isolation = 'READ-COMMITTED'"
+          level=$(docker exec ${{ job.services.mariadb.id }} mariadb -uroot -proot -N -B \
+            -e "SELECT @@GLOBAL.tx_isolation")
+          test "$level" = READ-COMMITTED
       - name: Test (MariaDB)
         run: go test ./... -count=1 -timeout 10m
 
