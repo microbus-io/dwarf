@@ -238,6 +238,12 @@ func (f *Flow) FlowKey() string {
 // StepKey returns the external key of the step this task is executing, in the form
 // "{shard}-{hour}-{flowID}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
 // (e.g. Step) for the task's own step. Empty when called outside a dispatched task.
+//
+// The key is the same on every execution of the step - a Retry, or a re-run after a crash or an expired claim -
+// so it is the idempotency key for a side effect the step makes: pass it to a downstream that deduplicates by it,
+// or record it in the same transaction as the effect. A new step (a loop through Goto), a Fork, a Continue and a
+// new flow each have a new key, and their effects happen again. See
+// https://docs.dwarf.run/building-workflows/tasks/#idempotency.
 func (f *Flow) StepKey() string {
 	return f.stepKey
 }

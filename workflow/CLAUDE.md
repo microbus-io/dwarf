@@ -26,6 +26,12 @@ is read alongside the claim/read in `processStep` (added to the RETURNING/OUTPUT
 format carries them), so a remote task reached over a transport sees the same identity as an in-process one. Empty when
 read outside a dispatched task.
 
+**The step key is the same on every execution of its step**, since its token is the step row's, written when the row
+is inserted, never the claim's. That is what makes it the public idempotency key, so do not fold anything
+per-execution into it (the lease generation, the attempt). Pinned by the engine's
+`TestStepKey_ARetryAfterALostResponseKeepsTheKey` and `TestStepKey_AStaleWorkerAndItsReplacementShareTheKey`, both of
+which fail with the lease generation appended.
+
 ### State Model
 
 Each step has three JSON columns: `state` (input snapshot), `changes` (output delta), `interrupt_payload` (from
