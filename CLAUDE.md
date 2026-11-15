@@ -87,7 +87,7 @@ Further guidance within each:
 
 ## Where the design docs live
 
-This root file is always loaded and holds only the conventions, core vocabulary, and orientation below. The design
+This root file is always loaded and holds only the conventions, core vocabulary, orientation and release steps below. The design
 rationale lives in package `CLAUDE.md` files that load automatically when you read a file in that package - **read the
 matching one before working there:**
 
@@ -284,3 +284,24 @@ Recovery/exploration: Fork clones a closed flow up to a chosen step into a NEW f
 5. A closed flow is never re-run in place. To re-run from a chosen step (optionally with state overrides),
    `Fork` clones it into a new flow. A task can re-run *itself* in place via `flow.Retry` while still running.
 
+## Preparing a release
+
+The user tags and publishes a release; the agent prepares it. Work through these steps over the change set
+(`git log <previous tag>..HEAD`) and record each one's outcome, or why it did not apply, in
+`tmp/release/<tag>.checklist.md` (gitignored), beside the notes:
+
+1. **The version.** A PATCH carries no migration and no change to what replicas write to or expect from the shared
+   tables; anything that does is a MINOR at least (`internal/migrations/CLAUDE.md`, "The migration sequence").
+   Before a PATCH, `git diff <its minor's .0 tag> -- internal/migrations` is empty.
+2. **The migrations.** No file the previous tag shipped changed, numbers only appended, and a new file ran on a
+   database the previous tag made and filled, on every dialect. A change touching a stored meaning or replica
+   coordination ran beside the previous release on one database. Before v1.0.0 only the sequence name is held,
+   so the notes give the statements an existing database needs.
+3. **The wire format.** `workflow/testdata/carrier` is unchanged, or `CarrierVersion` was raised with it
+   (`workflow/CLAUDE.md`, "The carrier's wire format").
+4. **CI on the commit to be tagged:** the five dialect jobs and govulncheck pass.
+5. **The notes,** `tmp/release/<tag>.md` and its title in `tmp/release/<tag>.title`: what the release adds and
+   changes, the upgrade path from the previous release and whether it needs a maintenance window. They state what
+   shipped, not the tests or measurements behind it.
+6. **The docs site** (`../cloudflarepages/docs.dwarf.run`) covers the change set, a new database privilege
+   included, and its release-notes mirror is re-run once the release is published (that site's `CLAUDE.md`).
