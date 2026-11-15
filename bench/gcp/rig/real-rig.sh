@@ -112,11 +112,16 @@ rttgate() { local vm try v; for vm in "$EA" "$EB"; do
       log "  rtt $vm: $v ms - over $RTT_MAX, try $try"; (( try == 3 )) && { log "RTT GATE FAILED: $vm"; exit 1; }; sleep 30
     done; done; }
 # both <tag> <start epoch> <bench args...>: the same run on both replicas, each with half of the cap and creators
-# folded into the args by the caller, waiting for both to finish.
-both() { local tag=$1 start=$2 vm; shift 2
+# folded into the args by the caller, waiting for both to finish; a bench that did not exit 0 stops the rig. The wait
+# is for the tag's .done marker, so the marker and artifact a tag already has are removed first: left in place, a
+# reused tag returns at once, and the caller reads the last run's artifact and drops the database the new bench is
+# about to open.
+both() { local tag=$1 start=$2 vm x; shift 2
   for vm in "$EA" "$EB"; do
-    vmssh "$vm" "${RUN_ENV:-} setsid nohup ./g-run.sh $tag-$vm $start '$(dsn "$RUN_DB")' $* > /dev/null 2>&1 < /dev/null &"; done
-  for vm in "$EA" "$EB"; do until vmdone "$vm" "out/$tag-$vm.done"; do late; sleep 30; done; done; }
+    vmssh "$vm" "rm -f out/$tag-$vm.done out/$tag-$vm.json; ${RUN_ENV:-} setsid nohup ./g-run.sh $tag-$vm $start '$(dsn "$RUN_DB")' $* > /dev/null 2>&1 < /dev/null &"; done
+  for vm in "$EA" "$EB"; do until vmdone "$vm" "out/$tag-$vm.done"; do late; sleep 30; done; done
+  for vm in "$EA" "$EB"; do x=$(vmssh "$vm" "cat out/$tag-$vm.done" | tail -1)
+    [[ $x == "exit 0" ]] || { log "BENCH FAILED: $tag-$vm ${x:-?}: $(vmssh "$vm" "tail -1 out/$tag-$vm.log" | tail -1)"; exit 1; }; done; }
 steps() { vmssh "$1" "python3 -c \"
 import json
 r = json.load(open('out/$2.json'))['results'][0]
@@ -137,15 +142,15 @@ rttgate
 # ---- 0: draw check
 for round in $(seq 0 "$REDRAWS"); do
   authok; late; RUN_DB=dwarf_real_draw; fresh $RUN_DB
-  start=$(( $(date +%s) + 30 ))
+  start=$(( $(date +%s) + 30 )) tag=draw-r$round # a tag per round, so each round's log and artifact are kept
   log "draw check on $DB"
-  RUN_ENV="WARMUP=1m WINDOW=6m" both draw "$start" -workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000
-  a=$(steps "$EA" "draw-$EA"); b=$(steps "$EB" "draw-$EB"); total=$(( ${a%% *} + ${b%% *} ))
-  for vm in "$EA" "$EB"; do gc compute scp --zone=$ZONE "$vm":~/out/draw-$vm.json "$OUT/" >/dev/null 2>&1; done
+  RUN_ENV="WARMUP=1m WINDOW=6m" both $tag "$start" -workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 128 -max-outstanding 1000
+  a=$(steps "$EA" "$tag-$EA"); b=$(steps "$EB" "$tag-$EB"); total=$(( ${a%% *} + ${b%% *} ))
+  for vm in "$EA" "$EB"; do gc compute scp --zone=$ZONE "$vm":~/out/$tag-$vm.json "$OUT/" >/dev/null 2>&1; done
   drop $RUN_DB
   sleep 150 # Cloud Monitoring lands CPU a few minutes late
   x=""; for t in 1 2 3 4 5; do
-    x=$(DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 STEPS=$total "$R/bench/gcp/dbcpu.sh" "$OUT/draw-$EA.json" 2>&1 | tail -1)
+    x=$(DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 STEPS=$total "$R/bench/gcp/dbcpu.sh" "$OUT/$tag-$EA.json" 2>&1 | tail -1)
     echo "$x" | grep -q core-ms && break; sleep 60; done
   cms=$(echo "$x" | sed -n 's/.* \([0-9.]*\) core-ms\/step.*/\1/p'); echo "$DB $total $x" >> "$OUT/draw.txt"
   log "  $DB: $total steps/s, ${cms:-?} core-ms/step"
