@@ -271,6 +271,7 @@ const (
 
 	// Reaping and archiving:
 	CheckpointReapBatchLocked      = "reapBatchLocked"      // a janitor batch has locked its due roots, inside its transaction
+	CheckpointReapDeleted          = "reapDeleted"          // a move or a deletion chunk has run its deletes, inside its transaction, before its commit
 	CheckpointReapBeforeRootDelete = "reapBeforeRootDelete" // a chunked deletion is about to recheck and delete its root
 	CheckpointReapChunkDone        = "reapChunkDone"        // a chunk of a chunked deletion has committed and been counted
 	CheckpointReapStageChunkDone   = "reapStageChunkDone"   // a staging chunk, or the publication, has committed

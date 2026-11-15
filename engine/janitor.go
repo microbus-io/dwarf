@@ -85,20 +85,28 @@ func (e *Engine) addJanitorJobs(j *janitor.Janitor, shard int, archive *archiver
 		driver = sh.DB().DriverName()
 	}
 	j.AddJob(janitor.JobArchiveRetention, janitor.NewArchiveRetention(archive, e.retentionDays))
+	stageRows := s.stageRows
+	if (driver == "mssql" || driver == "mysql" || driver == "mariadb") && stageRows > s.batchRows {
+		// A tree larger than a batch, moved in one transaction, can lock a whole live table, which every dispatch then
+		// waits for: on SQL Server its statements take more row locks than SQL Server keeps before escalating; on MySQL
+		// and MariaDB, when the tree is a large share of the table, they scan all of it at REPEATABLE READ and lock
+		// every row and gap. Staged, every statement stays within a batch and reads by bounded lists.
+		stageRows = s.batchRows
+	}
 	of := fastJobs(fastArchivingJobs, driver)
 	for k := 1; k <= of; k++ {
 		fa := janitor.NewFastArchiving(archive, e.retentionDays)
 		fa.SetShare(k, of)
 		fa.SetGrace(s.grace)
 		fa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-		fa.SetStaging(s.stageRows, s.stageBytes)
+		fa.SetStaging(stageRows, s.stageBytes)
 		fa.SetQuietMargin(!s.noQuietMargin)
 		j.AddJob(janitor.ShareName(janitor.JobFastArchiving, k), fa)
 		sa := janitor.NewSweepArchiving(fa, archive, e.retentionDays)
 		sa.SetGrace(s.grace)
 		sa.SetOverdue(s.overdue)
 		sa.SetBatch(s.batchRoots, s.batchRows, s.batchBytes)
-		sa.SetStaging(s.stageRows, s.stageBytes)
+		sa.SetStaging(stageRows, s.stageBytes)
 		sa.SetQuietMargin(!s.noQuietMargin)
 		j.AddJob(janitor.ShareName(janitor.JobSweepArchiving, k), sa)
 	}

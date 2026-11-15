@@ -175,6 +175,7 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 		if d == nil {
 			removed.unarchived = removed.flows - published
 		}
+		seams.Checkpoint(ctx, diagnostics.CheckpointReapDeleted)
 		return nil
 	})
 	if err != nil {

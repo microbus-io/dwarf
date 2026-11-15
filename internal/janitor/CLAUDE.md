@@ -221,14 +221,23 @@ move - its root locks and the rechecks under them, the directory rows and the ar
 
 A batch of trees leaves the live tables in one transaction: moved into a day's archive tables, or deleted.
 
-- **Keep a statement under about 5,000 rows a table on SQL Server.** Past that, SQL Server may escalate the
-  statement's row locks to a lock on the whole table, and on `dwarf_steps` or `dwarf_flows` that holds every
-  dispatch until the transaction ends. The batch (4,000 rows), a chunk and Purge's marks (2,000 roots) stay under it.
-  **The exception, unverified:** a tree larger than a batch and under the staging threshold moves alone in one
-  transaction, up to 262,144 rows. Whether that escalates is not measured: move a tree of ~100,000 rows on SQL Server
-  under dispatch load and read `sys.dm_tran_locks` for an `OBJECT` lock on the live tables. If it does, disable
-  escalation on them (`LOCK_ESCALATION = DISABLE`, in the migration) or stage every tree over a batch there. Do not
-  raise the batch past ~5,000 rows without that check.
+- **On SQL Server, MySQL and MariaDB a tree larger than a batch is staged, never moved whole**: the engine sets
+  their staging threshold to the batch (`addJanitorJobs`). Moved in one transaction, such a tree locks the live
+  tables against every dispatch until the move commits. On SQL Server a statement that takes ~5,000 row locks on a
+  table escalates to an `X` lock on the whole table, and the move deletes a tree's steps in one statement and its
+  flows in another: a tree of 9,216 steps escalated on `dwarf_steps`, one of 8,193 flows on `dwarf_flows` as well. On
+  MySQL and MariaDB, with the tree a fifth of `dwarf_flows`, the planner scans the whole table for the copy and the
+  delete, and at REPEATABLE READ locks every row and gap of it. Measured with a tree of 4,097 flows and 9,216 steps
+  among 16,384 open flows (`TestRemoval_ALargeTreeLeavesTheTablesUnlocked`: the first transaction deleting the tree's
+  live rows is held open after its deletes, at `CheckpointReapDeleted`, while a flow runs beside it; it fails on all
+  three with the threshold left at 262,144). **Do not fix SQL Server by disabling escalation** (`LOCK_ESCALATION = DISABLE`): the move's
+  delete then takes page locks, and a neighbour's insert waits on one; forcing row locks as well (`WITH (ROWLOCK)`)
+  passes, but a tree at the 262,144-row threshold then holds a lock per row and index entry, on the order of a
+  million. **Keep a statement under about 5,000 rows a table there**: the batch (4,000 rows), a chunk and Purge's
+  marks (2,000 roots) do; do not raise the batch past it without rerunning the test on those dialects. A batch of
+  small trees is still one move, and on MySQL a batch that is a large share of a small live table can be scanned the
+  same way, for that short transaction (not measured). PostgreSQL locks only the rows it deletes and moves a tree up
+  to the staging threshold whole.
 - **The root lock is two-sided.** Every transaction that removes a tree, live or archived, locks its root first with
   the strength a `DELETE` takes (`lockRoots`: `FOR UPDATE`, or the `touch` flip), skipping a held root on PostgreSQL
   and MySQL. The engine's Fork locks its source root `FOR NO KEY UPDATE`, which conflicts with it, so a Fork and a
@@ -648,7 +657,8 @@ stamped for deletion with its attempt kept. The protocol:
 - **A published tree's live copy is fast deletion's** when a batch holds it, and otherwise sweep deletion's, in chunks:
   fast deletion passes a stamped tree larger than a batch, and its position is then past it.
 
-Staging is on past 256k rows or 128 MiB of payload by the engine's defaults (`engine/CLAUDE.md`). The engine and
+Staging is on past 256k rows or 128 MiB of payload by the engine's defaults, and past a batch on SQL Server, MySQL and
+MariaDB ("The move", above; `engine/CLAUDE.md`). The engine and
 fixtures suites exercise it on every tree with `DWARF_TESTING_STAGE_ROWS=1`.
 
 ## The archive attempt (`attempt.go`) and publication accounting

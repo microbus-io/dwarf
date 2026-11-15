@@ -224,7 +224,7 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 	}
 	var at chunkPos
 	var published int
-	err = h.Transact(ctx, func(tx *sequel.Tx) error {
+	chunk := func(tx *sequel.Tx) error {
 		deleted, done, at, published = removal{}, false, *pos, 0
 		if err := boundReads(ctx, tx); err != nil {
 			return err
@@ -362,6 +362,13 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 		}
 		deleted.flows += rows
 		done = true
+		return nil
+	}
+	err = h.Transact(ctx, func(tx *sequel.Tx) error {
+		if err := chunk(tx); err != nil {
+			return err
+		}
+		seams.Checkpoint(ctx, diagnostics.CheckpointReapDeleted)
 		return nil
 	})
 	if err != nil {

@@ -3788,7 +3788,9 @@ Each shard keeps a pair of archive tables per UTC day (the mechanism and its tra
   `reapBatchBytes`), sized to stay under about 0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the
   aim), with its roots one bound list of a length `database.IDList` pads to, and a large tree's chunk two lists of step
   ids (user); a tree past a batch but
-  under the staging threshold moves alone, in one longer transaction. `setStageRows`/`setStageBytes` replace the
+  under the staging threshold moves alone, in one longer transaction - on PostgreSQL and SQLite only: SQL Server,
+  MySQL and MariaDB stage every tree past a batch, since a whole move there locks the live tables
+  (`addJanitorJobs`; `internal/janitor/CLAUDE.md`, "The move"). `setStageRows`/`setStageBytes` replace the
   thresholds for the rig and the staging-on suites (below). The reads around a copy need nothing of their own: it is
   invisible until published, and a published tree is read from the archive
   (`TestStaged_ATreeArchivedInStagesReadsAsOne`).
