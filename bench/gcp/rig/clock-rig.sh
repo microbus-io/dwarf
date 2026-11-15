@@ -23,10 +23,12 @@
 #   fwd    +60 s at window minute 2; the clock is stepped back after the checks, on an idle server. Archive held off.
 #   back   -60 s at window minute 2 (leases outlive their tasks; durations read negative); restored after.
 #   both   +60 s then -60 s - the NTP correction coming back - with the archive on and 5-minute days
-#          (DWARF_TESTING_ARCHIVE_DAY=300), the run's start aligned so the forward step lands 30 s into a new day and
+#          (DWARF_TESTING_ARCHIVE_DAY=300s), the run's start aligned so the forward step lands 30 s into a new day and
 #          the backward one 40 s back into the day before it. The invariant checks see the live tables only; the
 #          per-table history check reads the archive's days too.
 #   fwd5m  (opt-in) +300 s: past the peers' straggler window, as a resumed or migrated VM can jump.
+# REUSE=1 runs the arms on the rig a killed run left up (kill -9 in its teardown grace), skipping creation and setup;
+# FWMADE=1 if that run created the firewall rule, so this one deletes it at teardown.
 # Pass: no flow failed, terminated or left running; no `loop` check failed (artifact errors 0, every completed flow's
 # history 10 long); the invariant checks pass; dwarf_steps_unwedged and dwarf_steps_write_failed 0 - and in the
 # stepped arms, steps claimed more than once (lease_seq > 1), so the fence had something to fence.
@@ -39,7 +41,7 @@ PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a}
 OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT"
 DBVM=dwarf-$NAME-db ENG=dwarf-$NAME-m
 HARD=$(( $(date +%s) + 240 * 60 ))
-FWRULE=dwarf-bench-pg FWMADE=""
+FWRULE=dwarf-bench-pg FWMADE=${FWMADE:-}
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 gc() { gcloud --project="$PROJECT" "$@"; }
 authok() { local i; for i in $(seq 1 60); do gcloud auth print-access-token >/dev/null 2>&1 && return 0
@@ -64,6 +66,11 @@ pass=$(cat "$S/dbpass")
 [ -s "$S/$BIN" ] && [ -s "$S/$BIN.riginv" ] || { log "missing $S/$BIN or $S/$BIN.riginv"; exit 1; }
 authok
 
+if [ -n "${REUSE:-}" ]; then
+  DBIP=$(gc compute instances describe "$DBVM" --zone=$ZONE --format='value(networkInterfaces[0].networkIP)') &&
+    [ -n "$DBIP" ] || { log "REUSE: no $DBVM"; exit 1; }
+  log "reusing $DBVM ($DBIP) and $ENG"
+else
 # PostgreSQL from the engine VM: the rig network's private range (the ssh rule admits only this workstation).
 if ! gc compute firewall-rules describe "$FWRULE" >/dev/null 2>&1; then
   gc compute firewall-rules create "$FWRULE" --network=dwarf-bench-net --allow=tcp:5432 --source-ranges=10.0.0.0/8 \
@@ -104,6 +111,7 @@ done
 [ -n "$deployed" ] || { log "ENGINE VM DEPLOY FAILED"; exit 1; }
 vmssh "$ENG" 'sudo apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client jq >/dev/null 2>&1; command -v psql && command -v jq' >/dev/null ||
   { log "no psql or jq on $ENG"; exit 1; }
+fi
 
 adm() { vmssh "$ENG" "psql '$1' -X -q -At -F' ' -c \"$2\""; }
 dsn() { echo "postgres://postgres:${pass}@$DBIP:5432/$1?sslmode=disable"; }
@@ -127,6 +135,7 @@ ck_arm() {
   local db="dwarf_${tag//-/_}" start now ev net=0
   authok; late
   fresh "$db"
+  vmssh "$ENG" "rm -f out/$tag.done"
   now=$(date +%s); start=$(( now + 30 ))
   [ -n "${ALIGN:-}" ] && start=$(( start + ((30 - start % ALIGN) % ALIGN + ALIGN) % ALIGN ))
   log "run $tag (window ${win} min, steps: ${events:-none}, env: ${RUN_ENV:-none}): $* (start $(date -r $start '+%H:%M:%S'))"
@@ -135,9 +144,15 @@ ck_arm() {
   vmssh "$ENG" "${RUN_ENV:-} WINDOW=${win}m setsid nohup ./g-run.sh $tag $start '$(dsn "$db")' $* > /dev/null 2>&1 < /dev/null &"
   for ev in $events; do
     while (( $(date +%s) < start + ${ev%%:*} )); do sleep 1; done
+    # A run that already ended (a refused flag, a crash) gets no step: the arm is void, and its log says why.
+    if [ "$(vmssh "$ENG" "test -f out/$tag.done && echo y || echo n")" = y ]; then
+      log "  run $tag ENDED before its step at ${ev%%:*} s: $(vmssh "$ENG" "cat out/$tag.done; grep -m2 -iE 'error|must|invalid|panic' out/$tag.log")"
+      break
+    fi
     step "${ev#*:}"; net=$(( net + ${ev#*:} ))
   done
-  until vmssh "$ENG" "test -f out/$tag.done"; do late; sleep 20; done
+  # vmssh retries a command that fails, so a poll that must fail until the run ends answers instead.
+  until [ "$(vmssh "$ENG" "test -f out/$tag.done && echo y || echo n")" = y ]; do late; sleep 20; done
   log "run $tag done: $(vmssh "$ENG" "cat out/$tag.done")"
   vmssh "$ENG" "./ck-check.sh $tag '$(dsn "$db")' 10" | sed 's/^/    /'
   adm "$(dsn "$db")" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-$tag.txt" 2>&1
@@ -153,7 +168,7 @@ for arm in ${ARMS:-ctl fwd back both}; do
     ctl) RUN_ENV=$LIVE ck_arm ck-ctl 8 "" $LOAD ;;
     fwd) RUN_ENV=$LIVE ck_arm ck-fwd 8 "240:+60" $LOAD ;;
     back) RUN_ENV=$LIVE ck_arm ck-back 8 "240:-60" $LOAD ;;
-    both) RUN_ENV="DWARF_TESTING_ARCHIVE_DAY=300" ALIGN=300 ck_arm ck-both 11 "240:+60 530:-60" $LOAD ;;
+    both) RUN_ENV="DWARF_TESTING_ARCHIVE_DAY=300s" ALIGN=300 ck_arm ck-both 11 "240:+60 530:-60" $LOAD ;;
     fwd5m) RUN_ENV=$LIVE ck_arm ck-fwd5m 8 "240:+300" $LOAD ;;
     *) log "unknown arm $arm" ;;
   esac

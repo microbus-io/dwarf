@@ -675,8 +675,8 @@ missing, with a note).
 
 **Four archive settings come from the environment, for the rig only.** The bench reads them (`archiveOverrides`,
 `overrides.go`) and sets them on every replica before Startup through `internal/accessors`, since the engine reads no
-environment and a bench binary's test seams are inert: `DWARF_TESTING_ARCHIVE_DAY` shortens the archive's day (whole
-seconds), so one run sees day rollovers, several day tables and retention drops under load;
+environment and a bench binary's test seams are inert: `DWARF_TESTING_ARCHIVE_DAY` shortens the archive's day (a Go
+duration of whole seconds, `300s`; a bare `300` is refused and the run exits at once), so one run sees day rollovers, several day tables and retention drops under load;
 `DWARF_TESTING_ARCHIVE_GRACE` sets how long a closed flow waits before it is archived (a Go duration, `0s` and up), so
 an archived run's warmup can be short or a run can hold closed flows live longer. `DWARF_TESTING_STAGE_ROWS` sets the
 size, in rows, above which a closed tree is archived in stages (whole rows, `0` off), and `DWARF_TESTING_STAGE_BYTES`
