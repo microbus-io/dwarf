@@ -684,7 +684,11 @@ func placementWeight(spec ShardSpec) float64 {
 // that dispatches nothing picks among every non-cordoned shard. Any declared weight other than 1 drops the
 // preference and places over every non-cordoned shard: when each replica dispatches a subset of the shards,
 // preferring them would send each shard its own dispatchers' creates whatever its Weight.
-func (e *Engine) pickShard() (int, error) {
+//
+// A shard this replica cannot read (blindOn) is left out, as a cordoned one is, until its next good read, and each
+// placement that left one out is counted against it. When every candidate is blind the pick ignores blindness, so a
+// fault on this replica's own side still finds somewhere to place.
+func (e *Engine) pickShard(ctx context.Context) (int, error) {
 	e.shardsLock.Lock()
 	specs := make([]ShardSpec, 0, len(e.shardSpecs))
 	for _, spec := range e.shardSpecs {
@@ -718,21 +722,37 @@ func (e *Engine) pickShard() (int, error) {
 	}
 	weights := make([]float64, len(specs))
 	total := 0.0
-	for _, dispatchedOnly := range passes {
-		for i, spec := range specs {
-			weights[i] = 0
-			if spec.Cordoned || (dispatchedOnly && !e.dispatchesOn(spec.Index)) {
-				continue
+	// leftOut is the pass's candidates excluded only for blindness; it stays empty unless a shard reads blind.
+	var leftOut []int
+	for _, skipBlind := range []bool{true, false} {
+		for _, dispatchedOnly := range passes {
+			leftOut = leftOut[:0]
+			for i, spec := range specs {
+				weights[i] = 0
+				if spec.Cordoned || (dispatchedOnly && !e.dispatchesOn(spec.Index)) {
+					continue
+				}
+				if skipBlind && e.blindOn(spec.Index) {
+					leftOut = append(leftOut, spec.Index)
+					continue
+				}
+				weights[i] = placementWeight(spec)
+				total += weights[i]
 			}
-			weights[i] = placementWeight(spec)
-			total += weights[i]
+			if total > 0 {
+				break
+			}
 		}
 		if total > 0 {
 			break
 		}
+		leftOut = leftOut[:0]
 	}
 	if total == 0 {
 		return 0, errors.New("all shards are cordoned", http.StatusServiceUnavailable)
+	}
+	for _, shard := range leftOut {
+		e.metricPlacementSkipped(ctx, shard)
 	}
 	r := rand.Float64() * total
 	last := -1

@@ -58,6 +58,7 @@ type engineMetrics struct {
 	dbPhaseSeconds      metric.Float64Histogram
 	operationSeconds    metric.Float64Histogram
 	peerChanges         metric.Int64Counter
+	placementSkipped    metric.Int64Counter
 	flowsRemoved        metric.Int64Counter
 	flowsExpired        metric.Int64Counter
 	expireFailed        metric.Int64Counter
@@ -244,6 +245,7 @@ func (e *Engine) initMetrics() error {
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a partition that drains to empty between cycles admits the next step at once) and is what keeps a sequential chain from paying a cycle per hop.")
 	m.stepsClaimPreempted = ctr("dwarf_steps_claim_preempted", "Counts popped candidates skipped without a claim attempt because a sibling worker in this replica already had one in flight for that step - round trips SAVED, the counterpart to dwarf_steps_claim_lost. The refiller re-selects a step whose claim is uncommitted (the selection predicate reads committed state), so this rises with the scan rate rather than with the replica count. Compare the two: a healthy engine converts what would have been lost claims into skips.")
 	m.peerChanges = ctr("dwarf_peer_changes", "Counts times a shard's observed replica count MOVED, by shard. In a settled fleet this must be ZERO for the whole run: every increment past the initial join re-divides that shard's connection pool and re-seats every replica's residue class of step ids, so a nonzero rate means the fleet is churning and the two divisors are chasing it. The usual cause is not a real join or departure but a stale registry row - a replica that died without deleting its row inflates the count until it ages out, and a crash-loop with random ids accumulates them faster than that.")
+	m.placementSkipped = ctr("dwarf_placement_skipped", "Counts new flows placed on another shard because this replica could not read this one - its peer registry reads had stopped landing for two read cadences (dwarf_peer_blind_seconds) - by the shard left out. Zero in a healthy fleet. It rises steadily while a shard is down or hung. Short, frequent bursts mean a shard whose registry reads take about as long as the read cadence: it reads blind and readable in turn, so placement keeps leaving it out and taking it back.")
 	m.stepsClaimLost = ctr("dwarf_steps_claim_lost", "Counts claim attempts whose CAS matched no row - the step was already claimed by a peer, or left the claimable state (terminated, cancelled, resumed, parked) between selection and claim. The lease-contention signal: measured against dwarf_steps_executed it is the share of dispatch round trips that produced no work, and it rises with the replica count when replicas select overlapping candidates. Not an error - the step is simply someone else's - but a high ratio means the fleet is paying for round trips it cannot use.")
 
 	// The archive's instruments count work the janitors and the removals do anyway: none costs
@@ -594,6 +596,14 @@ func (e *Engine) metricPeerCountChanged(ctx context.Context, shardNum, from, to 
 		return
 	}
 	e.metrics.peerChanges.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
+}
+
+// metricPlacementSkipped counts one new flow placed elsewhere because this replica read the shard as blind.
+func (e *Engine) metricPlacementSkipped(ctx context.Context, shardNum int) {
+	if e.metrics == nil {
+		return
+	}
+	e.metrics.placementSkipped.Add(ctx, 1, metric.WithAttributes(shardAttr(shardNum)))
 }
 
 func (e *Engine) metricStepsRecovered(ctx context.Context, n int) {

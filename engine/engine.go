@@ -474,6 +474,10 @@ type ShardSpec struct {
 	// shards, in proportion to their weights; a flow placed on a shard its creating replica does not
 	// dispatch waits for that shard's dispatcher to pick it up. Give a larger database a larger weight in a
 	// mixed fleet.
+	//
+	// A shard the replica cannot currently read - no answer from it for about half a second - is left out of
+	// placement, whatever its weight, until it answers again; when no shard can be read, placement goes ahead
+	// over all of them. dwarf_placement_skipped counts the flows placed elsewhere.
 	Weight float64
 	// Cordoned excludes the shard from new-flow placement. Everything already resident proceeds
 	// normally: existing flows keep executing, and subgraph children, continuations (Continue),

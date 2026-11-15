@@ -728,7 +728,7 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 
 	e.dispatchFlag(2).Store(false)
 	for range 50 {
-		shard, err := e.pickShard()
+		shard, err := e.pickShard(context.Background())
 		assert.NoError(err)
 		assert.Equal(1, shard, "only the dispatched shard takes new flows")
 	}
@@ -736,7 +736,7 @@ func TestDispatchers_PlacementPrefersDispatchedShards(t *testing.T) {
 	e.dispatchFlag(1).Store(false)
 	seen := map[int]bool{}
 	for range 200 {
-		shard, err := e.pickShard()
+		shard, err := e.pickShard(context.Background())
 		assert.NoError(err)
 		seen[shard] = true
 	}
@@ -1041,7 +1041,7 @@ func TestDispatchers_RoleFlagsSurviveARestartUnderLoad(t *testing.T) {
 	wg.Go(func() {
 		for !stop.Load() {
 			e.dispatchesOn(1)
-			e.pickShard()
+			e.pickShard(context.Background())
 		}
 	})
 	for range 3 {
@@ -1252,7 +1252,7 @@ func TestDispatchers_WeightsOverrideTheOwnShardPreference(t *testing.T) {
 		}
 		counts := map[int]int{}
 		for range 4000 {
-			idx, err := e.pickShard()
+			idx, err := e.pickShard(context.Background())
 			assert.NoError(err)
 			counts[idx]++
 		}

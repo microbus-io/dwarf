@@ -92,6 +92,13 @@ func (e *Engine) sonarFor(shard int) *peers.Sonar {
 	return nil
 }
 
+// blindOn reports whether this replica's Sonar on one shard has gone blind: its registry reads have stopped landing
+// for longer than the blindness grace. False for a shard with no Sonar, which is placed as if healthy.
+func (e *Engine) blindOn(shard int) bool {
+	s := e.sonarFor(shard)
+	return s != nil && s.Blind()
+}
+
 // replicasOn is how many replicas are registered on one shard - what the fleet-limit check prices and the
 // peer gauge and change counter report. (The dispatcher slots are derived from the ranked candidates, not
 // from this.) One before the Sonars exist, which is

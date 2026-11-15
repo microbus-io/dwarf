@@ -4502,6 +4502,31 @@ operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 
+**A shard this replica cannot read is left out of placement while its Sonar is blind** (`blindOn`, the Sonar's own
+`Blind`: no good registry read for two cadences). It is back on the first good read, and when every candidate is blind
+the pick ignores blindness rather than fail, so a fault on this replica's own side still finds somewhere to place.
+Each placement that left a blind shard out counts against it in `dwarf_placement_skipped{shard}`.
+- **What it is for: a refused or hung shard**, which reads blind within two cadences (about half a second at the
+  production 250 ms) and stays blind until it answers. The `Create` calls placed on it before then still fail or wait.
+- **Blindness outranks the dispatched-shard preference** (Dispatchers, above). A replica whose own shards read blind
+  places on shards it does not dispatch, through their two-connection reader pools, and each such flow's first step
+  waits a dispatcher's scan.
+- **For a slow shard it is a latency fuse, which the rule against steering by latency above warns about.** A pass's
+  duration includes this replica's own wait for a turn and a connection, so a shard reads blind briefly whenever one
+  pass outlasts the cadence (a lone slow pass) or 1.75 cadences in a row (sustained; `internal/peers/CLAUDE.md`, "Two
+  cadences"). At the production cadence that is a pass slower than about 250 ms, which a beat pass of two round trips
+  reaches at a round trip of about 125 ms. Exclusion of such a shard is partial - only while each slow pass is in
+  flight - and can flap at the read cadence. Accepted to be watched rather than designed around (user, 2026-11-14):
+  short, frequent bursts in `dwarf_placement_skipped` are its signature. The impaired-shard test's slow arm reads
+  blind at the test cadence (50 ms); that proxy's delay would not trip the production one.
+- **Read the Sonar's `Blind`, never a threshold of the engine's own:** blindness also switches the shard's partition
+  off, and two thresholds would disagree about one shard.
+- **A retry on `Create`'s connection error** would cover the first half-second, but only with proof that the error
+  came before `COMMIT`: sequel's `Transact` reports a lost `COMMIT` like any other failure, and a retry after one
+  places a second flow.
+
+Pinned by `TestPeerFault_PlacementLeavesOutABlindShard` and `impairedshard_test.go`.
+
 **The lists are cross-shard top-Ns, named by a flow's state, each reading one side of where flows are kept**
 (`query.go`). Each table they read on each shard returns its own first `Limit` in the list's order, and the engine
 merges the shards in Go (`mergeByTime`) and keeps the first `Limit`. Both are strict: any shard error fails the whole
@@ -4582,9 +4607,9 @@ designed but deliberately deferred; until then the set is fixed per process.
 slows or stops answering one of two shards). The healthy shard's dispatch, Create, Await, Snapshot and History keep
 their pace, and the replica's goroutines and crew stay where they were: each shard's piston, janitor and turnstile
 are its own, and an impaired shard's piston stops refilling its partition, so the workers it can tie up are bounded by
-what was cached. Four things couple the shards, each open rather than settled:
-- **Placement is health-blind:** a `Create` placed on the impaired shard fails or waits, so with two shards about
-  half of them do. `ShardSpec.Cordoned` is the operator's lever, at a restart.
+what was cached. New flows route around a refused or hung shard once this replica's Sonar reads it as blind
+(placement, above), and around a slow one only while a slow pass makes it read blind. Three things still couple the
+shards, each open rather than settled:
 - **The lists read every shard:** `ListOpen` fails whole when one shard does, waiting out its ctx on a hung one.
   `ShardInfo` reports each shard on its own.
 - **Startup opens and migrates every shard:** it fails at once against a refused shard and waits without bound on a

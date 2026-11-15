@@ -316,7 +316,7 @@ func TestPickShard_WeightsAtTheBoundKeepTheirRatio(t *testing.T) {
 	const draws = 20000
 	counts := map[int]int{}
 	for range draws {
-		shard, err := e.pickShard()
+		shard, err := e.pickShard(context.Background())
 		assert.Must(assert.NoError(err))
 		counts[shard]++
 	}

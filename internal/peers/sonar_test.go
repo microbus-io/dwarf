@@ -700,6 +700,34 @@ func TestPeers_PartitionFailsOpenWhenBlind(t *testing.T) {
 	assert.False(ok, "absent from the roster: decline rather than guess")
 }
 
+// TestPeers_BlindIsThePartitionsGrace pins that Blind turns true exactly when Partition stops splitting work, so an
+// owner that acts on blindness shares the one threshold, and that a good reading clears it.
+func TestPeers_BlindIsThePartitionsGrace(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	fleet := []peer{
+		{engineID: 10, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+		{engineID: selfID, seenAgeMs: 100, dispatchAgeMs: 100, working: true},
+	}
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.Blind())
+
+	r.clk.advance(2 * r.s.scan)
+	_, _, ok := r.s.Partition()
+	assert.True(ok)
+	assert.False(r.s.Blind(), "still inside the grace")
+
+	r.clk.advance(r.s.scan)
+	_, _, ok = r.s.Partition()
+	assert.False(ok)
+	assert.True(r.s.Blind(), "past the grace, with the partition")
+
+	r.s.observe(ctx, fleet, nil)
+	assert.False(r.s.Blind(), "a good reading ends it")
+}
+
 // TestPeers_AReadingPublishesThePartitionOnTheShard pins the copy of the work partition the shard's other actors
 // read: nothing before the first reading, Partition's pair after a good one, and no class at once when a reading
 // does not divide the work. Its expiry is the shard's own (internal/database).

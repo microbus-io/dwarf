@@ -588,7 +588,7 @@ func TestPoolSizing_PickShard(t *testing.T) {
 
 	counts := map[int]int{}
 	for range 10000 {
-		idx, err := e.pickShard()
+		idx, err := e.pickShard(context.Background())
 		assert.NoError(err)
 		counts[idx]++
 	}
@@ -607,7 +607,7 @@ func TestPoolSizing_AllCordoned(t *testing.T) {
 	e := NewEngine()
 	assert.NoError(e.SetShard(ShardSpec{Index: 1, Cordoned: true}))
 	assert.NoError(e.SetShard(ShardSpec{Index: 2, Cordoned: true}))
-	_, err := e.pickShard()
+	_, err := e.pickShard(context.Background())
 	assert.Error(err)
 }
 
@@ -696,7 +696,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	// empty slice.
 	e := NewEngine()
 	e.SetHost(hosts.NewMux())
-	_, err := e.pickShard()
+	_, err := e.pickShard(context.Background())
 	if assert.Error(err) {
 		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
 	}
@@ -720,7 +720,7 @@ func TestPoolSizing_NoOpenShardsIs503(t *testing.T) {
 	assert.NoError(err) // sanity: it works while live
 	assert.NoError(e2.Shutdown(ctx))
 
-	_, err = e2.pickShard()
+	_, err = e2.pickShard(context.Background())
 	if assert.Error(err) {
 		assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
 	}

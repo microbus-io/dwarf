@@ -483,6 +483,12 @@ func (s *Sonar) BlindFor() time.Duration {
 	return max(0, s.now().Sub(*s.lastGood.Load()))
 }
 
+// Blind reports whether the registry has gone unread for longer than the blindness grace, the test Partition
+// applies. It is evaluated at the call, so it turns true while a read is still hanging.
+func (s *Sonar) Blind() bool {
+	return s.blind(s.now())
+}
+
 // Join announces this replica and returns with every getter seeded. It BLOCKS for two scan intervals, and
 // that wait is the point rather than an implementation detail: it is what keeps a join from exceeding the
 // shard's connection budget even momentarily.

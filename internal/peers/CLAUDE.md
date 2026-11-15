@@ -38,15 +38,18 @@ registration repair exists (below) and why it cannot be left to the beat.
 way out — its context is cancelled by then, so the DELETE would fail — and `Run` having returned is itself
 the guarantee that no beat follows.
 
-**The API is eighteen calls, and keeping it that small is a standing constraint.** Four inputs (`New`, which
+**The API is nineteen calls, and keeping it that small is a standing constraint.** Four inputs (`New`, which
 takes the shard and the owner's `diagnostics.Diags`, `SetProfile`, `SetCut`, `SetEvidence`), five lifecycle calls (`Join`,
-`Run`, `Withdraw`, `Leave`, `SetDraining`), seven published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
-`Draining`, `Partition`, `BlindFor`), one knob (`SetCadence`), and one read for the owner (`StoredOrderingSeq`).
+`Run`, `Withdraw`, `Leave`, `SetDraining`), eight published facts (`Replicas`, `Rank`, `Standing`, `InCut`,
+`Draining`, `Partition`, `BlindFor`, `Blind`), one knob (`SetCadence`), and one read for the owner (`StoredOrderingSeq`).
 `SetCut` earns its place because the cut needs the
 shard's index and the slot rule, which are the owner's, while applying it has to happen here: the hold that
 makes entering the cut wait a reading needs the previous raw reading, which only the Sonar has.
 `StoredOrderingSeq` earns its place the same way: which ordering value a restarted replica returns with is a
 choice across shards, which only the owner can make, while the row it reads is this package's.
+`Blind` earns its place beside `BlindFor` because an owner that acts on blindness must use this package's grace:
+from `BlindFor` alone it would hold a second copy of the two-cadence rule, free to drift from the one the partition
+applies.
 
 The windows and the beat are **constants with plain fields behind them**, not setters, because they are
 this package's policy — derived from which errors are safe in which direction rather than from anything an
@@ -298,10 +301,11 @@ to prevent, re-entered through a new door. Regrowth at three readings is already
 
 `blind` is "the last successful read is older than **two** scan intervals," derived rather than configured:
 one interval is a single missed reading, which a healthy Sonar meets on any transient error, while two
-means the readings have actually stopped. **One threshold serves all three consumers** — it disables
-partitioning, it interrupts the prune's healthy run, and it withholds a fall in the replica count — so a
-gap counts against all of them or none. An own row that is not fresh (stale or missing) also interrupts the
-prune's healthy run, and must: beats
+means the readings have actually stopped. **One threshold serves every consumer** — it disables
+partitioning, it interrupts the prune's healthy run, it withholds a fall in the replica count, and, read through
+`Blind`, it leaves the shard out of the engine's new-flow placement (`engine/CLAUDE.md`) — so a gap counts against
+all of them or none (`Blind` against the partition: `TestPeers_BlindIsThePartitionsGrace`). An own row that is not
+fresh (stale or missing) also interrupts the prune's healthy run, and must: beats
 failing fleet-wide while reads succeed age every peer past the straggler age with no gap at all, and a patience
 that ran on through that would have every replica delete every other's row (pinned by
 `TestPeers_StaleOwnRowRestartsThePrunePatience`).

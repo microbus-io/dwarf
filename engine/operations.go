@@ -119,7 +119,7 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		return "", errors.New("invalid workflow graph %s: %v", workflowURL, verr, http.StatusBadRequest)
 	}
 
-	shardNum, err := e.pickShard()
+	shardNum, err := e.pickShard(ctx)
 	if err != nil {
 		return "", errors.Trace(err)
 	}

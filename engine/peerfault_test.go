@@ -26,6 +26,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // These drive the peer registry's failure modes against a REAL assembled engine. internal/peers pins the
@@ -158,6 +159,82 @@ func TestPeerFault_BlindnessIsPerShard(t *testing.T) {
 	assert.Equal(shareOf(2), db1.DB.Stats().MaxOpenConnections, "the blind shard holds its last good reading")
 	assert.Equal(2, e.replicasOn(1))
 	assert.Equal(1, e.replicasOn(2))
+}
+
+// awaitBlindness waits for passes of a shard's Sonar until its blindness reads as want.
+func awaitBlindness(t *testing.T, e *Engine, shard int, want bool) {
+	t.Helper()
+	pass := diagnostics.Join(diagnostics.CheckpointPeerPass, strconv.Itoa(shard))
+	deadline := time.Now().Add(30 * time.Second * enginetest.TimeoutScale())
+	for e.blindOn(shard) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("shard %d never read blind=%v", shard, want)
+		}
+		enginetest.AwaitVisits(t, e.diags.Seams(), 1, 30*time.Second, pass)
+	}
+}
+
+// placements counts where n picks of pickShard land.
+func placements(t *testing.T, e *Engine, n int) map[int]int {
+	t.Helper()
+	counts := map[int]int{}
+	for range n {
+		shard, err := e.pickShard(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[shard]++
+	}
+	return counts
+}
+
+// TestPeerFault_PlacementLeavesOutABlindShard pins that a new flow is not placed on a shard this replica cannot read:
+// left out while its Sonar is blind, each placement counted against it, placed again once a reading lands, and placed
+// as if none were blind when every shard is, rather than failing, with nothing counted.
+func TestPeerFault_PlacementLeavesOutABlindShard(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+
+	reader := sdkmetric.NewManualReader()
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(t.Context())
+	assert.NoError(e.SetHost(noopHost{}))
+	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	assert.NoError(e.SetShard(ShardSpec{Index: 1}))
+	assert.NoError(e.SetShard(ShardSpec{Index: 2}))
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+	skipped := func(shard string) int64 {
+		n, _ := sumCounter(collect(t, reader), "dwarf_placement_skipped", "shard", shard)
+		return n
+	}
+	awaitBlindness(t, e, 1, false)
+	awaitBlindness(t, e, 2, false)
+	counts := placements(t, e, 400)
+	assert.True(counts[1] > 0 && counts[2] > 0, "both shards take new flows while both are read (got %v)", counts)
+
+	blind2 := diagnostics.Join(diagnostics.FaultPeerReadErr, "2")
+	e.diags.Seams().InjectN(blind2, 1<<20)
+	awaitBlindness(t, e, 2, true)
+	before := skipped("2")
+	counts = placements(t, e, 400)
+	assert.Zero(counts[2], "the blind shard takes no new flow (got %v)", counts)
+	assert.Equal(int64(400), skipped("2")-before, "each placement that left the blind shard out is counted")
+
+	blind1 := diagnostics.Join(diagnostics.FaultPeerReadErr, "1")
+	e.diags.Seams().InjectN(blind1, 1<<20)
+	awaitBlindness(t, e, 1, true)
+	before1, before2 := skipped("1"), skipped("2")
+	counts = placements(t, e, 400)
+	assert.True(counts[1] > 0 && counts[2] > 0, "with every shard blind, placement ignores blindness (got %v)", counts)
+	assert.Equal(before1, skipped("1"), "a placement that ignored blindness left nothing out")
+	assert.Equal(before2, skipped("2"), "a placement that ignored blindness left nothing out")
+
+	e.diags.Seams().Withdraw(blind1)
+	e.diags.Seams().Withdraw(blind2)
+	awaitBlindness(t, e, 1, false)
+	awaitBlindness(t, e, 2, false)
+	counts = placements(t, e, 400)
+	assert.True(counts[1] > 0 && counts[2] > 0, "a good reading puts the shard back (got %v)", counts)
 }
 
 // TestPeerFault_BeatFailureEvictsFromTheDispatchers pins the view from the OTHER side: a replica that is

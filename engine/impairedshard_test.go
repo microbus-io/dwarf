@@ -267,9 +267,10 @@ func pct(took []time.Duration, p float64) time.Duration {
 // and crew where they were, and the impaired shard's own flows must complete once it heals. Run serially: it bounds
 // the healthy shard's latency.
 //
-// It logs, without asserting, what still couples the shards: a Create whose placement picks the impaired shard, a
-// ListOpen, a replica starting and this one stopping while the shard is impaired. Each is an open decision, not a
-// contract to pin.
+// A Create whose shard is not chosen must land on the healthy one once this replica reads the refused or hung shard
+// as blind. It logs, without asserting, what still couples the shards: such a Create against a slow shard, a ListOpen,
+// a replica starting and this one stopping while the shard is impaired. Each is an open decision, not a contract to
+// pin.
 func TestImpairedShard_HealthyShardProgresses(t *testing.T) {
 	base := os.Getenv("SEQUEL_TESTING_DSN")
 	if !strings.HasPrefix(base, "postgres") {
@@ -335,7 +336,17 @@ func impairedShard(t *testing.T, mode int32) {
 	assert.True(runtime.NumGoroutine()-goroutines < 100, "goroutines grew from %d to %d", goroutines, runtime.NumGoroutine())
 	assert.True(e.crew.Resident() <= e.crew.Min()+n, "the crew grew to %d workers", e.crew.Resident())
 
-	// Placement is not health-aware: a Create with no shard chosen lands on the impaired shard about half the time.
+	// Placement leaves out a shard this replica's Sonar reads as blind. A refused or hung shard's registry reads stop
+	// landing, so once it reads blind every Create must land on the healthy shard. A slow shard's reads may still
+	// land, so its Creates are logged, not asserted. The wait polls the clock: a hung read blocks the Sonar's next
+	// pass, and blindness turns true while it hangs.
+	if mode != proxySlow {
+		deadline := time.Now().Add(timeout)
+		for !e.blindOn(2) && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		assert.Must(assert.True(e.blindOn(2), "the impaired shard never read as blind"))
+	}
 	var placedBad int
 	for range 10 {
 		cctx, cancel := context.WithTimeout(ctx, time.Second)
@@ -344,7 +355,11 @@ func impairedShard(t *testing.T, mode int32) {
 		}
 		cancel()
 	}
-	t.Logf("Create with placement: %d of 10 failed or timed out", placedBad)
+	if mode == proxySlow {
+		t.Logf("Create with placement: %d of 10 failed or timed out (blind: %v)", placedBad, e.blindOn(2))
+	} else {
+		assert.Zero(placedBad, "a Create was placed on the shard this replica cannot read")
+	}
 	lctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	start := time.Now()
 	_, lerr := e.ListOpen(lctx, workflow.Query{Limit: 10})
