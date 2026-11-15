@@ -482,7 +482,8 @@ yield=true; the task must return immediately.
 
 On re-entry after the child terminates it unmarshals the child's final state into out, returns yield=false, and sets
 err if the child failed. Does not re-arm on re-entry. Like Interrupt, it returns an error without arming if in cannot
-be marshalled or this step already parked, and a 400 if workflowURL is empty or begins or ends with whitespace.
+be marshalled or this step already parked, and a 400 if workflowURL is empty, begins or ends with whitespace, or
+holds a character outside printable ASCII.
 
 A child that could not be started comes back the same way, with no child flow created and nothing in out: err
 carries the host's error when the child's graph could not be loaded (a 503 when its source is unreachable), a 404
@@ -523,6 +524,9 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 	}
 	if strings.TrimSpace(workflowURL) != workflowURL {
 		return false, errors.New("cannot start subgraph: workflow URL must not begin or end with whitespace", http.StatusBadRequest)
+	}
+	if !isPrintableASCII(workflowURL) {
+		return false, errors.New("cannot start subgraph: workflow URL must be printable ASCII", http.StatusBadRequest)
 	}
 	// Single-park guard: a step parks at most once - interrupt XOR subgraph, and at most once per kind.
 	// Reject arming a subgraph when this step already parked for an interrupt (resolved interruptDone, or

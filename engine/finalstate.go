@@ -342,7 +342,7 @@ func (e *Engine) computeFinalStateFrom(ctx context.Context, db sequel.Executor, 
 	// The final state is flattened - every ref resolved - so it holds the whole state, which can exceed what one
 	// column stores though no step's row did. A permanentError, so the flow fails with an empty final state
 	// (failFlowTx), and Terminate still stops it (terminalFinalState).
-	if err := e.checkPayloadSize("final state", data); err != nil {
+	if err := e.checkPayload("final state", data); err != nil {
 		return nil, "", err
 	}
 	return data, workflowURL, nil

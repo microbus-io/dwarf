@@ -268,6 +268,107 @@ func TestCreate_RejectsAPaddedWorkflowURL(t *testing.T) {
 	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
 }
 
+// TestCreate_RejectsAWorkflowURLOutsidePrintableASCII pins that Create refuses a workflow URL holding anything but
+// printable ASCII, before any flow is stored - the rule a graph holds its task URLs to.
+func TestCreate_RejectsAWorkflowURLOutsidePrintableASCII(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("UnstorableURL")
+	g.SetURL("Work", "unstorableurl/work")
+	g.AddTransition("Work", workflow.End)
+	urls := []string{
+		"unstorableurl/g\xff", "unstorableurl/g\x00", "unstorableurl/g\nx", "unstorableurl/g\x07x",
+		"unstorableurl/g\u00e9", "unstorableurl/g\u202ex",
+	}
+	for _, url := range urls {
+		mux.HandleGraph(url, g)
+	}
+	ran := false
+	mux.HandleTask("unstorableurl/work", func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	for _, url := range urls {
+		_, _, err := e.Run(ctx, url, nil, nil)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q: %v", url, err)
+	}
+	assert.False(ran)
+	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}
+
+// TestCreate_RejectsAGraphWithAnUnstorableName pins that Create refuses a graph whose task names differ only in
+// invalid UTF-8, before any flow is stored: the stored graph JSON would decode them as one name, bound to the wrong URL.
+func TestCreate_RejectsAGraphWithAnUnstorableName(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("UnstorableName")
+	g.SetURL("A\xff", "unstorablename/safe")
+	g.SetURL("A\xfe", "unstorablename/sensitive")
+	g.AddTransition("A\xff", "A\xfe")
+	g.AddTransition("A\xfe", workflow.End)
+	mux.HandleGraph("unstorablename/g", g)
+	ran := false
+	mux.HandleTask("unstorablename/safe", func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+	mux.HandleTask("unstorablename/sensitive", func(ctx context.Context, f *workflow.Flow) error { ran = true; return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, _, err := e.Run(ctx, "unstorablename/g", nil, nil)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%v", err)
+	assert.False(ran)
+	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}
+
+// TestSubgraph_UnstorableURLFromAWireCarrierFailsTheSpawn pins that the engine refuses a subgraph URL holding a
+// control character itself, not only through flow.Subgraph: a carrier decoded from a remote host's reply arms the URL
+// directly. A graph is registered under that URL, so without the refusal the child would be created.
+func TestSubgraph_UnstorableURLFromAWireCarrierFailsTheSpawn(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	child := workflow.NewGraph("Child")
+	child.SetURL("Leaf", "unstorablesub/leaf")
+	child.AddTransition("Leaf", workflow.End)
+	mux.HandleGraph("unstorablesub/child\x07", child)
+	mux.HandleTask("unstorablesub/leaf", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	g := workflow.NewGraph("Caller")
+	g.SetURL("Call", "unstorablesub/call")
+	g.AddTransition("Call", workflow.End)
+	mux.HandleGraph("unstorablesub/g", g)
+	mux.HandleTask("unstorablesub/call", func(ctx context.Context, f *workflow.Flow) error {
+		yield, err := f.Subgraph("unstorablesub/child", nil, nil)
+		if err != nil || !yield {
+			return err
+		}
+		return overWire(f, func(wire map[string]json.RawMessage) {
+			wire["subgraphURL"] = json.RawMessage(`"unstorablesub/child\u0007"`)
+		})
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, out, err := e.Run(ctx, "unstorablesub/g", nil, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusFailed, out.Status)
+		assert.Contains(out.Error, "printable ASCII")
+	}
+	assert.Equal(1, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"), "a child was created under the URL")
+}
+
 // TestSubgraph_PaddedURLFromAWireCarrierFailsTheSpawn pins that the engine refuses a padded subgraph URL itself, not
 // only through flow.Subgraph: a carrier decoded from a remote host's reply arms the URL directly. The spawn fails
 // as an unloadable child does - no child flow, the 400 delivered to the caller - though a graph is registered under

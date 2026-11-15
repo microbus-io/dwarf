@@ -24,6 +24,7 @@ import "time"
 // ListRecentlyClosed each is optional. Times compare to the millisecond.
 // ListOpen's and ListRecentlyClosed's window is on when a flow last changed status (FlowSummary.UpdatedAt);
 // ListClosed's and Purge's on when a flow was archived (FlowSummary.ArchivedAt), and may reach at most 31 days.
+// A text filter must be valid UTF-8 without NUL characters.
 type Query struct {
 	Status      string `json:"status,omitzero"`
 	WorkflowURL string `json:"workflowURL,omitzero"`

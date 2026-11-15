@@ -183,11 +183,16 @@ matching one before working there:**
   (the elements a list with no reducer gained, recorded by the engine) with a `+` suffix.** Decode a
   `changes` column with `changesOf` / `Changes.UnmarshalJSON`, never as a plain `State`. A null contribution
   means "nothing", so `isCleared` must recognize both null spellings. (`workflow/CLAUDE.md`)
-- **Integers beyond ±2^53 and NULs in strings are unguarded, by decision.** An untyped read rounds such an
-  integer; Postgres `JSONB` rejects a NUL. Do not add a write-side guard or a read-side `UseNumber` without
-  revisiting the punt. A fold's decode is internal - its Go values never leave the reducer and go back out as
-  JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site must too. Engine code that passes
-  stored values on (a forEach's elements) moves their bytes, never decoded values. (`workflow/CLAUDE.md`)
+- **Integers beyond ±2^53 are unguarded, by decision.** An untyped read rounds one. Do not add a write-side guard
+  or a read-side `UseNumber` without revisiting the punt. A fold's decode is internal - its Go values never leave
+  the reducer and go back out as JSON - so it decodes numbers as `json.Number` and stays exact; a new fold site
+  must too. Engine code that passes stored values on (a forEach's elements) moves their bytes, never decoded
+  values. (`workflow/CLAUDE.md`)
+- **Text PostgreSQL refuses is refused on every dialect.** A payload holding a NUL, invalid UTF-8 or an unpaired
+  surrogate escape fails `checkPayload` (a 400), which every payload column write calls. The other dialects store
+  some of it (all of them a NUL), so without the check a flow that passes the SQLite suite fails on PostgreSQL.
+  Names are held to more: a graph name, task name, task URL and workflow URL must be printable ASCII.
+  (`engine/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must take the flow-row lock first
   (`lockFlowRows`: a locking read on PostgreSQL and MySQL, a `touch` flip elsewhere), or the flow strands as a
   `running` orphan. (`engine/CLAUDE.md`)
@@ -218,7 +223,7 @@ names.
 
 **Naming convention.** Graph and task names are PascalCase (`Reserve`, `Charge`) - graph-topology
 identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine
-imposes no casing; this is a fixture/example convention only.
+imposes no casing, only printable ASCII (`Graph.Validate`); PascalCase is a fixture/example convention.
 
 **Task** - A named unit of work within a workflow, identified by a task name/URL and executed via the injected
 `ExecuteTask`. Tasks receive state via a `workflow.Flow` carrier, read input from state fields, perform work, and

@@ -52,6 +52,9 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 	if strings.TrimSpace(workflowURL) != workflowURL {
 		return "", errors.New("workflow URL must not begin or end with whitespace", http.StatusBadRequest)
 	}
+	if !isPrintableASCII(workflowURL) {
+		return "", errors.New("workflow URL must be printable ASCII", http.StatusBadRequest)
+	}
 	// Reject a negative priority/weight/budget rather than silently coercing it to the default
 	// (resolveFlowOptions treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides
 	// it. 0 stays "use the engine default" for all three, so this only rejects genuinely-invalid input.
@@ -314,11 +317,11 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	if err != nil {
 		return "", errors.New("initial state is not JSON-marshalable: %v", err, http.StatusBadRequest)
 	}
-	// A subgraph spawn reaches here inside persist, which must not retry a size refusal: hence a permanentError.
-	if err := e.checkPayloadSize("initial state", stateJSON); err != nil {
+	// A subgraph spawn reaches here inside persist, which must not retry a refusal: hence a permanentError.
+	if err := e.checkPayload("initial state", stateJSON); err != nil {
 		return "", err
 	}
-	if err := e.checkPayloadSize("baggage", baggageJSON); err != nil {
+	if err := e.checkPayload("baggage", baggageJSON); err != nil {
 		return "", err
 	}
 
@@ -785,6 +788,17 @@ func checkReason(reason string) error {
 	return nil
 }
 
+// isPrintableASCII reports whether every byte of s is printable ASCII, a space through '~' - the rule Graph.Validate
+// holds a graph's names and task URLs to, and so the rule for a workflow URL and a Goto target.
+func isPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < ' ' || s[i] > '~' {
+			return false
+		}
+	}
+	return true
+}
+
 // terminate forcefully stops a flow and its whole subgraph subtree, unconditionally. Root-only: a subgraph
 // child is not an independently terminable unit (its parent is parked on it, and the unit of any lifecycle
 // change is the tree), so a child key is rejected rather than silently widened into a tree-wide terminate.
@@ -1232,7 +1246,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		if err != nil {
 			return errors.Trace(err)
 		}
-		if err := e.checkPayloadSize("resume data", resumeDataJSON); err != nil {
+		if err := e.checkPayload("resume data", resumeDataJSON); err != nil {
 			return err
 		}
 	}
@@ -1490,7 +1504,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	if err != nil {
 		return "", errors.Trace(err)
 	}
-	if err := e.checkPayloadSize("initial state", mergedStateJSON); err != nil {
+	if err := e.checkPayload("initial state", mergedStateJSON); err != nil {
 		return "", err
 	}
 

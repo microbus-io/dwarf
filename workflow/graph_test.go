@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/microbus-io/testarossa"
@@ -1271,6 +1272,46 @@ func TestFlow_MermaidEscapesInjection(t *testing.T) {
 	assert.Contains(m, `#quot;`)
 }
 
+// TestRenderers_WithLinksRefusesAnUnsafeParamName pins that a WithLinks parameter name outside the rule emits no
+// click directive in either renderer: a name taken from a request could otherwise close the directive's quoted
+// string and add a directive of its own, pointing anywhere.
+func TestRenderers_WithLinksRefusesAnUnsafeParamName(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("Order")
+	g.SetURL("Task", "svc/task")
+	g.AddTransition("Task", End)
+	steps := []FlowStep{{StepKey: "1-1-a", TaskName: "svc/task", Status: StatusCompleted}}
+
+	for _, name := range []string{
+		"x\"\n    click t0 \"https://attacker.example/?take",
+		"", "a b", "a=b", "a&b", `a"b`, "é", "2nd", strings.Repeat("p", 33),
+	} {
+		gm := NewGraphRenderer(g).WithLinks(name).Render()
+		fm := NewFlowRenderer(steps).WithLinks(name).Render()
+		assert.NotContains(gm, "click ", "%q", name)
+		assert.NotContains(fm, "click ", "%q", name)
+		assert.NotContains(gm, "attacker", "%q", name)
+	}
+	for _, name := range []string{"step", "step_key", "task-id", "_x", strings.Repeat("p", 32)} {
+		assert.Contains(NewGraphRenderer(g).WithLinks(name).Render(), `"?`+name+`=Task"`, "%q", name)
+		assert.Contains(NewFlowRenderer(steps).WithLinks(name).Render(), `"?`+name+`=1-1-a"`, "%q", name)
+	}
+	// A refused name turns off links set earlier, as an empty one does.
+	assert.NotContains(NewGraphRenderer(g).WithLinks("step").WithLinks("a b").Render(), "click ")
+}
+
+// TestFlowRenderer_WithLinksEscapesTheStepKey pins that a step key reaches the click directive query-escaped. The
+// engine's keys need no escaping, but the renderer draws whatever history it is handed.
+func TestFlowRenderer_WithLinksEscapesTheStepKey(t *testing.T) {
+	assert := testarossa.For(t)
+
+	steps := []FlowStep{{StepKey: `1-1-a" click`, TaskName: "svc/task", Status: StatusCompleted}}
+	m := NewFlowRenderer(steps).WithLinks("step").Render()
+	assert.Contains(m, `"?step=1-1-a%22+click"`)
+	assert.NotContains(m, `a" click`)
+}
+
 // stripProto is shared by the graph's error messages and the flow renderer's node labels. Both sinks are human-facing, so a URL
 // with nothing after the scheme is returned WHOLE rather than as the empty string it strips down to - a
 // blank diagram label, or an error naming no task at all, is worse than a slightly ugly one.
@@ -1475,6 +1516,68 @@ func TestGraph_ValidateRejectsAPaddedTaskName(t *testing.T) {
 	g.SetURL("Join Them", "svc/join")
 	g.AddTransitionChain("Start", "Join Them", End)
 	assert.NoError(g.Validate())
+}
+
+// TestGraph_ValidateHoldsNamesToPrintableASCII pins that a graph name, a task name or a task URL holding anything but
+// printable ASCII is refused - a control character, invalid UTF-8, a letter in either normalization form, a direction
+// override, a zero-width character or an emoji alike - and a 'when' expression that is not valid UTF-8 or holds a
+// NUL. A 'when' expression may hold other non-ASCII text.
+func TestGraph_ValidateHoldsNamesToPrintableASCII(t *testing.T) {
+	assert := testarossa.For(t)
+
+	build := func(graphName, taskName, taskURL, when string) *Graph {
+		g := NewGraph(graphName)
+		g.SetURL("Start", "svc/start")
+		g.SetURL(taskName, taskURL)
+		if when == "" {
+			g.AddTransition("Start", taskName)
+		} else {
+			g.AddTransitionWhen("Start", taskName, when)
+		}
+		g.AddTransition(taskName, End)
+		return g
+	}
+	for _, s := range []string{
+		"Jo\xffin", "Jo\x00in", "Jo\nin", "Jo\rin", "Jo\x01in", "Jo\x7fin", "Jo\u0085in",
+		"Jo\u00e9in", "Joe\u0301in", "Jo\u202ein", "Jo\ufeffin", "Jo\u200din", "Jo\U0001F4E6in",
+	} {
+		assert.Error(build(s, "Join", "svc/join", "").Validate(), "graph name %q", s)
+		assert.Error(build("Test", s, "svc/join", "").Validate(), "task name %q", s)
+		assert.Error(build("Test", "Join", "svc/"+s, "").Validate(), "task URL %q", s)
+	}
+	for _, when := range []string{"x == \"a\xff\"", "x == \"a\x00\""} {
+		assert.Error(build("Test", "Join", "svc/join", when).Validate(), "when %q", when)
+	}
+	assert.NoError(build("Order (v2)", "Pay Now", "svc/pay?x=1&y=%C3%A9", "x == \"na\u00efve\"").Validate())
+}
+
+// TestGraph_ValidatedNamesSurviveTheJSONRoundTrip pins that a graph Validate passes is the graph the engine
+// dispatches by. The engine stores the graph as JSON, and encoding/json replaces each invalid UTF-8 byte with U+FFFD,
+// so two task names that differ only in invalid bytes would decode as one name, bound to the wrong URL. Validate
+// refuses them, and a graph it passes decodes to the same tasks.
+func TestGraph_ValidatedNamesSurviveTheJSONRoundTrip(t *testing.T) {
+	assert := testarossa.For(t)
+
+	g := NewGraph("Test")
+	g.SetURL("A\xff", "svc/safe")
+	g.SetURL("A\xfe", "svc/sensitive")
+	g.AddTransition("A\xff", "A\xfe")
+	g.AddTransition("A\xfe", End)
+	assert.Error(g.Validate())
+
+	g = NewGraph("Order (v2)")
+	g.SetURL("Check", "svc/check")
+	g.SetURL("Pay Now", "svc/pay?x=1&y=%C3%A9")
+	g.SetURL("Ship-It", "svc/ship")
+	g.AddTransitionChain("Check", "Pay Now", "Ship-It", End)
+	assert.Must(assert.NoError(g.Validate()))
+	data, err := json.Marshal(g)
+	assert.Must(assert.NoError(err))
+	var decoded Graph
+	assert.Must(assert.NoError(json.Unmarshal(data, &decoded)))
+	assert.NoError(decoded.Validate())
+	assert.Equal(g.Name(), decoded.Name())
+	assert.Equal(g.Tasks(), decoded.Tasks())
 }
 
 // TestGraph_ValidateRejectsAPaddedGraphName pins that a graph name beginning or ending with whitespace is refused, in a

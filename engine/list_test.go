@@ -284,6 +284,33 @@ func TestListClosed_TheWindowIsClampedToTheArchive(t *testing.T) {
 	})
 }
 
+// TestList_RefusesAnUnstorableTextFilter pins that every list and Purge refuse a text filter that is not valid UTF-8
+// or holds a NUL with a 400, on every dialect. PostgreSQL refuses such a bound value, which would be a 500 there and
+// an empty list elsewhere.
+func TestList_RefusesAnUnstorableTextFilter(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e := archiveEngine(t, treeMux(), 30)
+	for name, q := range map[string]workflow.Query{
+		"WorkflowURL":     {WorkflowURL: "a\x00"},
+		"WorkflowName":    {WorkflowName: "a\xff"},
+		"StoppedTaskName": {StoppedTaskName: "a\x00"},
+		"FairnessKey":     {FairnessKey: "a\x00"},
+		"Search":          {Search: "a\x00"},
+	} {
+		q = enginetest.Recent(q)
+		_, err := e.ListOpen(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListOpen: %s: %v", name, err)
+		_, err = e.ListRecentlyClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListRecentlyClosed: %s: %v", name, err)
+		_, err = e.ListClosed(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "ListClosed: %s: %v", name, err)
+		_, _, err = e.Purge(ctx, q)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "Purge: %s: %v", name, err)
+	}
+}
+
 // TestList_RequiredInputsAndStatuses pins what the two lists refuse with a 400: no Limit, a Limit over the most a call
 // returns, an empty window, a negative duration, and an unknown status or shard; ListClosed a missing bound on either
 // side, which ListOpen takes as no bound there; and each list a status of the other's.

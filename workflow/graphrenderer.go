@@ -81,9 +81,11 @@ func (r *GraphRenderer) WithLeftRight() *GraphRenderer {
 
 // WithLinks makes every task node clickable, emitting a Mermaid click directive that navigates to
 // "?<paramName>=<taskName>", with the task name query-escaped - so a host page can turn the diagram into a
-// task inspector by reading that query parameter. Empty (the default) emits no click directives.
+// task inspector by reading that query parameter. paramName is at most 32 characters: an ASCII letter or
+// underscore, then ASCII letters, digits, underscores or hyphens. Any other name, like empty (the default), emits
+// no click directives.
 func (r *GraphRenderer) WithLinks(paramName string) *GraphRenderer {
-	r.linkParam = paramName
+	r.linkParam = linkParamOrNone(paramName)
 	return r
 }
 

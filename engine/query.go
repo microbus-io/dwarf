@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
@@ -526,6 +527,19 @@ func subgraphCondition(includeSubgraphs bool) string {
 func (e *Engine) queryClauses(query workflow.Query, subgraphCond string) (where string, args []any, err error) {
 	if query.Shard != 0 && !e.db.Has(query.Shard) {
 		return "", nil, errors.New("invalid shard", http.StatusBadRequest)
+	}
+	// Every text filter is bound, and PostgreSQL refuses a bound value that is not valid UTF-8 or holds a NUL, so the
+	// same filter would be a 500 there and an empty list elsewhere.
+	for _, filter := range [...]struct{ name, value string }{
+		{"WorkflowURL", query.WorkflowURL},
+		{"WorkflowName", query.WorkflowName},
+		{"StoppedTaskName", query.StoppedTaskName},
+		{"FairnessKey", query.FairnessKey},
+		{"Search", query.Search},
+	} {
+		if !utf8.ValidString(filter.value) || strings.ContainsRune(filter.value, 0) {
+			return "", nil, errors.New("invalid %s filter: it must be valid UTF-8 without NUL characters", filter.name, http.StatusBadRequest)
+		}
 	}
 
 	conditions := []string{subgraphCond}

@@ -89,10 +89,10 @@ one probe succeeds) for zero engine-side policy and no shared-state machinery to
 
 ### Host-supplied payloads are NOT precision-checked (a KNOWN, backlogged punt)
 
-Integers beyond ±2^53 and NULs in strings are the root landmine's deliberate punt; `workflow/CLAUDE.md` holds
-the rationale, the workarounds and the shape any future guard must take. On the engine side: no ingress
-(`Create`/`Run`, `Resume`, `Fork`'s overrides, `Continue`'s `additionalState`) returns a 400 for either, and
-`workflow.NewState` normalizes each input without range-checking it.
+Integers beyond ±2^53 are the root landmine's deliberate punt; `workflow/CLAUDE.md` holds the rationale, the
+workaround and the shape any future guard must take. On the engine side: no ingress (`Create`/`Run`, `Resume`,
+`Fork`'s overrides, `Continue`'s `additionalState`) returns a 400 for one, and `workflow.NewState` normalizes each
+input without range-checking it. Text is checked: see "What one column can store" below.
 
 ### Size and count limits are the host's job, not the engine's
 
@@ -108,8 +108,8 @@ an author-space entry task, bound retention (`Purge` takes at most its `Limit` r
 retention job loops until it is done). For a **pass-through host** that adds no policy of its own, the obligation flows through to the
 application using that host - it is not silently absorbed anywhere.
 
-**The one bound the engine does enforce is what one column can store** (`maxPayloadBytes`, 256,000,000 bytes,
-`payloadsize.go`). It is a storage fact, not a policy: a value over it would be refused by the database anyway,
+**What one column can store** is the one bound the engine does enforce (`maxPayloadBytes`, 256,000,000 bytes,
+`payload.go`). It is a storage fact, not a policy: a value over it would be refused by the database anyway,
 only after the task ran, the bytes were sent and the write retries ran out. Every payload
 write checks the marshalled bytes first - a task's changes (before any outcome write), each successor's and
 fan-in's minted state, the interrupt payload, the final state, and at the door the initial state, baggage,
@@ -119,9 +119,27 @@ refs keep carried fields out of `state`, so mid-flow the binding column is a ste
 boundary flattens (`final_state`, `Continue`, subgraph in/out, Fork's leaf), so the whole state must fit when the
 flow ends. A fold under a reducer other than `append` is stored inline, so it can still
 grow a `state` past the limit mid-flow; the anchor cap inlines only anchors below the bar for opening one
-(`internal/staterefs`). Pinned by `engine/payloadsize_test.go`. A new payload column write must call `checkPayloadSize`. It must also
+(`internal/staterefs`). Pinned by `engine/payload_test.go`. A new payload column write must call `checkPayload`. It must also
 set the column's byte count (`<column>_bytes`) in the same statement, or every sum of the counts reads that payload
 as empty (`TestPayloadBytes_EveryWriterCountsWhatItWrites`).
+
+**`checkPayload` also refuses text PostgreSQL refuses, on every dialect** (`unstorableText`, a 400): invalid UTF-8,
+a NUL (a raw byte or `\u0000`) and a `\u` escape of a surrogate that is not half of a pair. JSONB rejects all three
+(`SQLSTATE 22P05` for the NUL). SQLite and SQL Server store all three, MySQL invalid UTF-8 and the NUL, MariaDB
+the NUL (both refuse a surrogate escape in a `JSON` column), so without the check a flow carrying one passes the
+SQLite suite and fails on PostgreSQL at the step's completion UPDATE. The check runs on the
+marshalled bytes, where a Go string's invalid UTF-8 is already U+FFFD (`encoding/json`'s replacement, accepted
+rather than walked for), so invalid UTF-8 and surrogate escapes arrive only in bytes passed through as given - a
+`json.RawMessage` given to `Set`, a remote host's `changes` - which the `append`/`concat` splice would carry
+forward. **Do not search for the bytes `\u0000`:** `\\u0000` is the text `\u0000`, so the scan consumes each
+escape whole. The derived payloads (successor, fan-in and final state) are built from checked inputs and are
+checked anyway: the scan is linear and cheap beside the write, and one call at every write leaves none to forget.
+Pinned by `TestPayloadText_NamesWhatPostgresRefuses`, `TestPayloadText_CreateAndResumeRefuseUnstorableText` and
+`TestPayloadText_UnstorableChangesFailTheStepOnce`. A Terminate or Cancel reason is held to the same text rule
+(`checkReason`), a list or Purge text filter likewise (`queryClauses`), and a workflow URL and a Goto target to the
+rule `Graph.Validate` holds names and task URLs to (printable ASCII, `isPrintableASCII`). An error the engine stores for a task to read -
+an `onErr`, a `subgraph_error` - is made storable instead of refused (`deliveredError`): refusing it would lose the
+error itself.
 
 Subgraph nesting depth is the one axis that is *also* a crash vector if handled carelessly: `Fork` clones the
 tree with an **explicit LIFO worklist** (`cloneTree` drives `cloneOneFlow` per flow), not recursion, so
@@ -411,7 +429,7 @@ reaches its caller as an error `IsCancelled` recognizes, so a caller that return
 it keeps a real child error's status code and properties, which a bare message lost. The column is a JSON
 column, `{}` for no error (`subgraphErrorText` maps it to none at the claim); its writer, inside the child's
 terminating transaction, keeps only the message and status code when the properties would make the JSON
-unstorable (over the payload limit, or holding a NUL a JSONB column refuses), since a failure write that cannot
+unstorable (JSON `checkPayload` refuses), since a failure write that cannot
 land is read by the classifier as the database being down.
 
 **Never pass a stored or operator-supplied string as `errors.New`'s pattern.** It counts every `%` as a format

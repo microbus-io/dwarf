@@ -48,15 +48,26 @@ func cohortLockStripe(shard, spawnStepID int) int {
 	return int(h >> (64 - cohortLockStripesLog2))
 }
 
-// onErrValue is the value an error-routed step records under onErr for its handler: the error WITHOUT its stack
-// frames. onErr rides into changes -> final_state and is readable by any state-bearing reader (Snapshot's
-// final_state, Step's state/changes), and internal stack traces are code-structure disclosure. The handler still
-// gets the message, status code, trace id and properties for routing. It is a shallow copy, so the shared error
-// keeps its stack for logs and a later failStep.
-func onErrValue(err error) *errors.TracedError {
-	redacted := *errors.Convert(err)
-	redacted.Stack = nil
-	return &redacted
+// deliveredError is err as the engine stores it for a task to read: an error-routed step's onErr for its handler,
+// and a subgraph child's error for its caller (subgraph_error). The stack frames are stripped - onErr rides into
+// changes -> final_state and is readable by any state-bearing reader (Snapshot's final_state, Step's
+// state/changes), and internal stack traces are code-structure disclosure - and the message passes
+// sanitizeErrorMessage. The task still gets the message, status code, trace id and properties for routing.
+//
+// Its writers must not fail on what the error holds. Properties are the task's own, unbounded and unchecked, so when
+// the error's JSON is one checkPayload refuses, only the message and status code are kept - a cancellation marker
+// among the properties is then lost, a smaller cost than the alternatives: a refused onErr fails the step as if the
+// task had written it, skipping the handler and losing the error, and a refused subgraph_error is a failure write
+// that cannot land, which the classifier reads as the database being down. It is a shallow copy, so the shared
+// error keeps its stack for logs and a later failStep.
+func (e *Engine) deliveredError(err error) *errors.TracedError {
+	delivered := *errors.Convert(err)
+	delivered.Stack = nil
+	delivered.Err = errors.New("%s", sanitizeErrorMessage(delivered.Error()))
+	if encoded, merr := json.Marshal(&delivered); merr != nil || e.checkPayload("error", encoded) != nil {
+		return &errors.TracedError{Err: delivered.Err, StatusCode: delivered.StatusCode}
+	}
+	return &delivered
 }
 
 // readCancelReason reads a flow's cancel reason fresh. A step that sees its cancel mark may hold a flow row read
@@ -168,7 +179,7 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 
 		if interruptPayload.Len() > 0 {
 			payloadJSON, _ := json.Marshal(interruptPayload)
-			if err := e.checkPayloadSize("interrupt payload", payloadJSON); err != nil {
+			if err := e.checkPayload("interrupt payload", payloadJSON); err != nil {
 				return err
 			}
 			payloadLen = len(payloadJSON)

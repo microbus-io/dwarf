@@ -170,7 +170,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget s
 		if merr != nil {
 			return errors.Trace(merr)
 		}
-		if err := e.checkPayloadSize("fan-in state of task '"+stripProto(fanInTarget)+"'", mergedJSON); err != nil {
+		if err := e.checkPayload("fan-in state of task '"+stripProto(fanInTarget)+"'", mergedJSON); err != nil {
 			return err
 		}
 		txBytes.stateWritten = len(mergedJSON)
@@ -462,7 +462,7 @@ func (e *Engine) fanInRow(ctx context.Context, tx sequel.Executor, shardNum int,
 	}
 	// The fold is where a cohort's contributions meet: an append over N branches can outgrow the column though no
 	// branch wrote that much.
-	if err := e.checkPayloadSize("fan-in state of task '"+stripProto(fanInTaskName)+"'", mergedJSON); err != nil {
+	if err := e.checkPayload("fan-in state of task '"+stripProto(fanInTaskName)+"'", mergedJSON); err != nil {
 		return successorRow{}, 0, nil, stateByteCount{}, err
 	}
 	bytes.stateWritten = len(mergedJSON)

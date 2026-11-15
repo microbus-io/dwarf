@@ -297,6 +297,21 @@ func TestFlow_SubgraphRejectsAPaddedURL(t *testing.T) {
 	}
 }
 
+// TestFlow_SubgraphRejectsAURLOutsidePrintableASCII pins that Subgraph refuses a workflow URL holding anything but
+// printable ASCII, as Create does, without arming anything.
+func TestFlow_SubgraphRejectsAURLOutsidePrintableASCII(t *testing.T) {
+	assert := testarossa.For(t)
+	for _, url := range []string{"https://x/w\xfff", "https://x/w\x00f", "https://x/w\nf", "https://x/w\u00e9f"} {
+		rf := NewRawFlow()
+		f := &rf.Flow
+		yield, err := f.Subgraph(url, nil, nil)
+		assert.False(yield, "%q", url)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%q", url)
+		_, _, requested := rf.SubgraphRequested()
+		assert.False(requested, "%q", url)
+	}
+}
+
 func TestFlow_Retry(t *testing.T) {
 	assert := testarossa.For(t)
 

@@ -276,7 +276,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 	if err != nil {
 		return nil, 0, errors.Trace(err)
 	}
-	if err := e.checkPayloadSize("state of the fork step", mergedLeafState); err != nil {
+	if err := e.checkPayload("state of the fork step", mergedLeafState); err != nil {
 		return nil, 0, err
 	}
 

@@ -117,7 +117,14 @@ limitations under the License.
 // Create, Continue, Resume and Fork return a 413 for an oversized value; a step that produces one fails at once,
 // and its task is not run again.
 //
-// Below it, the engine imposes no size or count limits — not on initial state, baggage, the frozen graph JSON,
+// The database must also be able to store the value's text. A string holding a NUL character (U+0000) is
+// refused, and so is JSON passed through as given (a json.RawMessage) that holds invalid UTF-8 or a \u escape of
+// an unpaired surrogate; invalid UTF-8 in a Go string is replaced with U+FFFD when it is encoded, as
+// encoding/json does. PostgreSQL rejects all three and the other databases store some of them, so the engine
+// refuses them on every database. Create, Continue, Resume and Fork return a 400 for such a value; a step that produces one
+// fails at once, and its task is not run again. Carry binary data base64-encoded.
+//
+// Below the size limit, the engine imposes no size or count limits — not on initial state, baggage, the frozen graph JSON,
 // interrupt/resume payloads, forEach fan-out width (one step row per array element), or subgraph nesting
 // depth. This is deliberate, the same division of labor as backpressure and time budgets: state size is
 // workload-defined (a document-processing workflow may legitimately carry tens of megabytes per flow), and no

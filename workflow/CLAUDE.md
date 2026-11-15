@@ -317,7 +317,7 @@ Structured data is where the expansion lives: 800 small records (50.3KB of JSON)
 **6.8x** - because every element costs an interface, a boxed float64 and a map entry. Element count drives
 it, not byte count. See the carry payload's comment in `bench/workloads.go`.
 
-### Untyped reads are float64-domain; two unstorable values are a KNOWN, UNGUARDED punt
+### Untyped reads are float64-domain; integers beyond 2^53 are a KNOWN, UNGUARDED punt
 
 **Invariant: an untyped reader sees every number as a `float64`; storage keeps the literal.** State, baggage
 and payloads are `State` values held as JSON, and `encoding/json` decodes a JSON number into a **`float64`**
@@ -331,10 +331,9 @@ the read side with `UseNumber`: it changes the Go type every state-map reader se
 preserves the writer's Go type through the database), needs a reflect-walker for caller-supplied targets, and
 buys exactness for a value an author can carry losslessly as a string anyway.
 
-**Two *external/authored* values are unstorable and are NOT guarded - a deliberate, backlogged punt.**
-Nothing on the write side checks them: not `Flow.Set`/`set`/`Interrupt`/`Subgraph`, and not the
-engine's `Create`/`Continue`/`Fork`/`resume` ingress. Both fail *silently*, which is why the punt is a real
-exposure to revisit, not a non-issue:
+**One *external/authored* value is NOT guarded - a deliberate, backlogged punt.** Nothing on the write side
+checks it: not `Flow.Set`/`set`/`Interrupt`/`Subgraph`, and not the engine's `Create`/`Continue`/`Fork`/`resume`
+ingress. It fails *silently*, which is why the punt is a real exposure to revisit, not a non-issue:
 
 - **Integer beyond ±2^53.** A read into an `any` comes back **rounded** (`1234567890123456789` ->
   `1234567890123456800`), so a task that reads one acts on the wrong number and nothing errors. Only
@@ -368,19 +367,11 @@ exposure to revisit, not a non-issue:
   straight into an `int`, which is exact at any int64 magnitude - and neither does a `when` expression: it
   compares a >2^53 id as an integer rather than through a float64 (`boolexp` v1.2+ normalizes a JSON
   integer literal to an exact `int64` instead of decoding it through `float64`).
-- **NUL (`U+0000`) in a string.** Valid UTF-8, legal JSON, but **PostgreSQL's `JSONB` rejects it**
-  (`SQLSTATE 22P05`) while MySQL/SQLite/SQL Server accept it - so it passes the SQLite test suite and kills the
-  flow on the recommended production database: the write that carries it is the step's own **completion
-  UPDATE** (`dispatch.go`), which, left to lease recovery, would leave the step `running` with `error=""`
-  and re-execute the task forever (reproduced against real Postgres). **Workaround: base64-encode binary
-  data.** (Invalid UTF-8 in a Go string is coerced to `U+FFFD` on marshal; bytes stored as given - a
-  `json.RawMessage` passed to `Set`, a remote host's `changes` - keep it, and the `append`/`concat` splice
-  carries it forward, so Postgres rejects it the same way.) `persist.go`'s
-  "ask the database" classifier turns that rejected payload write into a clean step failure instead, and
-  `sanitizeErrorMessage` strips control bytes from the *error-text* write so the failure itself can land - so
-  a NUL is a clean failure at write time on Postgres and silently stored on the others: not benign.
+- **Not part of the punt: text PostgreSQL refuses.** A NUL, invalid UTF-8 and an unpaired surrogate escape ARE
+  refused, on every dialect, at every payload write (`checkPayload`; `engine/CLAUDE.md`, "What one column can
+  store"). The `Flow` writers do not check: a task's writes reach the engine's check as its `changes`.
 
-If a guard is ever reintroduced, it must run on the RAW marshaled bytes *before* the decode (the decode rounds
+If a 2^53 guard is ever added, it must run on the RAW marshaled bytes *before* the decode (the decode rounds
 a >2^53 integer to `float64`, so checking the decoded value is too late) and must NOT re-check the engine's own
 derived sums (a legitimate `ReducerAdd` result past 2^53 marshals integer-shaped and would be falsely rejected).
 
@@ -662,6 +653,11 @@ supplies its own surrounding quotes (`["%s"]`, `-->|"%s"|`, `subgraph id ["%s"]`
 content. Neither renderer draws a title: the page that shows a diagram labels it. Engine-generated edge
 labels (durations) are escaped too, harmlessly, so no sink is a `%q` exception a future edit could cargo-cult. Pinned
 by `TestEscapeMermaid`, `TestGraph_MermaidEscapesInjection`, `TestFlow_MermaidEscapesInjection`.
+
+The `click` directive's target is a URL, not a label, so it is not `escapeMermaid`'d: the task name or step key is
+query-escaped, and the `WithLinks` parameter name - host input, possibly from a request - is held to the field-name
+rule and 32 characters (`linkParamOrNone`), so it cannot close the quoted string; any other name turns links off.
+Pinned by `TestRenderers_WithLinksRefusesAnUnsafeParamName` and `TestFlowRenderer_WithLinksEscapesTheStepKey`.
 
 ## Fuzz targets (`fuzz_test.go`)
 

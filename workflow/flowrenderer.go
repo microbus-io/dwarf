@@ -18,6 +18,7 @@ package workflow
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -125,10 +126,12 @@ func (r *FlowRenderer) WithLeftRight() *FlowRenderer {
 }
 
 // WithLinks makes every step node clickable, emitting a Mermaid click directive that navigates to
-// "?<paramName>=<stepKey>" - so a host page can turn the diagram into a step inspector by reading that query
-// parameter. Empty (the default) emits no click directives.
+// "?<paramName>=<stepKey>", with the step key query-escaped - so a host page can turn the diagram into a step
+// inspector by reading that query parameter. paramName is at most 32 characters: an ASCII letter or underscore,
+// then ASCII letters, digits, underscores or hyphens. Any other name, like empty (the default), emits no click
+// directives.
 func (r *FlowRenderer) WithLinks(paramName string) *FlowRenderer {
-	r.linkParam = paramName
+	r.linkParam = linkParamOrNone(paramName)
 	return r
 }
 
@@ -236,7 +239,7 @@ func (r *FlowRenderer) renderSteps(buf *strings.Builder, prefix string, steps []
 		if r.linkParam == "" || stepKey == "" {
 			return
 		}
-		fmt.Fprintf(buf, "    click %s \"?%s=%s\"\n", nodeID, r.linkParam, stepKey)
+		fmt.Fprintf(buf, "    click %s \"?%s=%s\"\n", nodeID, r.linkParam, url.QueryEscape(stepKey))
 	}
 
 	emitStep := func(stepID int) {
@@ -425,6 +428,19 @@ var mermaidEscaper = strings.NewReplacer(
 	")", "#41;",
 	"|", "#124;",
 )
+
+// maxLinkParamLen bounds a WithLinks parameter name.
+const maxLinkParamLen = 32
+
+// linkParamOrNone is name if it may be a WithLinks query parameter, else "" (no links). The field-name rule keeps it
+// to characters that need no escaping in a query string or in the click directive's quoted string, so a name taken
+// from a request cannot end the string and add a directive of its own.
+func linkParamOrNone(name string) string {
+	if len(name) > maxLinkParamLen || !IsValidFieldName(name) {
+		return ""
+	}
+	return name
+}
 
 // escapeMermaid is the single Mermaid-aware escaper for every author-controlled string in both renderers.
 func escapeMermaid(s string) string {

@@ -734,7 +734,7 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 			d.result.SetRawState(mergedInputState)
 			d.result.SetRawChanges(d.priorChanges)
 			d.result.SetReducers(d.reducers)
-			d.result.Set("onErr", onErrValue(execErr))
+			d.result.Set("onErr", e.deliveredError(execErr))
 			d.errorRouted = true
 			d.errorTarget = tr.To
 		} else {
@@ -774,7 +774,7 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 	// Every outcome write below carries these changes (completion, retry, interrupt, subgraph park). A value the
 	// database cannot store fails the step now, before hundreds of megabytes go out to be refused, and without the
 	// write retries: the task has run, and running it again would produce the same value.
-	if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", d.changesJSON); err != nil {
+	if err := e.checkPayload("changes of task '"+stripProto(taskName)+"'", d.changesJSON); err != nil {
 		return true, errors.Trace(e.failAndReturn(ctx, d, err))
 	}
 	// What the successors are handed, and what routing reads: the input with the step's delta folded in. A value
@@ -841,6 +841,9 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	// package's code arms the URL without it.
 	if strings.TrimSpace(subgraphURL) != subgraphURL {
 		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: workflow URL must not begin or end with whitespace", http.StatusBadRequest)))
+	}
+	if !isPrintableASCII(subgraphURL) {
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: workflow URL must be printable ASCII", http.StatusBadRequest)))
 	}
 	// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 	loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, d.baggage), time.Duration(d.row.flowTimeBudgetMs)*time.Millisecond)
@@ -1056,10 +1059,11 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 // ran to its handler. done means the dispatch ends here.
 func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err error) {
 	taskName := d.row.taskName
-	// The completion write records the Goto target in advance_goto, a column as wide as task_name. A longer target
-	// names no task, so it fails here with the error the transition would have given it, rather than as a column
-	// overflow on the completion write (retried, then classified as a payload fault).
-	if gotoTarget := d.result.GotoRequested(); len(gotoTarget) > maxGotoTargetLen {
+	// The completion write records the Goto target in advance_goto, a column as wide as task_name. A longer target,
+	// or one Graph.Validate would refuse as a task name, names no task, so it fails here with the error the transition
+	// would have given it, rather than as a column overflow or a refused NUL on the completion write (retried, then
+	// classified as a payload fault).
+	if gotoTarget := d.result.GotoRequested(); len(gotoTarget) > maxGotoTargetLen || !isPrintableASCII(gotoTarget) {
 		err = errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
 		return true, errors.Trace(e.failAndReturn(ctx, d, err))
 	}
@@ -1200,11 +1204,11 @@ func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err erro
 		// error-routed step does; it runs only on this rare path, so the completion write above never carries
 		// a second copy of the changes.
 		d.changes = d.changes.Clone()
-		_ = d.changes.Set("onErr", onErrValue(cancelmarker.New(d.row.flowCancelReason)), d.reducers)
+		_ = d.changes.Set("onErr", e.deliveredError(cancelmarker.New(d.row.flowCancelReason)), d.reducers)
 		d.changesJSON, _ = json.Marshal(d.changes)
 		// onErr carries the caller's cancel reason, so it can push changes that passed the check above over the
 		// limit. The step fails on the size, not as cancelled: a real error wins over a cancellation.
-		if err := e.checkPayloadSize("changes of task '"+stripProto(taskName)+"'", d.changesJSON); err != nil {
+		if err := e.checkPayload("changes of task '"+stripProto(taskName)+"'", d.changesJSON); err != nil {
 			return true, errors.Trace(e.failAndReturn(ctx, d, err))
 		}
 		d.successorBase = d.state.Clone()
@@ -1434,7 +1438,7 @@ func (e *Engine) transition(ctx context.Context, d *dispatch) error {
 	if err == nil {
 		// Refs keep a carried field out of this column, but a reduced field's folded value, and fields over the
 		// anchor cap, are stored inline - so a state can outgrow the column though no single step wrote that much.
-		err = e.checkPayloadSize("successor state of task '"+stripProto(taskName)+"'", d.linearStateJSON)
+		err = e.checkPayload("successor state of task '"+stripProto(taskName)+"'", d.linearStateJSON)
 	}
 	if err != nil {
 		return errors.Trace(e.failAndReturn(ctx, d, err))
@@ -1655,7 +1659,7 @@ func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) e
 			if mintErr != nil {
 				return errors.Trace(mintErr)
 			}
-			if err := e.checkPayloadSize("successor state of task '"+stripProto(taskName)+"'", stepStateJSON); err != nil {
+			if err := e.checkPayload("successor state of task '"+stripProto(taskName)+"'", stepStateJSON); err != nil {
 				return err
 			}
 		}

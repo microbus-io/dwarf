@@ -456,13 +456,8 @@ func (e *Engine) deliverSubgraphError(ctx context.Context, shardNum int, parentS
 // The error is stored as its TracedError JSON, stack stripped, not as its message: flow.Subgraph decodes it,
 // so its status code and properties reach the caller - the cancellation marker among them, which is what
 // lets workflow.IsCancelled recognize a cancelled child. A bare message would arrive as a new error without
-// any of them.
-//
-// This write runs inside the child's terminating transaction, so it must not fail on what the error holds. The
-// message passes sanitizeErrorMessage: a NUL encodes as \u0000, which a JSONB column refuses. Properties are the
-// task's own, unbounded and unchecked, so JSON over the payload limit or still holding a NUL keeps only the
-// message and status code - a cancellation marker among the properties is then lost, a smaller cost than a
-// failure write that cannot land, which the classifier reads as the database being down.
+// any of them. This write runs inside the child's terminating transaction, so it must not fail on what the error
+// holds (deliveredError).
 func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Executor, parentStepID int, childFlowID int, childErr error) (bool, error) {
 	if parentStepID == 0 {
 		return false, nil
@@ -506,19 +501,11 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 	return n > 0, nil
 }
 
-// encodeSubgraphError is the subgraph_error column's value for err: its TracedError JSON, stack stripped. Its
-// writers must not fail on what the error holds, so the message passes sanitizeErrorMessage, and JSON over the
-// payload limit or still holding a NUL keeps only the message and status code.
+// encodeSubgraphError is the subgraph_error column's value for err: deliveredError's JSON.
 func (e *Engine) encodeSubgraphError(err error) ([]byte, error) {
-	delivered := *errors.Convert(err)
-	delivered.Stack = nil
-	delivered.Err = errors.New("%s", sanitizeErrorMessage(delivered.Error()))
-	encoded, merr := json.Marshal(&delivered)
-	if merr != nil || len(encoded) > e.maxPayloadBytes || bytes.Contains(encoded, []byte(`\u0000`)) {
-		encoded, merr = json.Marshal(&errors.TracedError{Err: delivered.Err, StatusCode: delivered.StatusCode})
-		if merr != nil {
-			return nil, errors.Trace(merr)
-		}
+	encoded, merr := json.Marshal(e.deliveredError(err))
+	if merr != nil {
+		return nil, errors.Trace(merr)
 	}
 	return encoded, nil
 }

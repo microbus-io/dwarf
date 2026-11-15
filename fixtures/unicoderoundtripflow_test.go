@@ -35,7 +35,6 @@ import (
 
 	"github.com/microbus-io/dwarf/engine"
 	"github.com/microbus-io/dwarf/hosts"
-	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -62,10 +61,13 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
 
-	graph := workflow.NewGraph("Ünicödé 日本語 Graph") // the graph itself is a stored payload (the `graph` column)
+	graph := workflow.NewGraph("UnicodeRoundTrip")
 	graph.SetURL("Write", "unicoderoundtripflow.verify:428/write")
 	graph.SetURL("Ask", "unicoderoundtripflow.verify:428/ask")
-	graph.AddTransitionChain("Write", "Ask", workflow.End)
+	// The graph is a stored payload too (the `graph` column). Its names are ASCII, so its non-ASCII text is a 'when'
+	// expression, which must hold for the flow to reach Ask.
+	graph.AddTransitionWhen("Write", "Ask", `cjk == "`+uniCJK+`"`)
+	graph.AddTransition("Ask", workflow.End)
 	assert.NoError(graph.Validate())
 	mux.HandleGraph("unicoderoundtripflow.verify:428/wf", graph)
 
@@ -138,13 +140,6 @@ func TestUnicoderoundtripflow(t *testing.T) {
 	assert.Equal(uniAstral, stateVal(outcome.State, "astral"))
 	assert.Equal(uniEscaped, stateVal(outcome.State, "escaped"))
 	assert.Equal(uniRTL, stateVal(outcome.State, "answered"), "resume_data must round-trip back through the task")
-
-	// --- the `graph` column: a corrupt graph fails to unmarshal long before this, but assert the
-	// display name explicitly so the failure names the cause rather than surfacing as a decode error ---
-	summaries, err := enginetest.ListAll(ctx, eng, workflow.Query{})
-	if assert.NoError(err) && assert.True(len(summaries) > 0) {
-		assert.Equal("Ünicödé 日本語 Graph", summaries[0].WorkflowName, "the stored graph must round-trip")
-	}
 
 	// --- per-step payloads through the Step reader (`state` / `changes` as stored per row) ---
 	steps, err := eng.History(ctx, flowKey)

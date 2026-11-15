@@ -1259,8 +1259,8 @@ func (e *Engine) ensureStarted() error {
 // with Resume (which, unlike a separate start, also delivers a payload).
 //
 // An error from the host's LoadGraph is returned with its own status code, so a 503 (the graph's source
-// unreachable) tells the caller to try again; nothing is created. A workflowURL that is empty or begins or
-// ends with whitespace is a 400.
+// unreachable) tells the caller to try again; nothing is created. A workflowURL that is empty, begins or ends
+// with whitespace, or holds a character outside printable ASCII is a 400.
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
@@ -1296,8 +1296,8 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 // is in. resumeData goes to the interrupted task, as what its flow.Interrupt call returns when the task runs again;
 // it is not written to the flow's state, so a task that needs it there sets it. Each call resolves one interrupt -
 // the one Snapshot reports - and the flow runs again once none is left. Returns 404 for an unknown key, 400 for a
-// malformed key or a subgraph child's, or resume data that is not JSON-marshalable, 413 for resume data over the
-// size limit, and 409 for a flow that is not interrupted, including one a Terminate stopped first.
+// malformed key or a subgraph child's, or resume data that is not JSON-marshalable or holds text the database
+// cannot store, 413 for resume data over the size limit, and 409 for a flow that is not interrupted, including one a Terminate stopped first.
 func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) error {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
@@ -1569,7 +1569,8 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 // Continue builds on the flow it is given, so continuing one flow twice makes two successors; a caller that
 // chains flows continues the key each Continue returns. Like Create, it is not idempotent: a Continue retried
 // after a lost response makes a second flow. It returns 404 for an unknown key, 400 for a subgraph child's
-// key or additionalState holding an invalid field name (workflow.IsValidFieldName), and 409 for a flow that is not completed or is scheduled for deletion.
+// key or additionalState holding an invalid field name (workflow.IsValidFieldName) or text the database cannot
+// store, and 409 for a flow that is not completed or is scheduled for deletion.
 func (e *Engine) Continue(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)

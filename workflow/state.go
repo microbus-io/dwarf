@@ -67,8 +67,8 @@ type State struct {
 // JSON-marshalable value - is marshalled once and split into its top-level fields, each held as JSON just as
 // Set would hold it; it must marshal to a JSON object. This is the normalizer for a caller-supplied value at
 // an API boundary: wrap it in NewState. It does NOT validate value ranges: an integer beyond ±2^53 reads back
-// inexact through an untyped reader (carry it as a string instead), and a NUL byte in a string is rejected by
-// some SQL dialects' JSON storage (base64-encode binary data instead).
+// inexact through an untyped reader (carry it as a string instead), and the engine refuses a NUL character in a
+// string, which the database cannot store (base64-encode binary data instead).
 //
 // Two or more arguments are variadic name/value pairs, e.g. NewState("count", 3, "name", "abc"); each value
 // is stored through Set. An odd count, or a non-string in a name position, is an error.
