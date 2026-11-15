@@ -35,10 +35,10 @@ type FlowOptions struct {
 	// Empty uses the "" bucket. A key is at most 256 ASCII letters, digits, '-', '_'
 	// and '.'; Create rejects any other.
 	FairnessKey string `json:"fairnessKey,omitzero"`
-	// FairnessWeight is the relative dispatch share of the fairness key.
-	// Zero uses a weight of 1. Create rejects a negative weight, NaN, and a weight above
-	// 1,048,576 (2^20); a fraction expresses a smaller share.
-	FairnessWeight float64 `json:"fairnessWeight,omitzero"`
+	// FairnessWeight is the relative dispatch share of the fairness key, a whole number from 1 to
+	// 1,000,000: a key at weight 4 gets about 4x the share of a key at weight 1. Zero uses a weight
+	// of 1. Create rejects a negative weight and one above 1,000,000.
+	FairnessWeight int `json:"fairnessWeight,omitzero"`
 	// TimeBudget overrides the engine's default per-task time budget for this flow, bounding every
 	// ExecuteTask call's context deadline. Subgraph descendants inherit it. Zero uses the engine's
 	// SetTimeBudget default. Frozen at Create and immutable for the flow's life; a per-task default, not a

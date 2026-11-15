@@ -58,18 +58,17 @@ func TestCreate_RejectsNegativeOptions(t *testing.T) {
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
 	// Negative fairness weight -> 400.
-	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: -0.5})
+	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: -1})
 	assert.Error(err)
 	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
 
-	// A non-finite weight passes a `< 0` test, and the planner's draw has no answer for it -> 400; nor does a weight
-	// past the bound, whose sum with others can overflow. The bound itself is accepted.
-	for _, w := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), maxWeight * 1.5, 1e308} {
+	// A weight past the bound -> 400. The bound itself is accepted.
+	for _, w := range []int{maxFairnessWeight + 1, math.MaxInt} {
 		_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: w})
 		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "weight %v", w)
 	}
 
-	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: maxWeight})
+	_, err = e.Create(ctx, "fopt/g", nil, &workflow.FlowOptions{FairnessWeight: maxFairnessWeight})
 	assert.NoError(err)
 
 	// A fairness key is ASCII letters, digits, '-', '_' and '.', at most 256 of them -> anything else is a 400. SQL

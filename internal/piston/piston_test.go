@@ -86,7 +86,7 @@ func newRigWith(t *testing.T, d *diagnostics.Diags) *rig {
 
 // insertStep adds one due pending step and returns its id. Steps are inserted oldest-first by call
 // order, which is what the fetch's created_at ordering keys on.
-func (r *rig) insertStep(t *testing.T, flowID, priority int, key string, weight float64) int {
+func (r *rig) insertStep(t *testing.T, flowID, priority int, key string, weight int) int {
 	t.Helper()
 	_, err := r.db.ExecContext(context.Background(),
 		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status,"+

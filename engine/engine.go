@@ -481,10 +481,9 @@ type ShardSpec struct {
 	Cordoned bool
 }
 
-// maxWeight bounds a shard's placement weight and a flow's fairness weight. Each feeds a weighted pick over a
-// running sum, and finite weights can still sum to infinity (two at 1e308), which sends every placement draw to
-// whichever shard comes last in map order. A share needs a ratio, not a magnitude, so the bound costs nothing; a
-// fraction expresses a smaller share.
+// maxWeight bounds a shard's placement weight. It feeds a weighted pick over a running sum, and finite weights can
+// still sum to infinity (two at 1e308), which sends every placement draw to whichever shard comes last in map
+// order. A share needs a ratio, not a magnitude, so the bound costs nothing; a fraction expresses a smaller share.
 const maxWeight = 1 << 20
 
 // SetShard registers a database shard. Call once per shard; see ShardSpec for field semantics. When no

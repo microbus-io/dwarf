@@ -53,7 +53,7 @@ type claimRow struct {
 	flowCreatedAt, flowUpdatedAt               time.Time
 	flowPriority                               int
 	flowFairnessKey                            string
-	flowFairnessWeight                         float64
+	flowFairnessWeight                         int
 	flowTimeBudgetMs                           int
 	flowCancelReason, graphHash                string
 	flowPayloadVer                             int

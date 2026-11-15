@@ -66,10 +66,8 @@ func (e *Engine) create(ctx context.Context, workflowURL string, initialState an
 		if opts.Priority > e.maxPriority {
 			return "", errors.New("priority must be at most the maximum priority %d", e.maxPriority, http.StatusBadRequest)
 		}
-		// NaN fails both comparisons; the planner's weighted draw has no defined answer for it or for a sum that
-		// overflows.
-		if !(opts.FairnessWeight >= 0 && opts.FairnessWeight <= maxWeight) {
-			return "", errors.New("fairness weight must be between 0 and %d", maxWeight, http.StatusBadRequest)
+		if opts.FairnessWeight < 0 || opts.FairnessWeight > maxFairnessWeight {
+			return "", errors.New("fairness weight must be between 0 and %d", maxFairnessWeight, http.StatusBadRequest)
 		}
 		if !validFairnessKey(opts.FairnessKey) {
 			return "", errors.New("fairness key must be at most %d letters, digits, '-', '_' or '.'", maxFairnessKeyLen, http.StatusBadRequest)
@@ -167,7 +165,7 @@ type flowSeed struct {
 	rootFlowID         int
 	priority           int
 	fairnessKey        string
-	fairnessWeight     float64
+	fairnessWeight     int
 	engineID           int64 // creator stamp: the inserting engine's random id (provenance, unindexed)
 }
 
@@ -1433,7 +1431,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	var flowStatus, workflowURL, fairnessKey, graphHash string
 	var finalStateJSON, graphJSON, baggageJSON []byte
 	var surgraphFlowID, deleteAfterMs, priority, timeBudgetMs int
-	var fairnessWeight float64
+	var fairnessWeight int
 	found, err := e.queryLiveOrArchive(ctx, db, shardNum, flowID, flowHour, closeNone, func(t flowTables) (bool, error) {
 		publication, args := publicationColumn(db.DriverName(), t)
 		var published int
@@ -1550,6 +1548,11 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 
 // maxFairnessKeyLen is the width of the fairness_key column.
 const maxFairnessKeyLen = 256
+
+// maxFairnessWeight bounds a flow's fairness weight. The planner takes only the ratios of the weights at a band, so
+// with the default at 1 the bound is how far above the default a key can go. An integer column on every dialect
+// holds it with room to spare.
+const maxFairnessWeight = 1_000_000
 
 // validFairnessKey reports whether key is a fairness key Create accepts: empty, or up to maxFairnessKeyLen ASCII
 // letters, digits, '-', '_' and '.'. The key is grouped and matched in SQL as well as in Go, and the narrow alphabet

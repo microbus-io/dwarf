@@ -252,7 +252,7 @@ func (e *Engine) forkSource(ctx context.Context, tx *sequel.Tx, src flowTables, 
 	var rootWorkflowURL string
 	var rootPriority, rootTimeBudgetMs int
 	var rootFairnessKey string
-	var rootFairnessWeight float64
+	var rootFairnessWeight int
 	err = tx.QueryRowContext(ctx,
 		"SELECT workflow_url, priority, fairness_key, fairness_weight, time_budget_ms FROM "+src.flows+" WHERE flow_id=?",
 		rootFlowID,
@@ -313,7 +313,7 @@ type forkClone struct {
 	rootTraceParent string
 	priority        int
 	fairnessKey     string
-	fairnessWeight  float64
+	fairnessWeight  int
 	timeBudgetMs    int
 	newLeafStepID   int
 	newRootFlowID   int      // the cloned root's flow_id; descendants inherit it as their root_flow_id

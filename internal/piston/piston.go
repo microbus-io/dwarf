@@ -933,9 +933,11 @@ func (p *Piston) tallyBands(ctx context.Context, part string, partArgs []any, ba
 	for rows.Next() {
 		var t planner.Tally
 		var rowDueMs float64
-		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &t.Weight, &t.Band, &rowDueMs); err != nil {
+		var weight int
+		if err := rows.Scan(&t.Key, &t.Count, &t.AgeMs, &weight, &t.Band, &rowDueMs); err != nil {
 			return nil, nil, sent, errors.Trace(err)
 		}
+		t.Weight = float64(weight)
 		t.Count = min(t.Count, capacity)
 		tallies = append(tallies, t)
 		dueMs[t.Band] = max(dueMs[t.Band], rowDueMs)

@@ -89,7 +89,7 @@ type successorBatch struct {
 	sleepMs        int64
 	priority       int
 	fairnessKey    string
-	fairnessWeight float64
+	fairnessWeight int
 	engineID       int64
 	inheritCancel  int
 	maxBytes       int // the payload bytes past which the pending rows are flushed (add)
