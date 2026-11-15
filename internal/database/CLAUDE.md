@@ -68,6 +68,12 @@ concurrency. Use Postgres 13+ for `JSONB` and partial indexes. For throughput, g
 `max_connections` of at least twice the connection budget of the shards it hosts (the engine clamps a derived
 budget to half the limit) and `shared_buffers` to ~25% of host RAM.
 
+*Aurora / managed variants:* Aurora PostgreSQL runs the **stock PG planner/executor** (Aurora replaces only the
+storage layer), so it behaves as the matching PG major version - verify with `EXPLAIN`. Aurora **Limitless**
+(distributed) is unverified and a *poor fit* anyway - dwarf already shards at the application layer (`ShardSet`),
+so a dwarf shard on Limitless is double-sharded, and its distributed planner is unknown territory. **Do not
+assume; `EXPLAIN` on the actual target.**
+
 **MySQL / MariaDB - supported, expect tuning.** InnoDB at default `REPEATABLE READ` takes next-key (row + gap) locks
 on every secondary-index touch; two concurrent flow creations on a shard can deadlock on overlapping index ranges.
 `createWithGraph` retries on `sequel.IsLockContentionError`, hiding most, but a sustained deadlock rate degrades

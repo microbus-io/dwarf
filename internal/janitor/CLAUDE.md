@@ -90,6 +90,10 @@ and the recovery jobs' included.
 - **Timings** (`dwarf_janitor_batch_seconds`, by shard, job and part): `turn` is the wait for the turn, `work` the
   batch's statements, their waits for the pool included. They attribute a job's shortfall to its own waits, which the
   pool-wide counters cannot.
+- **A batch is at most 500 roots, about 4,000 rows or 16 MiB of payload**, whichever it reaches first (`SetBatch`;
+  the package's defaults and the engine's `reapBatch`, `reapBatchRows`, `reapBatchBytes`), sized to stay under about
+  0.25 s a transaction on a 32 vCPU PostgreSQL under load (user: the aim). Its roots go in one bound list of a length
+  `database.IDList` pads to, and a large tree's chunk in two lists of step ids (user).
 
 ## Pausing and stopping
 
@@ -147,6 +151,15 @@ one on SQLite (`engine/CLAUDE.md`). Large-tree archiving's share is by `flow_id`
 The fast archiving jobs (`JobFastArchiving`, one a share): the closed roots of the job's share as they come due, by
 close time, one batch a round, moved into today's archive in one transaction - or deleted, at a retention of 0. The
 move - its root locks and the rechecks under them, the directory rows and the archive time - is under "The move" below.
+
+**Do not shorten the archive grace (the engine's `archiveGrace`, a minute) to cut the archive's WAL.** A shorter grace
+does log less - a row that leaves the live tables sooner outlives fewer checkpoints, so fewer of its pages are logged
+whole - but the job then deletes from pages the hot path is still inserting into and updating, and the shard pays for
+it in CPU. Measured on one 32 vCPU PG16 shard, 8 KB JSON per step, saturated, `max_wal_size` 20 GB: 1 min / 30 s / 15 s
+ran 10,335 / 10,214 / 9,680 steps/s, with whole pages logged per step 1.83 / 1.26 / 1.03 and database CPU per step
+1.52 / 1.78 / 1.88 ms; at 15 s `BufferContent` waits rose and the refill fetch averaged 197 ms against 17. Throughput
+was set by the WAL flush cycle in every arm, so neither trade moved it far, and 1 min is best on both CPU and
+throughput.
 
 - **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
   moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
@@ -275,6 +288,13 @@ batch a round, by the same transaction as an archive move with no day (`move`, t
 Each walks the stamped roots of its share by `flow_id` through `idx_dwarf_flows_delete_after`, from a position it moves
 past every root a round considered, and starts over when its residue class changes, as fast archiving does.
 
+- **A stamped tree is deleted whole, whatever its descendants' status - deliberately; do not reguard on it.** Only a
+  closed root is ever stamped (the engine refuses to stamp an open one), so the only open descendant a stamped tree can
+  hold is an orphaned child - an open child whose parent already terminalized, which only a bug leaves, and which the
+  engine's wedge sweep would terminate anyway (`recoverOrphanedSubgraphChildren`). Deleting it is safe: a worker
+  mid-dispatch on it no-ops through the lease fence (its claim and writes match zero rows once the tree is gone), so
+  nothing strands and nothing is corrupted; whichever of the deletion and the wedge sweep reaches the orphan first
+  wins. The same holds for chunked deletion.
 - **A stamped tree too large for a batch is passed**, stamped and whole, to sweep deletion, which deletes it in chunks;
   one transaction deleting a tree grows with the tree until it cannot finish (`TestDelete_ALargeStampedTreeIsPassed`).
   It is behind the position once passed, so it waits for the sweep's window like any root left there.
@@ -455,6 +475,10 @@ pass interval (`PassInterval`): hourly for a day of a day or longer, a twenty-fo
   be whole, so a job that only dropped would stop archiving within two days.
 - **A pass is one batch**: the archiver's migrations and drops run on the shard's DB under the batch's turn
   (`TestArchiveRetention_WaitsForATurn`).
+- **The first pass runs as the janitor resumes**, then every pass interval: Startup makes days but drops none, so a
+  fleet whose replicas live shorter than an interval would otherwise never drop one.
+- **A pass holds its turn across sequel's polls for a peer's migration lock** and, off PostgreSQL, across a drop's
+  unbounded lock wait: one turn an hour.
 - **Its counter:** `dwarf_archive_maintain_failed`, a failed pass, not a stopped one
   (`TestArchiveRetention_KeepsTheDays` on days of 48 hours, which the rig never made, so a job that only dropped
   fails it; `TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`). The engine's
