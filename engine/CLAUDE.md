@@ -3525,6 +3525,8 @@ sequential id) for grouping/pivoting/log-join, but grants nothing. The same rule
 labels: the token appears only on the task carrier (`flow.SetFlowKey`, trusted task code) and as an
 in-memory waiter-match key (`signalStop`, never leaves the process). No log line emits a
 flow key at all. Any new span/log/metric that names a flow must use `keys.CorrelationID`, never the raw key.
+Pinned by `TestTelemetry_CarriesNoKeyToken`, which runs the main paths at debug level with a recording tracer and
+meter and fails on any flow or step token in them.
 
 **The lists surface the flow's trace id.** `FlowSummary.TraceID` is the 32-hex W3C trace-id parsed from the
 `trace_parent` column (`traceIDFromParent`), empty when no tracer was configured. It is a **token-free
