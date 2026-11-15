@@ -165,13 +165,23 @@ var invariantChecks = []invariantCheck{
 func AssertInvariants(t *testing.T, e Engine) {
 	t.Helper()
 	assert := testarossa.For(t)
-	ctx := context.Background()
+	shards := map[int]*sequel.DB{}
 	for _, shard := range accessors.DB(e).Indices() {
 		sh, err := accessors.DB(e).Shard(shard)
-		if !assert.NoError(err) {
-			continue
+		if assert.NoError(err) {
+			shards[shard] = sh.DB()
 		}
-		db := sh.DB()
+	}
+	AssertInvariantsIn(t, shards)
+}
+
+// AssertInvariantsIn is AssertInvariants against the given shard databases, keyed by shard index: for a database
+// no engine in the test has open, such as one a benchmark run left behind.
+func AssertInvariantsIn(t *testing.T, shards map[int]*sequel.DB) {
+	t.Helper()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	for shard, db := range shards {
 		for _, c := range invariantChecks {
 			var n int
 			if !assert.NoError(db.QueryRowContext(ctx, c.query).Scan(&n), "shard %d: %s", shard, c.label) {

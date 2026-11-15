@@ -30,6 +30,8 @@ still `advancing` on an open flow, which the orphan sweep replays. A flow gone f
 tables is returned rather than failed, for the test to account for: a Delete, a Purge, or a move to the archive.
 `CaptureOutcomesIn` records the same from shard databases a test opened itself, for a moment when no engine runs
 there: after a process was killed and before its replacement starts, whose startup would begin recovering at once.
+`AssertInvariantsIn` runs the checks the same way; the bench's `TestRig_Invariants` uses it on the database a rig run
+left behind.
 
 ## Invariants
 

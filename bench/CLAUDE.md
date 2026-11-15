@@ -257,6 +257,11 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
 - **`s2-rig.sh`:** the shard ladder on one set of four instances: a parallel solo draw check (redraws a slow one),
   then 4 shards on one c4a-48, 4 x 8 c4a-8, 2 x 4 and 1 x 2, deleting instances and VMs as the count falls. Gates
   every arm on `rtt.sh` (one `psql` session per DSN, min of a dozen `SELECT 1`) from every engine host.
+- **`clock-rig.sh`:** the database clock stepped under load, for the lease fence. Cloud SQL's clock cannot be moved,
+  so the database is PostgreSQL on a VM with its time sync off (`pgvm-setup.sh`), beside an engine VM whose clock
+  stays synced; `-time-budget` shortens the leases so a 60 s step reaches the running ones. Each arm ends with
+  `ck-check.sh`: statuses, every `loop` history's length, and the invariant checks, run from the bench's test binary
+  (`TestRig_Invariants`).
 - **`real-rig.sh`:** REAL, a day on one database: a draw check, the mix's calibration, then three 90-minute periods
   on two c4a-8 replicas with a rolling restart, verified against the database at the end.
 - **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `vrows-step.sh` and `vbytes-step.sh`

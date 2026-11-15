@@ -110,6 +110,7 @@ func run() error {
 		archivedReaders  = flag.Int("archived-readers", 0, "goroutines that read the History of archived flows (keys from ListClosed) for the whole run, beside its own load - the read load callers put on the archive; reported as archivedReads in the artifact (0 = none)")
 		archiveRetention = flag.Int("archive-retention", -1, "Engine.SetRetention for every replica: how many archive days to keep (-1 = the engine's default; with a short DWARF_TESTING_ARCHIVE_DAY, a small value makes day drops happen within the run)")
 		stateCacheMB     = flag.Int64("state-cache-mb", 0, "Engine.SetStateCacheSize in MiB for every replica: the memory each keeps for large state fields (0 = derived: a tenth of GOMEMLIMIT, else of the cgroup limit or physical memory, else 1 GiB)")
+		timeBudget       = flag.Duration("time-budget", 0, "Engine.SetTimeBudget for every replica: each task's deadline, and with the engine's lease margin the length of its lease - so a shorter one puts the leases of running tasks within reach of a database clock step (0 = the engine's default). Must exceed the longest task")
 		openLoop         = flag.Bool("open-loop", false, "open-loop load: creators fire flows without awaiting completion, so the backlog grows past the goroutine count (closed-loop caps in-flight flows at -concurrency, keeping a linear backlog inside the cache and never stressing the refiller)")
 		maxOutstanding   = flag.Int("max-outstanding", 100000, "open-loop only: cap on in-flight (created minus ended) flows, the backpressure bound that keeps the backlog from OOMing the DB")
 		arrivalRate      = flag.Float64("arrival-rate", 0, "open-loop only: cap flow creation at this many/sec, fractional allowed (0 = flat-out to saturation)")
@@ -248,6 +249,11 @@ func run() error {
 		}
 		longestTask = dist.longest()
 	}
+	if *timeBudget > 0 && longestTask+*taskJitter >= *timeBudget {
+		// A task past its deadline fails its flow: those failures would read as the engine's.
+		return fmt.Errorf("-time-budget %s must exceed the longest task (%s plus -task-jitter %s)",
+			*timeBudget, longestTask, *taskJitter)
+	}
 	// The window functions read this rather than take two more parameters; runStep already carries ten, and
 	// the readout is a property of the RUN rather than of any one window.
 	tracing.every, tracing.profile, tracing.dist = *statsEvery, profile, dist
@@ -373,6 +379,9 @@ func run() error {
 		if *archiveRetention >= 0 {
 			setters = append(setters, eng.SetRetention(*archiveRetention))
 		}
+		if *timeBudget > 0 {
+			setters = append(setters, eng.SetTimeBudget(*timeBudget))
+		}
 		setters = append(setters, archiveOverrides(eng, logger)...)
 		for _, setter := range setters {
 			if setter != nil {
@@ -445,6 +454,7 @@ func run() error {
 			"maxConnections":   *maxConns,
 			"stateCacheMB":     *stateCacheMB,
 			"archiveRetention": *archiveRetention,
+			"timeBudget":       timeBudget.String(),
 			"archivedReaders":  *archivedReaders,
 			"weights":          weights,
 			"replicas":         *replicas,
