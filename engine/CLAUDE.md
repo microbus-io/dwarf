@@ -322,7 +322,8 @@ watermark in its own INSERT, one primary-key lookup on the flow row the transact
   sleeping and resumed-interrupt steps all arrive here, which is why none of them needs a check of its own.
 - **The completion write**, for a step that was already running when the mark landed. It reads `cancelling`
   back (`RETURNING`/`OUTPUT`, or a follow-up `SELECT` on MySQL - race-free because the row is already terminal
-  and Cancel never marks a terminal row). A covered step's changes stand - it genuinely ran - but its next
+  and Cancel never marks a terminal row). A covered step's changes stand - it genuinely ran, and they reach the
+  final state on the trunk and from a branch alike - but its next
   transition is not honored: with `onError` it routes to the handler with `onErr` added to its changes; without,
   `failStep` flips it `completed -> cancelled` and escalates exactly as a failure does.
 
@@ -1246,8 +1247,15 @@ order. `fan_out_ordinal` is stamped at fan-out from the branch's position in the
 index or static declaration order), so order-sensitive reducers (`append`/`union`/`concat`/`merge`) fold in input-array order rather than
 completion order; `step_id` breaks ties. The firing gate is
 `cohort_arrivals >= cohort_size`, a counter on the spawn step independent of the merge query, so the merge's status
-filter cannot deadlock fan-in. Only `completed` members contribute; `failed`/`terminated`/`cancelled`/
-`pending`/`running` contribute nothing.
+filter cannot deadlock fan-in. At a convergence every member completed.
+
+**A fan-out that never converged folds every member's stored changes, whatever its status** (`cohortContributions`,
+for a failed or cancelled cohort's final state and for `Terminate`'s), as a lost step on the trunk keeps its own in
+the tail's. An error voids a run's writes where the run ends - a failing run stores none - so a lost member holds
+only what its runs left as facts: a retry's earlier attempts, the run that interrupted, a run a Cancel covered.
+**Do not filter by status at the fold**: it voids those writes a second time, and the same work then counts on the
+trunk and vanishes in a branch. Pinned by `fixtures/lostbranchflow_test.go` (each case fails with the filter) and
+the cohort shape of `TestHistories_Cohort`.
 
 **A member's contribution is its `changes`, EXCEPT an inner fan-in's (`cohortfold.go`).** In a nested fan-out
 an inner fan-in carries its spawn's lineage, so it is a member of the next cohort out, and its `changes` hold only
@@ -1265,8 +1273,9 @@ its own task's writes. Everything its cohort added sits in its `state`. So:
     a delete if absent.
 - **The outer fold takes an inner fan-in's part ⊕ its own `changes`** (`memberContribution`). The part counts
   WHATEVER the inner fan-in's own status: its row exists only because its cohort converged, and every step of
-  that cohort completed. Only its own writes need it to have completed. Gating the part on completion lost a
-  converged cohort whole when the fan-in task itself failed, or when a `Terminate` landed before it ran.
+  that cohort completed. Its own stored writes count whatever its status, as any member's do. Gating the part on
+  completion lost a converged cohort whole when the fan-in task itself failed, or when a `Terminate` landed before
+  it ran.
 - **The cost is one extra query per resolving fan-in that HAS inner fan-in members** (`cohortParts`, by primary
   key, padded to one of a few lengths so the statement text takes few forms), and it never reads a row below an
   inner fan-in, at any depth: each fan-in's state already holds its whole subtree. Each row is projected as it

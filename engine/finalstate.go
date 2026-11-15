@@ -405,7 +405,7 @@ func (e *Engine) mergeCohortState(ctx context.Context, db sequel.Executor, shard
 		return workflow.State{}, errors.Trace(err)
 	}
 	// The failed cohort's terminal state is built the SAME way convergence would (fanInRow): the spawn's
-	// changes folded onto its state, as the base the completed members fold onto below.
+	// changes folded onto its state, as the base the members fold onto below.
 	merged := spawnState.Clone()
 	if err := merged.Apply(spawnChanges, graph.Reducers()); err != nil {
 		return workflow.State{}, errors.Trace(&permanentError{err})
@@ -478,7 +478,7 @@ func (e *Engine) simulatedFanInPart(ctx context.Context, db sequel.Executor, sha
 	return part, nil
 }
 
-// cohortContributions returns what each completed member of a cohort adds to its fold, in fold order. A member
+// cohortContributions returns what each member of a cohort adds to its fold, in fold order. A member
 // that is an inner fan-in brings what its own cohort added (memberContribution). A member that spawned an inner
 // cohort which never converged - it failed, or the flow stopped first - has no fan-in to carry that cohort's
 // work, so what that fan-in would have carried follows the member's own contribution, in the place the fan-in
@@ -508,15 +508,17 @@ func (e *Engine) cohortContributions(ctx context.Context, db sequel.Executor, sh
 			rows.Close()
 			return nil, errors.Trace(err)
 		}
-		// Only a completed member's changes contribute, matching fanInRow: a failed, terminated, or cancelled
-		// branch's partial output is not a fact the flow can build on (an error voids the task's changes). An
-		// inner fan-in that did not complete still brings its cohort's part (memberContribution).
-		if m.completed = status == workflow.StatusCompleted; m.completed {
-			var cerr error
-			if m.changes, cerr = changesOf(changesJSON); cerr != nil {
-				rows.Close()
-				return nil, errors.Trace(cerr)
-			}
+		// Every member contributes the changes it stored, whatever its status, as a trunk step's final state keeps
+		// a lost tail's. An error voids a run's writes where the run ends - a failing run stores none - so what a
+		// failed, cancelled, terminated or interrupted member holds is what its runs left as facts: a retry's
+		// earlier attempts, the run that interrupted, a run a Cancel covered, which genuinely ran. Do not filter
+		// by status here: that voids those writes a second time, and the same work then counts on the trunk and
+		// vanishes in a branch.
+		m.completed = status == workflow.StatusCompleted
+		var cerr error
+		if m.changes, cerr = changesOf(changesJSON); cerr != nil {
+			rows.Close()
+			return nil, errors.Trace(cerr)
 		}
 		members = append(members, m)
 	}

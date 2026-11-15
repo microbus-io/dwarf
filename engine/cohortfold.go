@@ -250,12 +250,12 @@ func frozenReduced(state workflow.State, rec map[string]*reduced, reducers map[s
 }
 
 // memberContribution is what one cohort member adds to its cohort's fold. part is what the member's own cohort
-// added if the member is an inner fan-in (cohortParts), and the zero Changes otherwise; changes are the member's
-// own changes if it completed, and the zero Changes otherwise. ok is false for a member that adds nothing.
+// added if the member is an inner fan-in (cohortParts), and the zero Changes otherwise; changes are the changes the
+// member stored. ok is false for a member that adds nothing.
 //
 // An inner fan-in's part counts whatever the fan-in step's own status: every step of its cohort completed, and
-// the fan-in step only exists because the cohort converged. Its own writes count only if it completed, like any
-// member's.
+// the fan-in step only exists because the cohort converged. Its own stored writes count whatever its status, like
+// any member's (cohortContributions).
 func memberContribution(part, changes workflow.Changes, reducers map[string]workflow.Reducer) (contribution workflow.Changes, ok bool, err error) {
 	if part.IsZero() {
 		return changes, !changes.IsZero(), nil

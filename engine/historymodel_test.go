@@ -40,8 +40,8 @@ import (
 //     source's; the fan-in starts from the source's followed by every branch's changes, in declaration order. A
 //     subgraph child starts empty.
 //   - A closed flow's final state is frozen at the close: its tail's state followed by its changes, or, while a
-//     cohort is open, the fan-out source's followed by the changes of each branch that completed - a branch that
-//     failed, was cancelled, terminated or is interrupted contributes nothing.
+//     cohort is open, the fan-out source's followed by every branch's changes - a branch that failed, was
+//     cancelled, terminated or is interrupted contributes what its runs stored, as a lost tail does.
 //   - A trunk step's loss closes its flow. A branch's loss is an arrival that counts against the cohort, which
 //     resolves once every branch arrived: into the fan-in with no loss, else the flow closes cancelled when every
 //     loss was a cancellation and failed otherwise. A flow with an interrupted step and no close rests interrupted.
@@ -324,7 +324,7 @@ func (m *hModel) close(f *mFlow, status, by string) {
 	f.status = status
 	f.closedBy = by
 	if f.spawn != nil && !slices.ContainsFunc(f.steps, func(s *mStep) bool { return s.task == f.g.fanIn }) {
-		f.final = cohortFold(f, false)
+		f.final = cohortFold(f)
 	} else {
 		f.final = f.steps[len(f.steps)-1].merged()
 	}
@@ -348,14 +348,11 @@ func (m *hModel) close(f *mFlow, status, by string) {
 	m.settleStatus()
 }
 
-// cohortFold is the fan-out source's state and changes followed by each completed branch's changes - every
-// branch's, with all - in declaration order.
-func cohortFold(f *mFlow, all bool) []string {
+// cohortFold is the fan-out source's state and changes followed by every branch's changes, in declaration order.
+func cohortFold(f *mFlow) []string {
 	out := f.spawn.merged()
 	for _, b := range f.members {
-		if all || b.status == workflow.StatusCompleted {
-			out = append(out, b.changes...)
-		}
+		out = append(out, b.changes...)
 	}
 	return out
 }
@@ -614,7 +611,7 @@ func (m *hModel) resolve(f *mFlow, last *mStep) {
 		}
 		return
 	}
-	j := m.insert(f, f.g.fanIn, cohortFold(f, true))
+	j := m.insert(f, f.g.fanIn, cohortFold(f))
 	j.sleeping, j.cancelling = last.slept, f.watermark >= last.idx
 	m.preempt(j)
 }
