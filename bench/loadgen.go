@@ -133,6 +133,23 @@ var guard struct {
 	stall time.Duration
 }
 
+// deleteOnCompletion marks every flow a sweep or open-loop step creates DeleteOnCompletion, set once at startup from
+// -delete-on-completion. Package-level for the reason guard is.
+var deleteOnCompletion bool
+
+// newFlowOpts returns the options of one flow a step creates: a fairness key drawn from fairnessKeys (none at 1 or
+// fewer), and DeleteOnCompletion when the run asks for it. Nil when neither applies.
+func newFlowOpts(fairnessKeys int) *workflow.FlowOptions {
+	if fairnessKeys <= 1 && !deleteOnCompletion {
+		return nil
+	}
+	opts := &workflow.FlowOptions{DeleteOnCompletion: deleteOnCompletion}
+	if fairnessKeys > 1 {
+		opts.FairnessKey = fmt.Sprintf("k%d", rand.IntN(fairnessKeys))
+	}
+	return opts
+}
+
 // stalledRun is set by any watchdog that fires and by a drain that gives up, so the run stops at the first stall
 // whatever mode it is in: every window after one starts on hung engines, and main exits without their shutdown,
 // which would wait on whatever hung.
@@ -313,12 +330,7 @@ func runStep(ctx context.Context, engines []*engine.Engine, readers []*sdkmetric
 	// The refiller tallies and fetches PER fairness key. With every flow on one default key that degenerates
 	// to a single group over the whole due backlog. Spreading flows across keys is what restores the
 	// intended shape - and makes the degenerate case measurable against it.
-	flowOpts := func() *workflow.FlowOptions {
-		if fairnessKeys <= 1 {
-			return nil
-		}
-		return &workflow.FlowOptions{FairnessKey: fmt.Sprintf("k%d", rand.IntN(fairnessKeys))}
-	}
+	flowOpts := func() *workflow.FlowOptions { return newFlowOpts(fairnessKeys) }
 
 	var (
 		measuring  atomic.Bool
@@ -449,12 +461,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 	bytesWritten *atomic.Int64, pick func() *workload, creators, fairnessKeys, maxOutstanding int, arrivalPerSec float64,
 	warmup, window, arrivalStop time.Duration) stepResult {
 
-	flowOpts := func() *workflow.FlowOptions {
-		if fairnessKeys <= 1 {
-			return nil
-		}
-		return &workflow.FlowOptions{FairnessKey: fmt.Sprintf("k%d", rand.IntN(fairnessKeys))}
-	}
+	flowOpts := func() *workflow.FlowOptions { return newFlowOpts(fairnessKeys) }
 	ended := func() int64 {
 		var n int64
 		for _, e := range engines {

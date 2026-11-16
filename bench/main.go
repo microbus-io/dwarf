@@ -154,7 +154,7 @@ func run() error {
 		fairnessSkew    = flag.Float64("fairness-skew", 0, "spread flows over -fairness-keys by a Zipf law with this exponent (> 1; key k0 the heaviest), instead of uniformly (0); -real only")
 		priorityMixFlag = flag.String("priority-mix", "", "-real: the share of flows at each priority level, \"1:0.03,2:0.12,3:0.55,4:0.2,5:0.1\" (1..5, lower runs first); empty = every flow at the engine's default, 3")
 		retention       = flag.Duration("retention", 0, "-real: Purge completed flows older than this every minute, so the step table reaches a steady size (0 = keep everything)")
-		deleteOnDone    = flag.Bool("delete-on-completion", false, "-real: create every flow with DeleteOnCompletion, so the janitor removes it a minute after it completes and the step table holds only work in flight")
+		deleteOnDone    = flag.Bool("delete-on-completion", false, "create every flow with DeleteOnCompletion, so the janitor deletes it a minute after it completes instead of archiving it, and the live tables hold only the work in flight and that minute")
 		carryRead       = flag.Bool("carry-read", false, "carry workloads: make every task READ the carried document instead of only passing it along. Storage is identical either way, so this is the arm switch for how carried state is HELD, not how much is stored")
 	)
 	flag.Var(&dsns, "dsn", "shard DSN, repeatable; 'N=dsn' sets shard N, a bare dsn sets shard 1 (default: throwaway local SQLite)")
@@ -259,6 +259,7 @@ func run() error {
 	tracing.every, tracing.profile, tracing.dist = *statsEvery, profile, dist
 	tracing.stackGroups = *stackGroups
 	guard.drain, guard.stall = *drain, *stallTimeout
+	deleteOnCompletion = *deleteOnDone
 	if *stallTimeout > 0 && longestTask+*taskJitter >= *stallTimeout {
 		// A task longer than the timeout is silence the watchdog would read as a hang.
 		return fmt.Errorf("-stall-timeout %s must exceed the longest task (%s plus -task-jitter %s)",
@@ -446,24 +447,25 @@ func run() error {
 			"taskDelayMeanMs": dist.mean().Milliseconds(),
 			// The workload's own shape knobs. Without them a -fanout-width or -linear-steps sweep produces
 			// artifacts that are byte-identical in configuration and wildly different in what they measured.
-			"fanOutWidth":      *fanOutWidth,
-			"branchDepth":      *branchDepth,
-			"linearSteps":      *linearStepsFlag,
-			"carryRead":        *carryRead,
-			"workers":          *workers,
-			"maxConnections":   *maxConns,
-			"stateCacheMB":     *stateCacheMB,
-			"archiveRetention": *archiveRetention,
-			"timeBudget":       timeBudget.String(),
-			"archivedReaders":  *archivedReaders,
-			"weights":          weights,
-			"replicas":         *replicas,
-			"replicaWorkers":   *replicaWorkers,
-			"shards":           dsns.redacted(),
-			"windowSec":        window.Seconds(),
-			"warmupSec":        warmup.Seconds(),
-			"drainSec":         drain.Seconds(),
-			"stallTimeoutSec":  stallTimeout.Seconds(),
+			"fanOutWidth":        *fanOutWidth,
+			"branchDepth":        *branchDepth,
+			"linearSteps":        *linearStepsFlag,
+			"carryRead":          *carryRead,
+			"workers":            *workers,
+			"maxConnections":     *maxConns,
+			"stateCacheMB":       *stateCacheMB,
+			"archiveRetention":   *archiveRetention,
+			"timeBudget":         timeBudget.String(),
+			"deleteOnCompletion": *deleteOnDone,
+			"archivedReaders":    *archivedReaders,
+			"weights":            weights,
+			"replicas":           *replicas,
+			"replicaWorkers":     *replicaWorkers,
+			"shards":             dsns.redacted(),
+			"windowSec":          window.Seconds(),
+			"warmupSec":          warmup.Seconds(),
+			"drainSec":           drain.Seconds(),
+			"stallTimeoutSec":    stallTimeout.Seconds(),
 		},
 		Environment: environment(),
 		Valid:       true,
