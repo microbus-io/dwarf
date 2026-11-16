@@ -18,6 +18,8 @@ package engine
 
 import (
 	"context"
+	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1137,10 +1139,10 @@ func (h slowGraphHost) LoadGraph(ctx context.Context, workflowURL string) (*work
 	return h.Mux.LoadGraph(ctx, workflowURL)
 }
 
-// TestMetrics_OperationSeconds pins dwarf_operation_seconds: every operation records under its own op label and
+// TestMetrics_ShardOperationSeconds pins dwarf_shard_operation_seconds: every operation records under its own op label and
 // the shard it worked on, timed over the shard's share of the call only - a slow graph load stays out of
 // create's sample, and Await's park stays out while its reads count as snapshot.
-func TestMetrics_OperationSeconds(t *testing.T) {
+func TestMetrics_ShardOperationSeconds(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := context.Background()
@@ -1234,23 +1236,23 @@ func TestMetrics_OperationSeconds(t *testing.T) {
 	once := []string{"history", "step", "fingerprint", "fork", "continue", "list_open", "list_closed", "list_recently_closed", "summary", "shard_info", "delete",
 		"purge_before", "resume", "terminate", "cancel"}
 	for _, op := range once {
-		n, ok := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": op, "shard": "1"})
+		n, ok := histCount(rm, "dwarf_shard_operation_seconds", map[string]string{"op": op, "shard": "1"})
 		assert.True(ok, "op=%s should be recorded on shard 1", op)
 		assert.Equal(uint64(1), n, "op=%s records one sample per call per shard", op)
 	}
-	n, _ := histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "purge", "shard": "1"})
+	n, _ := histCount(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "purge", "shard": "1"})
 	assert.True(n >= 1, "Purge records one sample per stage it runs on a shard")
-	n, _ = histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
+	n, _ = histCount(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "create", "shard": "1"})
 	assert.Equal(uint64(4), n, "Run's create half and the three Creates")
-	n, _ = histCount(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot", "shard": "1"})
+	n, _ = histCount(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "snapshot", "shard": "1"})
 	assert.True(n >= 2, "Await reads the flow before and after it parks, and those reads are snapshots")
 
 	// Run's create half paid the graph delay outside its turn, and its await parked for the task outside any
 	// turn, so neither shows up in the samples.
-	longest, ok := histMax(rm, "dwarf_operation_seconds", map[string]string{"op": "create"})
+	longest, ok := histMax(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "create"})
 	assert.True(ok)
 	assert.True(longest < slow.Seconds(), "create's samples must exclude the host's graph load, got %fs", longest)
-	longest, ok = histMax(rm, "dwarf_operation_seconds", map[string]string{"op": "snapshot"})
+	longest, ok = histMax(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "snapshot"})
 	assert.True(ok)
 	assert.True(longest < slow.Seconds(), "snapshot's samples must exclude Await's park, got %fs", longest)
 }
@@ -1306,7 +1308,198 @@ func TestOperation_HonorsDeadlineOnAFullShard(t *testing.T) {
 	if !assert.NoError(reader.Collect(ctx, &rm)) {
 		return
 	}
-	sum, ok := histSum(rm, "dwarf_operation_seconds", map[string]string{"op": "create", "shard": "1"})
+	sum, ok := histSum(rm, "dwarf_shard_operation_seconds", map[string]string{"op": "create", "shard": "1"})
 	assert.True(ok, "the queued create is recorded")
 	assert.True(sum >= deadline.Seconds()*0.9, "its sample covers the wait at the turnstile, got %fs", sum)
+	assert.Equal(int64(1), ingressPoints(rm)["op=create,status_code=408"], "a create that ran out of the caller's deadline at the turnstile is the caller's 408")
+}
+
+// ingressPoints reads dwarf_ingress_operations as a count per attribute set, encoded "op=...,status_code=...".
+func ingressPoints(rm metricdata.ResourceMetrics) map[string]int64 {
+	points := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "dwarf_ingress_operations" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				points[dp.Attributes.Encoded(attribute.DefaultEncoder())] += dp.Value
+			}
+		}
+	}
+	return points
+}
+
+// TestMetrics_IngressOperations pins dwarf_ingress_operations: every exported operation counts exactly one call, by how
+// it ended. A Create whose database connection failed counts 500, a bad request 400, an unknown flow 404, the caller's
+// deadline and cancellation 408 and 499, and a call to a stopped engine nothing. The collected points must equal the
+// calls made, so a missing record, a second one, or a stray attribute fails it.
+func TestMetrics_IngressOperations(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	const flowURL, askURL, holdURL = "opcalled.verify:428/g", "opcalled.verify:428/askg", "opcalled.verify:428/holdg"
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Called")
+	g.SetURL("A", "opcalled.verify:428/a")
+	g.AddTransition("A", workflow.End)
+	mux.HandleGraph(flowURL, g)
+	mux.HandleTask("opcalled.verify:428/a", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	ask := workflow.NewGraph("Ask")
+	ask.SetURL("Ask", "opcalled.verify:428/ask")
+	ask.AddTransition("Ask", workflow.End)
+	mux.HandleGraph(askURL, ask)
+	mux.HandleTask("opcalled.verify:428/ask", func(ctx context.Context, f *workflow.Flow) error {
+		_, err := f.Interrupt(nil, nil)
+		return err
+	})
+	release := make(chan struct{})
+	hold := workflow.NewGraph("Hold")
+	hold.SetURL("Hold", "opcalled.verify:428/hold")
+	hold.AddTransition("Hold", workflow.End)
+	mux.HandleGraph(holdURL, hold)
+	mux.HandleTask("opcalled.verify:428/hold", func(ctx context.Context, f *workflow.Flow) error {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	reader := withManualReader(e)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	want := map[string]int64{}
+	called := func(op string, code int) { want["op="+op+",status_code="+strconv.Itoa(code)]++ }
+
+	// Every operation once, succeeding.
+	flowKey, outcome, err := e.Run(ctx, flowURL, nil, nil)
+	assert.Must(assert.NoError(err))
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+	called("run", 200)
+	_, err = e.Snapshot(ctx, flowKey)
+	assert.NoError(err)
+	called("snapshot", 200)
+	_, _, err = e.Fingerprint(ctx, flowKey)
+	assert.NoError(err)
+	called("fingerprint", 200)
+	hist, err := e.History(ctx, flowKey)
+	assert.Must(assert.NoError(err))
+	assert.Must(assert.True(len(hist) > 0))
+	called("history", 200)
+	_, err = e.Step(ctx, hist[0].StepKey)
+	assert.NoError(err)
+	called("step", 200)
+	_, err = e.Summary(ctx, flowKey)
+	assert.NoError(err)
+	called("summary", 200)
+	_, err = e.Await(ctx, flowKey)
+	assert.NoError(err)
+	called("await", 200)
+	_, err = e.Poll(ctx, flowKey)
+	assert.NoError(err)
+	called("poll", 200)
+	_, err = e.Fork(ctx, hist[0].StepKey, nil)
+	assert.NoError(err)
+	called("fork", 200)
+	_, err = e.Continue(ctx, flowKey, nil)
+	assert.NoError(err)
+	called("continue", 200)
+	_, err = e.ListOpen(ctx, enginetest.Recent(workflow.Query{}))
+	assert.NoError(err)
+	called("list_open", 200)
+	_, err = e.ListClosed(ctx, enginetest.Recent(workflow.Query{}))
+	assert.NoError(err)
+	called("list_closed", 200)
+	_, err = e.ListRecentlyClosed(ctx, enginetest.Recent(workflow.Query{}))
+	assert.NoError(err)
+	called("list_recently_closed", 200)
+	_, err = e.ShardInfo(ctx)
+	assert.NoError(err)
+	called("shard_info", 200)
+	assert.NoError(e.Delete(ctx, flowKey))
+	called("delete", 200)
+	_, _, err = e.Purge(ctx, enginetest.Recent(workflow.Query{Status: workflow.StatusTerminated}))
+	assert.NoError(err)
+	called("purge", 200)
+	assert.NoError(e.PurgeBefore(ctx, time.Now().Add(-48*time.Hour)))
+	called("purge_before", 200)
+	var parked []string
+	for range 3 {
+		k, err := e.Create(ctx, askURL, nil, nil)
+		assert.Must(assert.NoError(err))
+		called("create", 200)
+		out, err := e.Await(ctx, k)
+		assert.Must(assert.NoError(err))
+		assert.Must(assert.Equal(workflow.StatusInterrupted, out.Status))
+		called("await", 200)
+		parked = append(parked, k)
+	}
+	assert.NoError(e.Resume(ctx, parked[0], nil))
+	called("resume", 200)
+	assert.NoError(e.Terminate(ctx, parked[1], "test"))
+	called("terminate", 200)
+	assert.NoError(e.Cancel(ctx, parked[2], "test"))
+	called("cancel", 200)
+
+	// A Create whose connection failed is the database's 500, though the flow it committed exists: the count is what
+	// the caller saw.
+	fault := diagnostics.Join(diagnostics.FaultCreateCommitLost, flowURL)
+	e.diags.Seams().Inject(fault)
+	_, err = e.Create(ctx, flowURL, nil, nil)
+	assertFired(t, e, fault)
+	assert.Equal(http.StatusInternalServerError, errors.StatusCode(err))
+	called("create", 500)
+	// A bad request is the caller's 400, and an unknown flow its 404.
+	_, err = e.Create(ctx, "", nil, nil)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	called("create", 400)
+	_, err = e.Snapshot(ctx, "not-a-key")
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	called("snapshot", 400)
+	shardNum, hour, flowID, token, err := keys.ParseFlowKey(flowKey)
+	assert.Must(assert.NoError(err))
+	_, err = e.Snapshot(ctx, keys.NewFlowKey(shardNum, hour, flowID+1_000_000, token))
+	assert.Equal(http.StatusNotFound, errors.StatusCode(err))
+	called("snapshot", 404)
+
+	// The caller giving up: a deadline that passes is 408 for Await, and none for Poll, whose budget it is; a
+	// cancelled context is 499 whatever error the cancellation produced.
+	holdKey, err := e.Create(ctx, holdURL, nil, nil)
+	assert.Must(assert.NoError(err))
+	called("create", 200)
+	dctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	_, err = e.Await(dctx, holdKey)
+	cancel()
+	assert.Equal(http.StatusRequestTimeout, errors.StatusCode(err))
+	called("await", 408)
+	dctx, cancel = context.WithTimeout(ctx, 100*time.Millisecond)
+	out, err := e.Poll(dctx, holdKey)
+	cancel()
+	assert.NoError(err)
+	assert.False(out.Stopped())
+	called("poll", 200)
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, err = e.Snapshot(cctx, holdKey)
+	assert.Error(err)
+	called("snapshot", 499)
+	close(release)
+
+	// A call to a stopped engine is refused with a 503 and not counted.
+	assert.NoError(e.Shutdown(ctx))
+	_, err = e.Snapshot(ctx, holdKey)
+	assert.Equal(http.StatusServiceUnavailable, errors.StatusCode(err))
+
+	var rm metricdata.ResourceMetrics
+	assert.Must(assert.NoError(reader.Collect(ctx, &rm)))
+	assert.Equal(want, ingressPoints(rm))
 }

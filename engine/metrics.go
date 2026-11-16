@@ -20,6 +20,7 @@ import (
 	"context"
 	"maps"
 	"math"
+	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -40,39 +41,41 @@ const metricScope = "github.com/microbus-io/dwarf"
 // engineMetrics holds the engine's OpenTelemetry instruments. The counters are incremented inline at
 // their event sites; the gauges are observable (async) and pulled by observeGauges at collection time.
 type engineMetrics struct {
-	flowsStarted        metric.Int64Counter
-	flowsClosed         metric.Int64Counter
-	stepsExecuted       metric.Int64Counter
-	stepsRecovered      metric.Int64Counter
-	stepsUnwedged       metric.Int64Counter
-	stepsWriteRetried   metric.Int64Counter
-	stepsWriteFailed    metric.Int64Counter
-	flowsOrphaned       metric.Int64Counter
-	stateWriteBytes     metric.Int64Counter
-	stateReadBytes      metric.Int64Counter
-	stepsClaimLost      metric.Int64Counter
-	stepsClaimPreempted metric.Int64Counter
-	stepsOffered        metric.Int64Counter
-	turnWait            metric.Float64Histogram
-	gateWait            metric.Float64Histogram
-	dbPhaseSeconds      metric.Float64Histogram
-	operationSeconds    metric.Float64Histogram
-	peerChanges         metric.Int64Counter
-	placementSkipped    metric.Int64Counter
-	flowsRemoved        metric.Int64Counter
-	flowsExpired        metric.Int64Counter
-	expireFailed        metric.Int64Counter
+	flowsStarted          metric.Int64Counter
+	flowsClosed           metric.Int64Counter
+	stepsExecuted         metric.Int64Counter
+	stepsRecovered        metric.Int64Counter
+	stepsUnwedged         metric.Int64Counter
+	stepsWriteRetried     metric.Int64Counter
+	stepsWriteFailed      metric.Int64Counter
+	flowsOrphaned         metric.Int64Counter
+	stateWriteBytes       metric.Int64Counter
+	stateReadBytes        metric.Int64Counter
+	stepsClaimLost        metric.Int64Counter
+	stepsClaimPreempted   metric.Int64Counter
+	stepsOffered          metric.Int64Counter
+	turnWait              metric.Float64Histogram
+	gateWait              metric.Float64Histogram
+	dbPhaseSeconds        metric.Float64Histogram
+	shardOperationSeconds metric.Float64Histogram
+	ingressOperations     metric.Int64Counter
+	peerChanges           metric.Int64Counter
+	placementSkipped      metric.Int64Counter
+	flowsRemoved          metric.Int64Counter
+	flowsExpired          metric.Int64Counter
+	expireFailed          metric.Int64Counter
 
 	reg metric.Registration // the observable-gauge callback registration, unregistered at Shutdown
 
 	// Memoized attribute options for the hot-path recorders, one memo per attribute shape.
-	dbPhaseOpts   [2]*attrOpts // by enterDBPhase's role index
-	shardOpts     measureOpts[int]
-	stateOpts     measureOpts[stateBytesKey]
-	stepExecOpts  measureOpts[stepExecKey]
-	flowStartOpts measureOpts[flowKeyAttrs]
-	flowEndOpts   measureOpts[flowKeyAttrs]
-	operationOpts measureOpts[operationKey]
+	dbPhaseOpts        [2]*attrOpts // by enterDBPhase's role index
+	shardOpts          measureOpts[int]
+	stateOpts          measureOpts[stateBytesKey]
+	stepExecOpts       measureOpts[stepExecKey]
+	flowStartOpts      measureOpts[flowKeyAttrs]
+	flowEndOpts        measureOpts[flowKeyAttrs]
+	shardOperationOpts measureOpts[shardOperationKey]
+	ingressOpts        measureOpts[ingressKey]
 }
 
 // attrOpts is one attribute set, prebuilt as the option slices the instruments take. Passing a stored slice
@@ -142,9 +145,14 @@ type stepExecKey struct {
 	shard        int
 }
 
-type operationKey struct {
+type shardOperationKey struct {
 	op    string
 	shard int
+}
+
+type ingressKey struct {
+	op   string
+	code int
 }
 
 type flowKeyAttrs struct {
@@ -231,7 +239,7 @@ func (e *Engine) initMetrics() error {
 	// Timed from the request for the operation's turn to its release, never the whole call: what falls outside
 	// the turn - Create's graph load, Await's park - is the host's time or the flow's, and recording it would
 	// make every shard look slow together, which is the one comparison this instrument is for.
-	operationSeconds, err := meter.Float64Histogram("dwarf_operation_seconds",
+	shardOperationSeconds, err := meter.Float64Histogram("dwarf_shard_operation_seconds",
 		metric.WithUnit("s"),
 		metric.WithDescription("Time an API operation spent on a shard, by operation (op) and shard: the wait for its turn at the shard's turnstile plus its database work, from requesting the turn to releasing it. Work outside the shard is not counted - Create's graph load is the host's, and Await, Poll and Run's wait for the flow to stop is the flow's; their reads of the flow are recorded as snapshot. An operation that spans every shard (ListOpen, ListRecentlyClosed, ListClosed, PurgeBefore, ShardInfo) records one sample per shard it touched, and Purge one per stage it runs on a shard (reading the archive, deleting there). This is the latency a caller pays on each shard, so it is the instrument that finds a SLOW SHARD: compare one op's p90 across shards. A caller with bounded concurrency stalls on that shard's calls and then has fewer left for the others, so one slow shard slows the whole fleet. To tell why, read the slow shard's turnstile: free turns (dwarf_turnstile_available) while the operation is slow rule out queueing, so its database is slow per query; no free turns means calls are queueing, which a slow database causes as surely as extra load does, so read dwarf_turnstile_waiting and dwarf_turnstile_wait_seconds against the shard's own history and the server's own metrics to tell which."),
 		metric.WithExplicitBucketBoundaries(0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10))
@@ -239,7 +247,10 @@ func (e *Engine) initMetrics() error {
 		errs = append(errs, errors.Trace(err))
 	}
 	m.dbPhaseSeconds = dbPhaseSeconds
-	m.operationSeconds = operationSeconds
+	m.shardOperationSeconds = shardOperationSeconds
+	// One count per call, recorded on the way out of each exported operation, never in opTurn: a call that fails
+	// before its turn - a bad request, a failed graph load - takes none, and a call across shards takes one per shard.
+	m.ingressOperations = ctr("dwarf_ingress_operations", "Counts calls to the engine's API, by operation (op) and by how each ended (status_code): 200 for success, else the status code of the error the caller got - 4xx for the caller's request (malformed, unknown, in conflict with the flow's state), 5xx for the database or the engine, 500 for an error that carries no status, such as a lost connection. A call whose caller cancelled its context counts as 499, and one whose caller's deadline passed as 408, whatever error that produced, so a caller giving up never counts as a server error. A call made while the engine is not running - before Startup, after Shutdown - is not counted. One count per call however many shards it touched, so this is the call rate, where dwarf_shard_operation_seconds is the time spent on each shard. A Create whose flow was committed but whose reply was lost counts as the error the caller saw. Await and Run return a 408 when their wait runs out, which is normal for a long flow, so split by op before alerting on errors.")
 	m.turnWait = turnWait
 	m.gateWait = gateWait
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a partition that drains to empty between cycles admits the next step at once) and is what keeps a sequential chain from paying a cycle per hop.")
@@ -574,16 +585,48 @@ func (e *Engine) metricStepExecuted(ctx context.Context, taskName, status string
 	e.metrics.stepsExecuted.Add(ctx, 1, opts.add...)
 }
 
-// metricOperation records one API operation's time on a shard (dwarf_operation_seconds). opTurn is its only
+// metricShardOperation records one API operation's time on a shard (dwarf_shard_operation_seconds). opTurn is its only
 // caller, and passes the caller's ctx so an exemplar links to the caller's trace.
-func (e *Engine) metricOperation(ctx context.Context, op string, shardNum int, d time.Duration) {
-	if e.metrics == nil || e.metrics.operationSeconds == nil {
+func (e *Engine) metricShardOperation(ctx context.Context, op string, shardNum int, d time.Duration) {
+	if e.metrics == nil || e.metrics.shardOperationSeconds == nil {
 		return
 	}
-	opts := e.metrics.operationOpts.get(operationKey{op: op, shard: shardNum}, func(k operationKey) *attrOpts {
+	opts := e.metrics.shardOperationOpts.get(shardOperationKey{op: op, shard: shardNum}, func(k shardOperationKey) *attrOpts {
 		return newAttrOpts(attribute.String("op", k.op), shardAttr(k.shard))
 	})
-	e.metrics.operationSeconds.Record(ctx, d.Seconds(), opts.rec...)
+	e.metrics.shardOperationSeconds.Record(ctx, d.Seconds(), opts.rec...)
+}
+
+// metricIngressOperation counts one call to an exported operation by how it ended (dwarf_ingress_operations). Each
+// exported operation defers it over its named error result once it passes ensureStarted, which orders the read of
+// e.metrics after initMetrics wrote it; no operation calls another, so every call counts once.
+func (e *Engine) metricIngressOperation(ctx context.Context, op string, err *error) {
+	if e.metrics == nil {
+		return
+	}
+	opts := e.metrics.ingressOpts.get(ingressKey{op: op, code: ingressStatus(ctx, *err)}, func(k ingressKey) *attrOpts {
+		return newAttrOpts(attribute.String("op", k.op), attribute.String("status_code", strconv.Itoa(k.code)))
+	})
+	e.metrics.ingressOperations.Add(ctx, 1, opts.add...)
+}
+
+// statusClientClosedRequest is the status of a call whose caller went away: not in net/http, but the code a proxy
+// logs for it.
+const statusClientClosedRequest = 499
+
+// ingressStatus is how a call ended, for dwarf_ingress_operations. A caller that gave up is told by its own context,
+// not by the error: what giving up produces varies - a driver's error, a turnstile's, a wait's own 408 - and is
+// never the server's failure.
+func ingressStatus(ctx context.Context, err error) int {
+	switch {
+	case err == nil:
+		return http.StatusOK
+	case errors.Is(ctx.Err(), context.Canceled):
+		return statusClientClosedRequest
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return http.StatusRequestTimeout
+	}
+	return errors.StatusCode(err)
 }
 
 // metricPeerCountChanged records that one shard's observed replica count moved. Deliberately driven from

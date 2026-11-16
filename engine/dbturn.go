@@ -49,7 +49,7 @@ func (e *Engine) dbTurn(ctx context.Context, shardNum int) (context.Context, fun
 }
 
 // opTurn is dbTurn for an API operation's entry point. Its release also records how long the operation held
-// the shard - the wait for the turn plus the database work under it - as dwarf_operation_seconds. An operation
+// the shard - the wait for the turn plus the database work under it - as dwarf_shard_operation_seconds. An operation
 // takes one per shard it works on, so it records one sample per shard; any further turn it needs is a plain
 // dbTurn.
 func (e *Engine) opTurn(ctx context.Context, shardNum int, op string) (context.Context, func()) {
@@ -57,7 +57,7 @@ func (e *Engine) opTurn(ctx context.Context, shardNum int, op string) (context.C
 	turnCtx, doneTurn := e.dbTurn(ctx, shardNum)
 	return turnCtx, func() {
 		doneTurn()
-		e.metricOperation(ctx, op, shardNum, time.Since(start))
+		e.metricShardOperation(ctx, op, shardNum, time.Since(start))
 	}
 }
 

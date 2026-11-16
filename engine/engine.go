@@ -952,14 +952,15 @@ func (e *Engine) initRuntime() error {
 	var janitorCtx context.Context
 	janitorCtx, e.janitorCancel = context.WithCancel(e.lifetimeCtx)
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
-	e.started.Store(true)
 
-	// Create the dwarf_* instruments and register the observable-gauge callback before workers start
-	// emitting. Falls back to the global (no-op) provider when none was injected.
+	// Create the dwarf_* instruments and register the observable-gauge callback before the engine reports itself
+	// started: an operation records into them once it passes ensureStarted, and the started flag is what orders
+	// that read after this write. Falls back to the global (no-op) provider when none was injected.
 	err := e.initMetrics()
 	if err != nil {
 		e.diags.Logger().ErrorContext(e.lifetimeCtx, "Initializing metrics", "error", err)
 	}
+	e.started.Store(true)
 
 	if e.diags.Seams().IsFault(diagnostics.FaultInitRuntime) {
 		e.unwindRuntime()
@@ -1270,6 +1271,7 @@ func (e *Engine) Create(ctx context.Context, workflowURL string, initialState an
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "create", &err)
 	return e.create(ctx, workflowURL, initialState, opts)
 }
 
@@ -1283,6 +1285,7 @@ func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflo
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "snapshot", &err)
 	return e.snapshot(ctx, flowKey)
 }
 
@@ -1294,6 +1297,7 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 	if err := e.ensureStarted(); err != nil {
 		return "", "", errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "fingerprint", &err)
 	return e.fingerprint(ctx, flowKey)
 }
 
@@ -1303,10 +1307,11 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 // the one Snapshot reports - and the flow runs again once none is left. Returns 404 for an unknown key, 400 for a
 // malformed key or a subgraph child's, or resume data that is not JSON-marshalable or holds text the database
 // cannot store, 413 for resume data over the size limit, and 409 for a flow that is not interrupted, including one a Terminate stopped first.
-func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) error {
+func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) (err error) {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "resume", &err)
 	return e.resume(ctx, flowKey, resumeData)
 }
 
@@ -1314,10 +1319,11 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) err
 // awaited, and no handler runs. The flow reads "terminated" as soon as this returns. Terminating a flow that
 // has already closed is a no-op that returns nil and leaves its outcome as it was, archived or not; an unknown or
 // deleted flow is a 404. The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
-func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) error {
+func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) (err error) {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "terminate", &err)
 	return e.terminate(ctx, flowKey, reason)
 }
 
@@ -1341,10 +1347,11 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) e
 //
 // The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is
 // refused with a 400.
-func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) error {
+func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) (err error) {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "cancel", &err)
 	return e.cancel(ctx, flowKey, reason)
 }
 
@@ -1356,6 +1363,7 @@ func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "fork", &err)
 	return e.forkFlow(ctx, stepKey, stateOverrides)
 }
 
@@ -1368,6 +1376,7 @@ func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "history", &err)
 	return e.history(ctx, flowKey)
 }
 
@@ -1379,6 +1388,7 @@ func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "summary", &err)
 	return e.summary(ctx, flowKey)
 }
 
@@ -1390,6 +1400,7 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "step", &err)
 	return e.step(ctx, stepKey)
 }
 
@@ -1407,6 +1418,7 @@ func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries 
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "list_open", &err)
 	return e.listOpen(ctx, query)
 }
 
@@ -1435,6 +1447,7 @@ func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summarie
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "list_closed", &err)
 	limit, err := listLimit(query)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -1461,6 +1474,7 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "list_recently_closed", &err)
 	return e.listRecentlyClosed(ctx, query)
 }
 
@@ -1472,10 +1486,11 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 // a flow archived so recently that its copy in the live tables is still being removed. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
-func (e *Engine) Delete(ctx context.Context, flowKey string) error {
+func (e *Engine) Delete(ctx context.Context, flowKey string) (err error) {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "delete", &err)
 	return e.deleteFlow(ctx, flowKey)
 }
 
@@ -1503,6 +1518,7 @@ func (e *Engine) Purge(ctx context.Context, query workflow.Query) (removed int, 
 	if err := e.ensureStarted(); err != nil {
 		return 0, false, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "purge", &err)
 	return e.purge(ctx, query)
 }
 
@@ -1513,6 +1529,7 @@ func (e *Engine) ShardInfo(ctx context.Context) (shards []ShardSummary, err erro
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "shard_info", &err)
 	return e.shardInfo(ctx)
 }
 
@@ -1530,6 +1547,7 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (outcome *workflow.F
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "await", &err)
 	return e.awaitStopped(ctx, flowKey)
 }
 
@@ -1544,6 +1562,7 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (outcome *workflow.Fl
 	if err := e.ensureStarted(); err != nil {
 		return nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "poll", &err)
 	return e.await(ctx, flowKey)
 }
 
@@ -1563,6 +1582,7 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 	if err := e.ensureStarted(); err != nil {
 		return "", nil, errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "run", &err)
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 
@@ -1580,5 +1600,6 @@ func (e *Engine) Continue(ctx context.Context, flowKey string, additionalState a
 	if err := e.ensureStarted(); err != nil {
 		return "", errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "continue", &err)
 	return e.continueFlow(ctx, flowKey, additionalState)
 }

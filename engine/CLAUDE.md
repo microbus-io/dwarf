@@ -3184,7 +3184,7 @@ all other cloned steps to `parkedNone`), so cloned rows never inherit a stale no
 
 ## Metrics (`engine/metrics.go`)
 
-The engine emits 49 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
+The engine emits 54 `dwarf_*` instruments through the **OTEL metric API** (not the SDK). `SetMeterProvider`
 injects the provider; it defaults to the global `otel.GetMeterProvider()` - no-op unless the host configures the
 SDK, so unconfigured/standalone/test use pays nothing. Instruments are built once in `initMetrics` (from
 `initRuntime`, so every `Startup` gets them) from `mp.Meter("github.com/microbus-io/dwarf")` - that
@@ -3192,7 +3192,8 @@ scope distinguishes dwarf's metrics; **service identity lives in the provider's 
 attributes** (no `service.name` on data points - cardinality explosion, off-spec). The only attributes attached are
 the metric-specific labels: `workflow`, `status`, `task_name` (on `dwarf_steps_executed`), `priority` (on the
 flow lifecycle counters and the per-band backlog gauges), `park_type`, `role` (on the db-phase pair), `op` (on
-`dwarf_operation_seconds` and `dwarf_flows_removed`), `shard`, `column` (on the byte counters), `reason` (on `dwarf_flows_reaped`) and `side`
+`dwarf_shard_operation_seconds`, `dwarf_ingress_operations` and `dwarf_flows_removed`), `status_code` (on
+`dwarf_ingress_operations`), `shard`, `column` (on the byte counters), `reason` (on `dwarf_flows_reaped`) and `side`
 (on `dwarf_flows_removed`). `priority` and `workflow` assume the host uses a bounded set of each;
 the host drops either with a metric View if it does not. Never `fairness_key` (unbounded cardinality): per-priority
 backlog and age are aggregate-only gauges.
@@ -3309,8 +3310,9 @@ end is load-bearing (`internal/piston/CLAUDE.md`).
   cost by deepening the backlog moved throughput -1% (noise). Do not narrow the selection index or revive
   skip-scans on throughput grounds; they need another justification (server CPU headroom).
 
-**24 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
-`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes`, plus the archive's five (below), plus `dwarf_flows_expired` / `dwarf_flows_expire_failed`, plus the three the pistons
+**26 counters** in total: the 8 event counters above, plus `dwarf_steps_offered` /
+`dwarf_steps_claim_preempted` / `dwarf_steps_claim_lost` / `dwarf_peer_changes` / `dwarf_placement_skipped`, plus
+`dwarf_ingress_operations` (below), plus the archive's five (below), plus `dwarf_flows_expired` / `dwarf_flows_expire_failed`, plus the three the pistons
 own (`dwarf_refill_candidates_selected` / `_discarded`, `dwarf_steps_stolen`), plus the two byte counters,
 `dwarf_state_write_bytes` / `dwarf_state_read_bytes` (labels `workflow` + `column`, unit `By`) - payload
 bytes the engine writes to / reads from **step rows on the execution path**. The `column` label is the
@@ -3333,6 +3335,33 @@ binds separately from its steps ceiling ([Cloud Benchmarks](https://docs.dwarf.r
 (`stateByteCount`) and emitted only after commit - a contention retry re-runs the closure, so counting
 inline would double on every rollback. Unit-denominated instrument names end with the unit (`_bytes`),
 per the Prometheus naming convention.
+
+**`dwarf_ingress_operations{op, status_code}` counts calls and `dwarf_shard_operation_seconds{op, shard}` times shards;
+keep them two instruments.** The histogram is recorded at each turn's release (`opTurn`), so a call that takes no
+turn - a bad request, a failed graph load - leaves no sample, a call across shards leaves one per shard, and nothing
+records how a call ended. The counter is recorded once per call, by a `metricIngressOperation` deferred over the
+named error result of every exported operation. Folding the outcome into the histogram instead would still miss the
+calls that take no turn and still count per shard.
+
+- **One count per call holds because no exported operation calls another**, and nothing in the engine calls one:
+  internal paths call the lower-case half (`create`, `snapshot`, `awaitStopped`). A new exported operation adds its
+  own record.
+- **The record is deferred AFTER `ensureStarted`**, so a call to an engine that is not running is not counted. The
+  gate is what makes the read of `e.metrics` safe: `initRuntime` writes it before storing `started`, so a call that
+  saw `started` sees the instruments, while a refused call may run beside a `Startup` that is writing them. Little
+  is lost: before the first `Startup` there is no meter, and after `Shutdown` the replica is leaving.
+- **`status_code` is read from the caller's context before the error** (`ingressStatus`): cancelled is 499, a passed
+  deadline 408, whatever error giving up produced; otherwise `errors.StatusCode`, 500 when the error carries none.
+  What a caller's timeout produces varies - a driver's error, the turnstile's, Await's 408 - so classified by the
+  error alone, a caller timing out mid-query counts as the server's 500.
+- **No `shard` label:** a cross-shard call, and one that fails before placement, has none, so the label would cover
+  some calls and not others and a sum by shard would mislead. A shard in trouble shows in
+  `dwarf_peer_blind_seconds{shard}`, `dwarf_placement_skipped{shard}` and `dwarf_shard_operation_seconds{shard}`.
+- **No `workflow` label:** `dwarf_flows_started` already splits started flows by workflow, and on the reads it
+  would multiply the series by the graph count.
+
+Pinned by `TestMetrics_IngressOperations` (every operation once, then each failure shape; the collected points must
+equal the calls made).
 
 **Counter instrument names carry no `_total` suffix.** `_total` is a Prometheus naming convention, not an
 OpenTelemetry one: a Prometheus exporter appends it to every counter at the scrape boundary (and
@@ -4458,7 +4487,7 @@ working through - and demoting it is right for only the first. And the harm it w
 holding a bounded caller's slots) exists only for callers with bounded concurrency, which the engine cannot
 see, so no threshold, step or hold time has a derivation. Near saturation a 20% speed gap reads as ~3x
 latency, and one 10-point shift between two shards flips which one reads slow. A slow shard is the
-operator's to weight down; `dwarf_operation_seconds{op,shard}` is what lets them see it. `Cordoned` shards are excluded from
+operator's to weight down; `dwarf_shard_operation_seconds{op,shard}` is what lets them see it. `Cordoned` shards are excluded from
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 

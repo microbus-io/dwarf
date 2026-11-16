@@ -59,10 +59,11 @@ func (e *Engine) SetRetention(days int) error {
 // PurgeBefore drops the archive's records of every UTC day before the one containing before, on every shard, whatever
 // the retention; a before within today keeps only today's. It returns a 400 when before falls after today on the
 // database's clock, since today's records are still being written. Closed flows still awaiting archival are unaffected.
-func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) error {
+func (e *Engine) PurgeBefore(ctx context.Context, before time.Time) (err error) {
 	if err := e.ensureStarted(); err != nil {
 		return errors.Trace(err)
 	}
+	defer e.metricIngressOperation(ctx, "purge_before", &err)
 	day := archiver.DayOf(before, e.dayLength())
 	return errors.Trace(e.db.OnEach(ctx, func(ctx context.Context, db *sequel.DB, shard int) error {
 		ctx, doneTurn := e.opTurn(ctx, shard, "purge_before")
