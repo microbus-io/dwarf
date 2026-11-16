@@ -1024,7 +1024,8 @@ func bandTallyQuery(part string, bands []int, maxBand int) string {
 
 // FetchSteps implements pipeline.StepSource. It loads, per (band, key) pair the plan chose, up to that band's
 // per-key cap of this shard's oldest due steps, keyed and ordered oldest-first WITHIN each pair - which is all the
-// plan replay reads. One statement serves every band the plan reached.
+// plan replay reads. One statement serves every band the plan reached. lineages maps each returned step that has a
+// lineage to it, and may hold steps the trim to the per-key cap dropped.
 //
 // The statement's per-key cap is UNIFORM, the largest of the plan's per-band caps, and each pair is trimmed to its
 // own band's cap afterwards. On pgx, mssql and sqlite the pairs travel as one or two parameters (arrays on pgx,
@@ -1038,7 +1039,7 @@ func bandTallyQuery(part string, bands []int, maxBand int) string {
 // The bands are bound, not re-mined: the plan committed to them, and re-mining could pick a better one that
 // arrived between phases and mismatch the chosen keys. A bound priority does not defeat the selection index - only
 // a bound status would, which is why status stays inlined.
-func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error) {
+func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (steps map[planner.Slot][]int, lineages map[int]int, err error) {
 	var pairs []planner.Slot
 	capOf := make(map[int]int, len(fetches))
 	perKey := 0
@@ -1053,12 +1054,12 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 		perKey = max(perKey, f.PerKeyCap)
 	}
 	if len(pairs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// diagnostics.FaultRefillFetchErr fails the fetch without touching the database, so a test can drive the one failure that
 	// is invisible from outside: a piston that tallies honestly and serves nothing - see diagnostics.FaultRefillFetchErr.
 	if p.diags.Seams().IsFault(diagnostics.FaultRefillFetchErr) {
-		return nil, errors.New("injected fault: " + diagnostics.FaultRefillFetchErr)
+		return nil, nil, errors.New("injected fault: " + diagnostics.FaultRefillFetchErr)
 	}
 	// ONE reading of the pair and ONE of the grace, feeding the predicate that selects, the multiple that
 	// over-fetches, and the ranking that orders - so none of the three can work from a different fleet than
@@ -1078,7 +1079,7 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	}
 	stmt, args, err := fetchQuery(p.db.DriverName(), pairs, perKey*overFetch, part, partArgs)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	// The turn must outlive the ROWS, not just the call, so this is deferred before the query - same
 	// ordering argument as in ScanBand.
@@ -1086,29 +1087,35 @@ func (p *Piston) FetchSteps(ctx context.Context, shard int, fetches []planner.Fe
 	defer pass.Return()
 	rows, err := p.db.QueryContext(ctx, stmt, args...)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	defer rows.Close()
 	out := map[planner.Slot][]int{}
 	for rows.Next() {
-		var stepID int
+		var stepID, lineageID int
 		var slot planner.Slot
-		// Every dialect's query projects (priority, fairness_key, step_id) in that order - see fetchQuery,
-		// which keeps the projection uniform precisely so this loop is shared.
-		if err := rows.Scan(&slot.Band, &slot.Key, &stepID); err != nil {
-			return nil, errors.Trace(err)
+		// Every dialect's query projects (priority, fairness_key, step_id, lineage_id) in that order - see
+		// fetchQuery, which keeps the projection uniform precisely so this loop is shared.
+		if err := rows.Scan(&slot.Band, &slot.Key, &stepID, &lineageID); err != nil {
+			return nil, nil, errors.Trace(err)
 		}
 		out[slot] = append(out[slot], stepID)
+		if lineageID != 0 {
+			if lineages == nil {
+				lineages = map[int]int{}
+			}
+			lineages[stepID] = lineageID
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.Trace(err)
+		return nil, nil, errors.Trace(err)
 	}
 	stolen := p.rankByResidue(out, capOf, replicas, ordinal)
 	if stolen > 0 {
 		p.inst.stolen.Add(ctx, int64(stolen), metric.WithAttributes(p.shardAttr))
 		p.fireCheckpoint(ctx, diagnostics.CheckpointRefillStole)
 	}
-	return out, nil
+	return out, lineages, nil
 }
 
 // rankByResidue applies the fill order to a fetch: within each (band, key) pair it sorts the admitted steps by how

@@ -75,6 +75,42 @@ several shards; a replica dispatching one has nowhere else to send a worker.
 All four selection paths share `bestPartition`, so the lowest-floor rule exists in exactly one place; two
 copies of it would drift, and the drift would be invisible (both would still dispatch *something*).
 
+## Holding a lineage keeps its candidates and hands none out
+
+`HoldLineage(shard, lineage)` stops the cache handing out any candidate whose `Job.LineageID` is that lineage, and
+`ReleaseLineage` hands them out again. What a lineage is, and when to hold one, are the owner's: in the engine it is a
+fan-out cohort whose fan-in has as many of this replica's workers queued as it can usefully take
+(`engine/CLAUDE.md`, the fan-in hold). The cache treats it as an opaque key.
+
+**It exists because the cache is the one place a wait can stop the crew growing.** A worker waiting at a fan-in holds
+its candidate and no turn, so neither the crew's growth rule nor the gate stops the next claim, and an unpaced wide
+fan-out grows the crew by a worker per branch. A worker that finds nothing it may take parks here, holding nothing,
+counted idle. The full reasoning, and why the alternatives fail, are in `engine/CLAUDE.md`.
+
+**Held candidates live OUTSIDE `items`, in the partition's `held` map, and that is what keeps every rule above
+unchanged.** Routing, the floor, reservations, the wake count and the bound all read `items`, so none of them can
+see a candidate no worker may take. **Do not mark held candidates in place instead.** Every reader of the head, the
+floor, `unreserved` and the wake count would have to skip them, and the one that forgot would route a worker to a
+partition holding nothing it can take - where it queues at the gate, counted idle, while the crew declines to grow
+for the work it could have done.
+
+- **They stay cached, so a release hands them out at once.** Dropping them instead would leave the cohort waiting a
+  whole refill period for its next candidates every time its fan-in caught up.
+- **A release merges in band order, each behind what is already cached at its band**, as an `Offer` lands, so it
+  reorders nothing the plan chose, and **wakes one waiter per candidate released**, as a `Refill` does: a worker
+  parked because everything cached was held otherwise sleeps on work it could take until the next `Refill` or
+  `Offer`. Pinned by `TestCandidateCache_ReleaseMergesInBandOrder` and `TestCandidateCache_ReleaseWakesAWaiter`
+  (fails without the wake).
+- **A `Refill` replaces held candidates with the rest and files the new batch's away**; the lineage stays held,
+  since whether it is, is the owner's call, not the plan's. A replaced held candidate counts as discarded: the
+  refiller selected it and nobody took it.
+- **An `Offer` of a held lineage is declined**, so the step waits for a `Refill` after the release rather than
+  sitting cached where nobody may take it.
+- **Held candidates are outside the bound.** None can occupy a worker, so counting them would decline the doorbell
+  of every other flow on the shard while one cohort's candidates sat held. Each `Refill` replaces them, so they
+  never exceed one batch. `Len` counts them, for the queue-depth gauge.
+- **Lineage 0 is never held**: it is every step outside a cohort.
+
 ## Waking: ONE SIGNAL PER CANDIDATE, never a broadcast
 
 `Refill` wakes `min(unreserved, waiting)` waiters one at a time; `Offer` signals once for its single

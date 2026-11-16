@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     updated_at        DATETIME(3)  NOT NULL DEFAULT NOW_UTC(),
     PRIMARY KEY (step_id),
     INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
-    INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight),
+    INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight, lineage_id),
     INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight)
 );
 
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
 CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 
 -- DRIVER: pgx
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight, lineage_id) WHERE status IN ('pending', 'running');
 
 -- DRIVER: pgx
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
@@ -205,7 +205,7 @@ CREATE TABLE dwarf_steps (
 CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id);
 
 -- DRIVER: mssql
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id) INCLUDE (not_before, lease_expires, fairness_weight, lineage_id) WHERE status IN ('pending', 'running');
 
 -- DRIVER: mssql
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (status, parked, priority, not_before) INCLUDE (fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
@@ -270,7 +270,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
 CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight) WHERE status IN ('pending', 'running');
+CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight, lineage_id) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
 CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;

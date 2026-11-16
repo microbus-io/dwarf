@@ -57,11 +57,11 @@ type fakeStepSource struct {
 	gotFetches []planner.Fetch
 }
 
-func (f *fakeStepSource) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error) {
+func (f *fakeStepSource) FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (steps map[planner.Slot][]int, lineages map[int]int, err error) {
 	f.fetches++
 	f.gotFetches = fetches
 	if f.fetchErr != nil {
-		return nil, f.fetchErr
+		return nil, nil, f.fetchErr
 	}
 	out := map[planner.Slot][]int{}
 	for _, fe := range fetches {
@@ -75,7 +75,7 @@ func (f *fakeStepSource) FetchSteps(ctx context.Context, shard int, fetches []pl
 			}
 		}
 	}
-	return out, nil
+	return out, nil, nil
 }
 
 // rig is one shard's pair of loops over a faked database, a real planner and a real cache of capacity 8,

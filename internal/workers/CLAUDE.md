@@ -79,6 +79,12 @@ permit, so it is not even waste. `TestCrew_SaturationDoesNotGrowThePool` pins th
 holding both permits, plus the reserve) and fails at `Max` against a build that reads saturation as a reason
 to keep spawning — measured against a gate that does not block: the crew ran to 398 where 64 sufficed.
 
+**It stops growth only for saturation AT THE GATE.** A worker that waits on anything else while holding its
+candidate counts busy, so a bottleneck the gate does not meter grows the crew a worker per take, to `Max`. The
+engine's one such wait that quick tasks reach is a cohort's fan-in, and the engine paces it before the pop, by
+holding the cohort's candidates in the cache (`engine/CLAUDE.md`, the fan-in hold), so the rule here needs no
+exception.
+
 **Do NOT add a capacity query to the gate.** It buys nothing the blocking already gives, while forcing the
 gate to *summarise* itself for a consumer that cannot know what it meters — and that summary is rarely
 obvious. A gate metering two populations has two candidate answers to "has room" and no correct single one;

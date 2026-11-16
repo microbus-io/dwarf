@@ -359,7 +359,7 @@ func TestRefillScan_BoundedPerFairnessKey(t *testing.T) {
 
 	// fetch runs phase 3 for the tenants at the band, keyed by tenant.
 	fetch := func(perKey int) (map[string][]int, error) {
-		got, err := e.actorsOn(1).piston.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: tenants, PerKeyCap: perKey}})
+		got, _, err := e.actorsOn(1).piston.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: tenants, PerKeyCap: perKey}})
 		byKey := map[string][]int{}
 		for slot, ids := range got {
 			byKey[slot.Key] = ids

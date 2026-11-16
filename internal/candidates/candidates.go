@@ -33,6 +33,9 @@ type Job struct {
 	StepID   int
 	Shard    int
 	Priority int
+	// LineageID is the step's lineage on its shard, 0 for none. The cache holds back every candidate of a
+	// lineage its owner has held (HoldLineage) and gives it no other meaning.
+	LineageID int
 
 	offered bool // admitted by Offer rather than planned; cleared before a job leaves the cache
 }
@@ -71,6 +74,20 @@ type partition struct {
 	// choosing the deepest. A Refill leaves it alone: those workers are still on their way and will pop
 	// from the new batch.
 	reserved int
+	// held is every held lineage of this shard, each with its candidates in band order. They are kept OUT of
+	// items, so nothing that routes, ranks, takes, wakes or bounds sees them: a held candidate is one no worker
+	// may take. A key with no candidates is still held. Refill files its batch's held candidates here, and
+	// ReleaseLineage merges a lineage's back into items.
+	held map[int][]Job
+}
+
+// heldLen is how many candidates the partition holds back.
+func (p *partition) heldLen() int {
+	n := 0
+	for _, jobs := range p.held {
+		n += len(jobs)
+	}
+	return n
 }
 
 // newPartition is a partition no Refill has planned yet: it admits a doorbell at any band, since no plan has said
@@ -429,13 +446,29 @@ func (c *Cache) Refill(shard int, batch []Job, limit int) (discarded int) {
 	// Only the refiller's OWN un-popped selections are waste it can act on; candidates the doorbell
 	// admitted were never its choice, and charging them here would make the oversupply ratio read high
 	// exactly when the doorbell is working well.
-	discarded = len(p.items) - p.offered
+	discarded = len(p.items) + p.heldLen() - p.offered
 	p.offered = 0
+	p.limit = limit
+	slices.SortStableFunc(batch, func(a, b Job) int { return cmp.Compare(a.Priority, b.Priority) })
+	// A held lineage's candidates are replaced like the rest, and filed away from items as they arrive. The
+	// lineage stays held: whether it is, is its owner's call, not the plan's.
+	if len(p.held) > 0 {
+		for lineageID := range p.held {
+			p.held[lineageID] = nil
+		}
+		runnable := batch[:0]
+		for _, j := range batch {
+			if _, held := p.held[j.LineageID]; held {
+				p.held[j.LineageID] = append(p.held[j.LineageID], j)
+			} else {
+				runnable = append(runnable, j)
+			}
+		}
+		batch = runnable
+	}
 	if len(batch) == 0 {
 		batch = nil // Pop's empty representation, so Len/append behave identically either way
 	}
-	p.limit = limit
-	slices.SortStableFunc(batch, func(a, b Job) int { return cmp.Compare(a.Priority, b.Priority) })
 	// Deliberately NOT trimmed to c.size. The bound is a sizing target, not an invariant: Offer admits into a
 	// non-empty partition only below it and Resize enforces it when the bound moves, but each refiller slices its batch from its own
 	// roll of the global plan, so the sum of independently-rolled slices can transiently overshoot the bound and
@@ -492,6 +525,9 @@ func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	}
 	j.Priority = priority
 	j.offered = true
+	if _, held := p.held[j.LineageID]; held {
+		return false // no worker may take it while its lineage is held; a later Refill selects it
+	}
 	switch {
 	case priority > p.limit:
 		return false // worse than the plan reached - see above
@@ -508,11 +544,108 @@ func (c *Cache) Offer(j Job, priority int) (admitted bool) {
 	return true
 }
 
-// Len returns the number of buffered candidates across all partitions.
+// HoldLineage stops the cache handing out any candidate of one lineage on one shard: those it holds now, those a
+// later Refill brings, and any Offer (declined). They stay cached, so a release hands them out at once rather
+// than after the next Refill. Holding a held lineage, or lineage 0, does nothing.
+//
+// A held candidate is invisible to everything that routes, takes or wakes, and is outside the bound: no worker
+// can be on its way to one, and none can occupy a worker.
+func (c *Cache) HoldLineage(shard, lineageID int) {
+	if lineageID == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	p := c.parts[shard]
+	if p == nil {
+		p = newPartition()
+		c.parts[shard] = p
+	}
+	if _, held := p.held[lineageID]; held {
+		return
+	}
+	if p.held == nil {
+		p.held = map[int][]Job{}
+	}
+	var heldJobs []Job
+	runnable := p.items[:0]
+	for _, j := range p.items {
+		if j.LineageID == lineageID {
+			heldJobs = append(heldJobs, j)
+		} else {
+			runnable = append(runnable, j)
+		}
+	}
+	// Cleared past the new end, so the backing array holds no copy of a job it no longer lists.
+	clear(p.items[len(runnable):])
+	p.items = runnable
+	if len(p.items) == 0 {
+		p.items = nil
+	}
+	p.held[lineageID] = heldJobs
+}
+
+// ReleaseLineage hands a held lineage's candidates out again: they rejoin their partition in band order, each
+// behind the candidates already cached at its band, as an Offer does, and one waiter is woken per candidate
+// released, as a Refill does. Releasing a lineage that is not held does nothing.
+func (c *Cache) ReleaseLineage(shard, lineageID int) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	p := c.parts[shard]
+	if p == nil {
+		c.mu.Unlock()
+		return
+	}
+	released, held := p.held[lineageID]
+	if !held {
+		c.mu.Unlock()
+		return
+	}
+	delete(p.held, lineageID)
+	if len(released) == 0 {
+		c.mu.Unlock()
+		return
+	}
+	p.items = mergeByBand(p.items, released)
+	wake := min(len(released), max(0, p.unreserved()), c.waiting)
+	c.mu.Unlock()
+	for range wake {
+		c.cond.Signal()
+	}
+}
+
+// mergeByBand merges two band-ordered lists into one, taking a's entry first where the bands are equal.
+func mergeByBand(a, b []Job) []Job {
+	out := make([]Job, 0, len(a)+len(b))
+	i, k := 0, 0
+	for i < len(a) && k < len(b) {
+		if b[k].Priority < a[i].Priority {
+			out = append(out, b[k])
+			k++
+		} else {
+			out = append(out, a[i])
+			i++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[k:]...)
+}
+
+// Len returns the number of buffered candidates across all partitions, held ones included.
 func (c *Cache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.totalLen()
+	n := c.totalLen()
+	for _, p := range c.parts {
+		n += p.heldLen()
+	}
+	return n
 }
 
 // Close permanently unblocks all waiters. Offer/Refill become no-ops after close.

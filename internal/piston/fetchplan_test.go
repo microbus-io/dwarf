@@ -69,15 +69,16 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 		return out.String()
 	}
 	errRollback := errors.New("rollback")
-	var fetchPlan, controlPlan, sized string
+	var fetchPlan, controlPlan, sized, onlyPlan string
 	err = r.db.Transact(ctx, func(tx *sequel.Tx) error {
 		sized = explain(tx, stmt)
+		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			return err
+		}
+		onlyPlan = explain(tx, stmt)
 		// Leave the due index as the only one that can serve the predicate, so the question is what it is
 		// allowed to seek.
 		if _, err := tx.ExecContext(ctx, "DROP INDEX idx_dwarf_steps_selection"); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
 			return err
 		}
 		fetchPlan = explain(tx, stmt)
@@ -90,6 +91,8 @@ func TestFetchQuery_PostgresPlan(t *testing.T) {
 
 	assert.True(regexp.MustCompile(`Function Scan on (unnest )?k .*rows=3 `).MatchString(sized),
 		"the pair list must be sized from the bound arrays:\n%s", sized)
+	assert.True(strings.Contains(onlyPlan, "Index Only Scan using idx_dwarf_steps_selection"),
+		"the lateral must stay index-only - a projected column the index does not carry reads every walked row:\n%s", onlyPlan)
 	assert.False(strings.Contains(fetchPlan, "idx_dwarf_steps_due"), "the fetch must not use the due index:\n%s", fetchPlan)
 	assert.True(strings.Contains(controlPlan, "idx_dwarf_steps_due"), "control: with the guard the due index serves it:\n%s", controlPlan)
 }

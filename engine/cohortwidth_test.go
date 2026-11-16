@@ -19,6 +19,7 @@ package engine
 import (
 	"context"
 	"os"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -30,8 +31,9 @@ import (
 )
 
 // TestCohortWidth_Measure times one wide forEach's arrivals: how long the fan-in waits after the last branch's task
-// returned, which is the time the cohort takes to absorb the arrivals still queued. A measurement, not a pin: it
-// runs only when DWARF_TESTING_COHORT_WIDTH names the width.
+// returned, which is the time the cohort takes to absorb the arrivals still queued, and the most workers the crew
+// held meanwhile. A measurement, not a pin: it runs only when DWARF_TESTING_COHORT_WIDTH names the width, and
+// DWARF_TESTING_COHORT_HOLD=0 runs it with the fan-in hold off, as the control.
 func TestCohortWidth_Measure(t *testing.T) {
 	width, _ := strconv.Atoi(os.Getenv("DWARF_TESTING_COHORT_WIDTH"))
 	if width <= 0 {
@@ -74,6 +76,39 @@ func TestCohortWidth_Measure(t *testing.T) {
 	defer e.Shutdown(ctx)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
+	holdOff := os.Getenv("DWARF_TESTING_COHORT_HOLD") == "0"
+	if holdOff {
+		e.fanInHoldAt.Store(0)
+	}
+	// Sampled, so the peaks are a lower bound: a peak shorter than the interval can be missed.
+	var crewPeak, heapPeak atomic.Int64
+	sampled := make(chan struct{})
+	stopSampling := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		var ms runtime.MemStats
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+		for n := 0; ; n++ {
+			select {
+			case <-stopSampling:
+				return
+			case <-tick.C:
+			}
+			if holdOff {
+				e.fanInHoldAt.Store(0) // a pool recompute re-derives it
+			}
+			if r := int64(e.crew.Resident()); r > crewPeak.Load() {
+				crewPeak.Store(r)
+			}
+			if n%20 == 0 {
+				runtime.ReadMemStats(&ms)
+				if h := int64(ms.HeapInuse); h > heapPeak.Load() {
+					heapPeak.Store(h)
+				}
+			}
+		}
+	}()
 
 	start := time.Now()
 	awaitCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
@@ -84,13 +119,16 @@ func TestCohortWidth_Measure(t *testing.T) {
 	}
 	assert.Equal(workflow.StatusCompleted, out.Status)
 	total := time.Since(start)
+	close(stopSampling)
+	<-sampled
 	branches := time.Duration(lastBranch.Load() - firstBranch.Load())
 	drain := time.Duration(joinAt.Load() - lastBranch.Load())
 	driver := ""
 	if sh, err := e.db.Shard(1); err == nil {
 		driver = sh.DB().DriverName()
 	}
-	t.Logf("width=%d driver=%s total=%v branches-ran-over=%v join-after-last-branch=%v (%.0f arrivals/s overall)",
-		width, driver, total.Round(time.Millisecond), branches.Round(time.Millisecond), drain.Round(time.Millisecond),
-		float64(width)/time.Duration(joinAt.Load()-firstBranch.Load()).Seconds())
+	t.Logf("width=%d driver=%s hold=%v total=%v branches-ran-over=%v join-after-last-branch=%v (%.0f arrivals/s overall) crew-peak=%d (resident %d, max %d, hold at %d) heap-peak=%dMB",
+		width, driver, !holdOff, total.Round(time.Millisecond), branches.Round(time.Millisecond), drain.Round(time.Millisecond),
+		float64(width)/time.Duration(joinAt.Load()-firstBranch.Load()).Seconds(),
+		crewPeak.Load(), e.crew.Min(), e.crew.Max(), e.fanInHoldAt.Load(), heapPeak.Load()>>20)
 }

@@ -133,6 +133,9 @@ func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held 
 	// the step's lease alive; if it finds the step taken back, this worker no longer owns it - fenced.
 	if stepLineageID != 0 {
 		stripe := &e.cohortLocks[cohortLockStripe(shardNum, stepLineageID)]
+		if e.enterFanIn(stripe, shardNum, stepLineageID, d) {
+			defer e.leaveFanIn(stripe, shardNum, stepLineageID, d)
+		}
 		held := false
 		yieldHeldTurn(ctx, func() {
 			held = e.lockCohortStripe(ctx, stripe, d)

@@ -76,6 +76,13 @@ A consequence of having no breaker is no probe *election*: each parked step is i
 independently on its own backoff. The trade is the breaker's coordinated backlog release (instant unblock the moment
 one probe succeeds) for zero engine-side policy and no shared-state machinery to coordinate across replicas.
 
+**Pacing a resource the engine itself owns is not backpressure in this sense, and the fan-in hold is the one
+instance** (under "Fan-Out and Fan-In"). It meters a cohort's fan-in - a lock and a transaction the engine runs, not a
+downstream or an account - and it reads that resource directly, as a count of the workers waiting there against a
+fixed depth: no task URL, no observed rate, no error signal. That is the axis the rules above say the engine lacks
+for a downstream, and it has it here. Anything new of the kind must meet the same bar: the engine's own resource,
+read directly, a fuse rather than a loop on what it actuates.
+
 ### Host-supplied payloads are NOT precision-checked (a KNOWN, backlogged punt)
 
 Integers beyond ±2^53 are the root landmine's deliberate punt; `workflow/CLAUDE.md` holds the rationale, the
@@ -1439,6 +1446,53 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
   - At most `arrivalBatchMax` (256) members per transaction: the transaction holds the spawn row's lock, which every
     other replica's arrivals wait for. An arrival that finds the stripe free runs its own transaction as before, so
     an uncontended cohort pays nothing.
+- **A cohort's claims are paced to its fan-in (`enterFanIn`, `cohortlock.go`).** A worker queued on the stripe or in
+  a batch holds its candidate, so the crew counts it busy, and holds no turn, so the gate admits the next claim. When
+  a cohort's branches finish faster than its arrivals land, every take then finds nobody idle and the crew grows by a
+  worker per branch claimed, to its maximum: the gate brakes growth only for a wait that is a turn
+  (`internal/workers/CLAUDE.md`). So each stripe counts this replica's workers at each of its cohorts' fan-ins, and
+  while they number `fanInHoldAt` or more the cohort's lineage is held in the candidate cache (`HoldLineage`,
+  `internal/candidates/CLAUDE.md`): a worker with nothing else to take parks, counted idle, while the candidates of
+  every other key and band are still handed out, and the release as the arrivals land hands the held ones out at
+  once. The cohort's share of the plan goes unused meanwhile: no other work is given it, and a held cohort at a better
+  band still holds the doorbell's bar at that band. Unpaced,
+  the crew becomes the fan-in's queue: as many workers as branches claimed and not yet landed, each with its stack,
+  bounded only by the crew's maximum, which knows nothing of memory - a wide forEach of quick tasks can exhaust the
+  process on the way.
+  - *The pacing happens before the pop because that is the only place a wait stops growth*: a worker that has not
+    taken a candidate counts idle, which is the rule the crew's growth turns on (`internal/workers/CLAUDE.md`). So
+    the crew's rule needs no exception, and the waiting worker keeps the turn it handed back.
+  - *Do not make the fan-in's waiters hold their turns instead.* Every turn would go to one fan-in's queue, starving
+    every other flow on the shard, and the batch leader needs a turn to land the batch its members wait on: with
+    the turns all held by the members, the two wait on each other.
+  - *Do not count a worker waiting at the fan-in as idle for growth.* The crew would stop growing, but the worker
+    still holds its candidate, so once every worker is parked there nobody takes another flow's candidate until a
+    batch lands. The hold stops only the cohort's own candidates.
+  - *Do not skip a held cohort's candidate at the claim instead of keeping it cached.* A dropped candidate returns
+    only at the next refill, whose period is fixed while the depth shrinks with the pool, so on a small pool one
+    fan-in could start no more than a depth's worth of branches per refill.
+  - *It reorders nothing within a fairness key.* A key's fetch takes its oldest due rows, so while a wide cohort is
+    held its unclaimed branches fill the key's share of every refill and later work on the key waits behind them -
+    as it does unpaced, oldest first within a key being the contract, but at the fan-in's pace rather than the
+    claims'. Work on other keys is untouched, which is why a wide flow wants a key of its own. **Do not exclude held
+    lineages in the fetch** to let it through: the selection index cannot seek past a lineage, so the scan reads
+    every held row to find the runnable ones behind them - up to the cohort's width, every refill.
+  - *Handing a waiting arrival to its batch and freeing the worker* would bound the crew without the hold, but
+    `processStep` would return before its work is done and the queue would still reach the cohort's width. Held in
+    reserve.
+  - *The depth is half the cache's capacity* - the dispatch count, re-set wherever the cache is sized - enough for a
+    batch landing and the next gathering. Behind a held fan-in the crew stays under its floor, plus the depth, plus
+    the one cache of candidates that may already have been handed out when the hold engaged.
+  - *Only workers AT the fan-in count*, from joining a batch or queuing for the stripe until the arrival lands -
+    never one in a task, so a cohort of long tasks still grows the crew as far as it needs. A worker is counted once:
+    an arrival that fails on its way also passes `failStep`'s stripe (`dispatch.atFanIn`).
+  - *A candidate carries its lineage* - from the fetch (`lineage_id`) and from every doorbell - so a held cohort's
+    steps are known before anyone claims them. A step's lineage is the spawn of the cohort it arrives at.
+  - *The cache is called under the stripe's mutex*, so two crossings of the depth cannot reach it out of order; the
+    cache never calls out, so the order cannot invert. The hold is re-derived from the count at every arrival and
+    departure, so a resized depth takes effect at the next one and the last worker to leave always releases.
+  Pinned by `TestFanInHold_AQueuedFanInStopsTheCrew`, which holds a cohort's stripe from its source task (it fails
+  without the hold: the crew runs to the cohort's width), and by the cache's hold tests.
 
 ### Candidate de-duplication: the partition (cross-peer) and the claim map (intra-peer)
 
@@ -2947,7 +3001,9 @@ The worker count is split into two numbers, because they answer different questi
 
 - **The crew grows on demand** (`internal/workers`): a worker that takes a candidate and finds **nobody
   idle** adds one, keeping a standing reserve of one - safe only because the gate's turn blocks first (see "THE
-  GATE'S TURN IS THE CREW'S GROWTH BRAKE"). Two traps not to re-introduce, each with its measurement: gating growth on
+  GATE'S TURN IS THE CREW'S GROWTH BRAKE"), and, for the one wait after a claim that is not a turn and that a
+  workload of quick tasks reaches, because a cohort's claims are paced to its fan-in (the fan-in hold, under
+  "Fan-Out and Fan-In"). Two traps not to re-introduce, each with its measurement: gating growth on
   every worker being inside `ExecuteTask`, which grows only logarithmically (`internal/workers/CLAUDE.md`), and
   a caller-maintained idleness counter, which reads saturation as idleness (the `idle` field in
   `internal/workers/crew.go`). Both directions are pinned:

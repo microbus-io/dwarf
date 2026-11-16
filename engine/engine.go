@@ -160,6 +160,10 @@ type Engine struct {
 	// bumps walk UP and stay DB-serialized, which is why one leaf-level stripe per worker cannot form a cycle.
 	// Each stripe is a FIFO lock whose waiters keep their leases alive while queued - see cohortStripe.
 	cohortLocks [cohortLockStripes]cohortStripe
+	// fanInHoldAt is how many of this replica's workers may wait at one cohort's fan-in before the cache holds the
+	// cohort's lineage (enterFanIn): half the cache's capacity, re-set wherever the cache is sized. Zero holds
+	// nothing.
+	fanInHoldAt atomic.Int64
 
 	// claims holds the steps this replica has a claim CAS in flight on - the intra-peer half of candidate
 	// de-duplication, whose cross-peer half is the step_id partition (see partitionPredicate).
@@ -933,6 +937,7 @@ func (e *Engine) initRuntime() error {
 	// unresolved-dispatch case to fall back from. It is capped by the worker maximum, not the resident set:
 	// a pinned SetWorkers spawns its maximum in full, and the derived resident set is only a floor.
 	e.cache.Init(min(maxWorkers, e.workersDispatch))
+	e.fanInHoldAt.Store(int64(min(maxWorkers, e.workersDispatch)))
 	e.drainStop = make(chan struct{})
 	e.backlogMu.Lock()
 	e.backlogByShard = map[int]shardBacklog{}

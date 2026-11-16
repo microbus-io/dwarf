@@ -217,7 +217,7 @@ func (e *Engine) fireFanInDirect(ctx context.Context, d *dispatch, fanInTarget s
 	// A sleeping fan-in step is left to the piston; see the sibling site above.
 	if sleepDur == 0 {
 		// Priority was just bound into the fan-in INSERT; the sleep branch diverged above.
-		e.enqueueStepDue(ctx, shardNum, int(fanInStepID), priority)
+		e.enqueueStepDue(ctx, shardNum, int(fanInStepID), lineageID, priority)
 	}
 	return nil
 }

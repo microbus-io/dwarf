@@ -198,6 +198,7 @@ func (e *Engine) arrivalBatchTx(ctx context.Context, tx *sequel.Tx, members []*d
 	for i, m := range members {
 		fenced[i] = false
 		m.newStepIDs = m.newStepIDs[:0]
+		m.fanInLineageID = 0
 		m.loss = flowLoss{}
 		m.txBytes = stateByteCount{}
 		m.flowRowLocked = false

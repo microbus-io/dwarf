@@ -29,8 +29,9 @@ import (
 type StepSource interface {
 	// FetchSteps returns, for each (band, key) pair of the fetches, up to that band's PerKeyCap step ids,
 	// OLDEST FIRST within each pair. The ordering is the StepSource's responsibility - the cycle consumes the
-	// lists in order and does not re-sort them. A pair may come back short or missing.
-	FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (map[planner.Slot][]int, error)
+	// lists in order and does not re-sort them. A pair may come back short or missing. lineages maps a step id
+	// to its lineage, carried onto the step's candidate; a step it does not name has none.
+	FetchSteps(ctx context.Context, shard int, fetches []planner.Fetch) (steps map[planner.Slot][]int, lineages map[int]int, err error)
 }
 
 // SupplyResult is one supply cycle's outcome, for logging and metrics. Nothing here is a control signal: a
@@ -150,7 +151,7 @@ func (s *Supplier) run(ctx context.Context, r *SupplyResult) {
 
 	// Fetching.
 	t = time.Now()
-	steps, err := s.source.FetchSteps(ctx, s.shard, plan.Fetches)
+	steps, lineages, err := s.source.FetchSteps(ctx, s.shard, plan.Fetches)
 	r.Fetching = time.Since(t)
 	if err != nil {
 		r.Err = errors.New("fetching", err)
@@ -158,7 +159,7 @@ func (s *Supplier) run(ctx context.Context, r *SupplyResult) {
 	}
 
 	// Pushing.
-	s.push(r, assemble(plan.Slots, steps, s.shard), plan.Reach)
+	s.push(r, assemble(plan.Slots, steps, lineages, s.shard), plan.Reach)
 }
 
 // push hands a batch to the cache and records what it cost.
@@ -177,7 +178,7 @@ func (s *Supplier) push(r *SupplyResult, batch []candidates.Job, limit int) {
 // A key that comes up short - its steps claimed or completed between the fetch and now - simply
 // contributes fewer candidates. The batch runs short for one cycle and the next one re-selects; there is
 // nothing to reconcile.
-func assemble(slots []planner.Slot, steps map[planner.Slot][]int, shard int) []candidates.Job {
+func assemble(slots []planner.Slot, steps map[planner.Slot][]int, lineages map[int]int, shard int) []candidates.Job {
 	batch := make([]candidates.Job, 0, len(slots))
 	taken := make(map[planner.Slot]int, len(steps))
 	for _, slot := range slots {
@@ -186,7 +187,7 @@ func assemble(slots []planner.Slot, steps map[planner.Slot][]int, shard int) []c
 		if i >= len(list) {
 			continue
 		}
-		batch = append(batch, candidates.Job{StepID: list[i], Shard: shard, Priority: slot.Band})
+		batch = append(batch, candidates.Job{StepID: list[i], Shard: shard, Priority: slot.Band, LineageID: lineages[list[i]]})
 		taken[slot]++
 	}
 	return batch

@@ -108,7 +108,7 @@ func (r *rig) insertStep(t *testing.T, flowID, priority int, key string, weight 
 
 // fetch runs FetchSteps for keys at one band and returns the result keyed by key, the view most tests assert on.
 func (r *rig) fetch(ctx context.Context, band int, keys []string, perKey int) (map[string][]int, error) {
-	got, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: keys, PerKeyCap: perKey}})
+	got, _, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{{Band: band, Keys: keys, PerKeyCap: perKey}})
 	if got == nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func TestPiston_FetchTrimsEachBandToItsOwnCap(t *testing.T) {
 		r.insertStep(t, 1+i, 2, "a", 1)
 		r.insertStep(t, 10+i, 9, "b", 1)
 	}
-	got, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{
+	got, _, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{
 		{Band: 2, Keys: []string{"a"}, PerKeyCap: 1},
 		{Band: 9, Keys: []string{"b"}, PerKeyCap: 3},
 	})
@@ -429,6 +429,35 @@ func TestPiston_FetchStepsReturnsOldestFirst(t *testing.T) {
 	_, hasUnchosen := got["unchosen"]
 	assert.False(hasUnchosen)
 	assert.NotEqual(a3, 0)
+}
+
+// TestPiston_FetchStepsReturnsLineages pins the second result: each fetched step's lineage, which the engine's
+// cache holds a wide cohort back by, and nothing for a step outside every cohort. The ranking shape reads it by a
+// join past its cut, so the oldest-first order and the per-key cap must survive it.
+func TestPiston_FetchStepsReturnsLineages(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+
+	a1 := r.insertStep(t, 1, 5, "alpha", 1)
+	a2 := r.insertStep(t, 1, 5, "alpha", 1)
+	a3 := r.insertStep(t, 1, 5, "alpha", 1)
+	b1 := r.insertStep(t, 2, 5, "beta", 1)
+	for _, id := range []int{a1, a2, a3} {
+		if _, err := r.db.ExecContext(ctx, "UPDATE dwarf_steps SET lineage_id=? WHERE step_id=?", 900+id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, lineages, err := r.p.FetchSteps(ctx, 1, []planner.Fetch{{Band: 5, Keys: []string{"alpha", "beta"}, PerKeyCap: 2}})
+	assert.NoError(err)
+	assert.Equal([]int{a1, a2}, got[planner.Slot{Band: 5, Key: "alpha"}])
+	assert.Equal([]int{b1}, got[planner.Slot{Band: 5, Key: "beta"}])
+	assert.Equal(900+a1, lineages[a1])
+	assert.Equal(900+a2, lineages[a2])
+	_, named := lineages[b1]
+	assert.False(named, "a step outside every cohort has no entry")
 }
 
 // TestPiston_FetchStepsDegenerateArgs pins the two no-op guards - no keys, or no demand - which must not

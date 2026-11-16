@@ -536,6 +536,13 @@ rows are grouped by key, not sorted across them, which is all `assemble` reads.
 the supply loop, which is the supply ceiling's path. Each pair is a lateral lookup on pgx and mssql, a row-value
 `IN` on mysql and sqlite.
 
+**It returns each step's `lineage_id` beside its id**, which the engine's cache holds a wide cohort's candidates by
+(`engine/CLAUDE.md`, the fan-in hold), and `idx_dwarf_steps_selection` carries the column for it. **Do not project a
+column the index does not carry.** On pgx and mssql the lateral then stops being index-only and reads the row of every
+entry it walks - each one its predicate rejects included (a sleeper, a leased row, another replica's class), which
+the measurements below take as free; on mysql and sqlite the window reads the row of every due row of the planned
+keys.
+
 **One bind per key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys.**
 The pair count is bounded only by the candidate cache's capacity — twice the worker count — so a
 192-connection pool at `workersPerConnBudget = 8` plans at **3,072**, and a per-tenant fairness key with a

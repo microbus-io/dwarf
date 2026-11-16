@@ -114,11 +114,16 @@ type dispatch struct {
 	// arrivalBatch). The step's own transaction then returns it on its first attempt, as if it had fired there.
 	firedFault error
 
+	// atFanIn is set while this dispatch's worker is counted at its cohort's fan-in (enterFanIn).
+	atFanIn bool
+
 	// Set by the transition's transaction, and reset at the top of each attempt.
-	newStepIDs    []int
-	loss          flowLoss       // a cohort resolving as a loss fails the flow in the transaction
-	txBytes       stateByteCount // emitted only after commit (see stateByteCount)
-	flowRowLocked bool
+	newStepIDs []int
+	// fanInLineageID is the lineage of the fan-in step a resolving arrival inserted: its spawn's.
+	fanInLineageID int
+	loss           flowLoss       // a cohort resolving as a loss fails the flow in the transaction
+	txBytes        stateByteCount // emitted only after commit (see stateByteCount)
+	flowRowLocked  bool
 }
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
@@ -981,7 +986,7 @@ func (e *Engine) resolveFailedSpawn(ctx context.Context, d *dispatch, subgraphUR
 	e.claims.RelinquishClaim(d.shard, d.stepID)
 	e.metricStateWriteBytes(ctx, d.row.workflowURL, "changes", len(d.changesJSON))
 	e.metricStepExecuted(ctx, taskName, "subgraph", d.shard)
-	e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.flowPriority)
+	e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.lineageID, d.row.flowPriority)
 	return nil
 }
 
@@ -1049,7 +1054,7 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 		// The step was reset in place (same row, same denormalized priority) due now. A BACKED-OFF
 		// retry needs nothing here: its not_before is in the future, so the piston's scan picks it up
 		// within a cycle of coming due, and offering it now would only cache a hint no worker may claim.
-		e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.flowPriority)
+		e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.lineageID, d.row.flowPriority)
 	}
 	e.metricStepExecuted(ctx, taskName, "retried", d.shard)
 	return nil
@@ -1470,6 +1475,9 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 	var cohortMu *cohortStripe
 	if d.fanInArrivals > 0 && d.cohortSpawnID != 0 {
 		stripe := &e.cohortLocks[cohortLockStripe(d.shard, d.cohortSpawnID)]
+		if e.enterFanIn(stripe, d.shard, d.cohortSpawnID, d) {
+			defer e.leaveFanIn(stripe, d.shard, d.cohortSpawnID, d)
+		}
 		// A PURE arrival that finds the stripe held joins the batch of arrivals queued for its cohort, which one
 		// transaction lands together (arriveInBatch). It runs its own transaction below only when the batch hands it
 		// back, or when the stripe was free - and then it already holds it.
@@ -1556,8 +1564,13 @@ func (e *Engine) advanced(ctx context.Context, d *dispatch) error {
 	// A sleeping successor is left to the piston: its not_before is in the future, so it is invisible to
 	// selection until it comes due and then visible to the very next cycle.
 	if d.sleep == 0 && len(d.newStepIDs) > 0 {
-		// Priority is the flow's, just bound into the successor INSERTs; the sleep branch diverged above.
-		e.enqueueStepDue(ctx, d.shard, d.newStepIDs[0], d.row.flowPriority)
+		// Priority is the flow's, just bound into the successor INSERTs; the sleep branch diverged above. The first
+		// new step is the first ordinary successor if there is one, else the fan-in this arrival resolved.
+		lineageID := d.fanInLineageID
+		if len(d.normalNexts) > 0 {
+			lineageID = d.childLineageID
+		}
+		e.enqueueStepDue(ctx, d.shard, d.newStepIDs[0], lineageID, d.row.flowPriority)
 	}
 	return nil
 }
@@ -1567,6 +1580,7 @@ func (e *Engine) advanced(ctx context.Context, d *dispatch) error {
 // more than once, so it starts from a clean slate each time.
 func (e *Engine) transitionTx(ctx context.Context, d *dispatch, tx *sequel.Tx) error {
 	d.newStepIDs = d.newStepIDs[:0]
+	d.fanInLineageID = 0
 	d.loss = flowLoss{}
 	d.txBytes = stateByteCount{}
 	d.flowRowLocked = false
@@ -1871,6 +1885,7 @@ func (e *Engine) resolveCohort(ctx context.Context, d *dispatch, tx *sequel.Tx, 
 		d.txBytes.add(fanInBytes)
 		fanIn := *succ
 		fanIn.stepDepth, fanIn.lineageID, fanIn.rows = depth, spawnLineageID, []successorRow{row}
+		d.fanInLineageID = spawnLineageID
 		fanIn.queue(batch, &d.newStepIDs)
 		// The cohort-exit -> fan-in edges take the fan-in step's id.
 		fanInID, fanInArgs, err := batch.insertedID(lastStepIDSQL, func() any { return d.newStepIDs[len(d.newStepIDs)-1] })

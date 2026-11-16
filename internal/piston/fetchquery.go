@@ -59,9 +59,11 @@ const dueIndexGuard = " AND step_id<>0"
 const dueSteps = dueNow + dueIndexGuard
 
 // fetchQuery builds one dialect's fetch over a plan's (band, key) pairs: the statement, and the bind arguments in
-// the order their placeholders appear in it. Every branch projects (priority, fairness_key, step_id), in that
-// order, so the caller's scan loop is dialect-blind. One statement serves every band the plan reached, so a plan
+// the order their placeholders appear in it. Every branch projects (priority, fairness_key, step_id, lineage_id), in
+// that order, so the caller's scan loop is dialect-blind. One statement serves every band the plan reached, so a plan
 // spanning several bands costs one round trip, not one per band.
+//
+// lineage_id is carried in idx_dwarf_steps_selection for this projection, so every shape stays index-only.
 //
 // THE PAIRS TRAVEL AS ONE OR TWO BINDS - two arrays on pgx, a JSON array of [band, key] pairs on mssql and sqlite -
 // and that is a correctness bound rather than a tuning one. One bind per key overruns SQL Server's hard ceiling of
@@ -104,10 +106,10 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 		args = append(args, bands, keys)
 		args = append(args, partArgs...)
 		args = append(args, perKey)
-		return "SELECT k.priority, k.fairness_key, s.step_id" +
+		return "SELECT k.priority, k.fairness_key, s.step_id, s.lineage_id" +
 			" FROM unnest(CAST(? AS INT[]), CAST(? AS TEXT[])) AS k(priority, fairness_key)" +
 			" CROSS JOIN LATERAL (" +
-			"SELECT step_id FROM dwarf_steps" +
+			"SELECT step_id, lineage_id FROM dwarf_steps" +
 			" WHERE " + dueNow +
 			" AND priority=k.priority AND fairness_key=k.fairness_key" +
 			part +
@@ -139,8 +141,8 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 		}
 		args = append(args, partArgs...)
 		args = append(args, perKey)
-		return "SELECT priority, fairness_key, step_id FROM (" +
-			"SELECT priority, fairness_key, step_id," +
+		return "SELECT priority, fairness_key, step_id, lineage_id FROM (" +
+			"SELECT priority, fairness_key, step_id, lineage_id," +
 			" ROW_NUMBER() OVER (PARTITION BY priority, fairness_key ORDER BY created_at, step_id) AS rn" +
 			" FROM dwarf_steps" +
 			" WHERE " + dueSteps +
@@ -159,10 +161,10 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 		}
 		args = append(args, pairsJSON, perKey)
 		args = append(args, partArgs...)
-		return "SELECT k.priority, k.fairness_key, s.step_id" +
+		return "SELECT k.priority, k.fairness_key, s.step_id, s.lineage_id" +
 			" FROM OPENJSON(?) WITH (priority INT '$[0]', fairness_key NVARCHAR(256) '$[1]') AS k" +
 			" CROSS APPLY (" +
-			"SELECT TOP (?) step_id FROM dwarf_steps" +
+			"SELECT TOP (?) step_id, lineage_id FROM dwarf_steps" +
 			" WHERE " + dueNow +
 			" AND priority=k.priority AND fairness_key=k.fairness_key" +
 			part +
@@ -179,8 +181,8 @@ func fetchQuery(driverName string, pairs []planner.Slot, perKey int, part string
 		args = append(args, pairsJSON)
 		args = append(args, partArgs...)
 		args = append(args, perKey)
-		return "SELECT priority, fairness_key, step_id FROM (" +
-			"SELECT priority, fairness_key, step_id," +
+		return "SELECT priority, fairness_key, step_id, lineage_id FROM (" +
+			"SELECT priority, fairness_key, step_id, lineage_id," +
 			" ROW_NUMBER() OVER (PARTITION BY priority, fairness_key ORDER BY created_at, step_id) AS rn" +
 			" FROM dwarf_steps" +
 			" WHERE " + dueSteps +

@@ -577,6 +577,7 @@ func (e *Engine) recomputePools() {
 	e.recomputeWorkerCeilingWith(e.lifetimeCtx, sizing, rtts, observed)
 	dispatch := max(64, workersPerConnBudget*postSplitConns)
 	e.cache.Resize(min(dispatch, int(e.workers.Load())))
+	e.fanInHoldAt.Store(int64(min(dispatch, int(e.workers.Load()))))
 	// The refill scan floor is measured against the cache's capacity, so it follows the cache.
 	e.recomputeRefillIntervalsWith(sizing, roles)
 	e.diags.Logger().Info("Derived pools recomputed", "slots", observed, "dispatch", dispatch)

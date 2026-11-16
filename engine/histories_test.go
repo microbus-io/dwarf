@@ -363,7 +363,7 @@ func (r *hRunner) wakeSleepers(marked bool) {
 		if _, err := db.ExecContext(ctx, "UPDATE dwarf_steps SET not_before=NOW_UTC() WHERE step_id=?", s[0]); err != nil {
 			r.t.Fatal(err)
 		}
-		r.e.enqueueStepDue(ctx, r.shard, s[0], s[1])
+		r.e.enqueueStepDue(ctx, r.shard, s[0], 0, s[1])
 	}
 }
 

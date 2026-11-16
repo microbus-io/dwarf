@@ -407,7 +407,7 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	// shard's next cycle selects it like any other. (Lease recovery is NOT the backstop here - it only
 	// resets `running` rows.) The entry step was just inserted due-now with the resolved priority, so the
 	// fast-path doorbell applies.
-	e.enqueueStepDue(ctx, shardNum, int(newStepID), seed.priority)
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), 0, seed.priority)
 	return flowKey, nil
 }
 
@@ -724,14 +724,14 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 	if !e.dispatchesOn(shard) {
 		return // see enqueueStepDue; after the relinquish, which is this replica's own bookkeeping either way
 	}
-	priority := math.MaxInt
+	priority, lineageID := math.MaxInt, 0
 	var notBeforeDelayMs sql.NullFloat64
 	sh, err := e.db.Shard(shard)
 	if err == nil {
 		sh.DB().QueryRowContext(ctx,
-			"SELECT priority, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
+			"SELECT priority, lineage_id, DATE_DIFF_MILLIS(not_before, NOW_UTC()) FROM dwarf_steps WHERE step_id=?",
 			stepID,
-		).Scan(&priority, &notBeforeDelayMs)
+		).Scan(&priority, &lineageID, &notBeforeDelayMs)
 	}
 	if notBeforeDelayMs.Valid && notBeforeDelayMs.Float64 > 0 {
 		// Not due yet: nothing to preempt, so leave the cache untouched. Nothing is scheduled either - the
@@ -740,7 +740,7 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 		e.diags.Logger().DebugContext(ctx, "Doorbell deferred", "stepID", stepID, "delayMs", notBeforeDelayMs.Float64)
 		return
 	}
-	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)
+	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard, LineageID: lineageID}, priority)
 	if admitted {
 		e.metricStepOffered(ctx)
 	}
@@ -752,7 +752,7 @@ func (e *Engine) enqueueStep(ctx context.Context, shard, stepID int) {
 // enqueueStep's PK lookup - one round-trip per completed step on the hot path, re-reading a row this
 // replica just wrote. Use it only where due-ness is certain (the caller's own sleep/not_before branch
 // already diverged) and the priority is the value just bound into the INSERT/reset.
-func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int) {
+func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, lineageID, priority int) {
 	// diagnostics.FaultDropDoorbell: see enqueueStep.
 	if e.diags.Seams().IsFault(diagnostics.FaultDropDoorbell) {
 		return
@@ -764,7 +764,7 @@ func (e *Engine) enqueueStepDue(ctx context.Context, shard, stepID, priority int
 	if !e.dispatchesOn(shard) {
 		return
 	}
-	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard}, priority)
+	admitted := e.cache.Offer(candidates.Job{StepID: stepID, Shard: shard, LineageID: lineageID}, priority)
 	if admitted {
 		e.metricStepOffered(ctx)
 	}
@@ -1553,7 +1553,7 @@ func (e *Engine) continueFlow(ctx context.Context, flowKey string, additionalSta
 	e.metricFlowStarted(ctx, workflowURL, priority, shardNum)
 	// Ring the local doorbell so this replica claims the entry step without waiting for a refiller scan. The
 	// entry step is due now and its priority is in hand, so no lookup is needed.
-	e.enqueueStepDue(ctx, shardNum, int(newStepID), priority)
+	e.enqueueStepDue(ctx, shardNum, int(newStepID), 0, priority)
 	return nextKey, nil
 }
 

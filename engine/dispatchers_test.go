@@ -705,11 +705,11 @@ func TestDispatchers_DoorbellRingsOnlyForDispatchedShards(t *testing.T) {
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	e.dispatchFlag(1).Store(false)
-	e.enqueueStepDue(t.Context(), 1, 999, 100)
+	e.enqueueStepDue(t.Context(), 1, 999, 0, 100)
 	assert.Equal(0, e.cache.Len(), "a shard this replica only reads is never offered")
 
 	e.dispatchFlag(1).Store(true)
-	e.enqueueStepDue(t.Context(), 1, 999, 100)
+	e.enqueueStepDue(t.Context(), 1, 999, 0, 100)
 	assert.Equal(1, e.cache.Len(), "a dispatched shard is")
 }
 

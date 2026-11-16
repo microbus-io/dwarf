@@ -34,6 +34,15 @@ type cohortStripe struct {
 	queue []chan struct{} // waiters in arrival order; unlock hands the stripe to the head by closing its channel
 	// batches are the open arrival batches queued on this stripe, one per cohort (see arrivalBatch).
 	batches map[arrivalKey]*arrivalBatch
+	// atFanIn counts this replica's workers at each of the stripe's cohorts' fan-ins, and whether the cohort's
+	// lineage is held in the cache (enterFanIn). A cohort with none there has no entry.
+	atFanIn map[arrivalKey]fanInCount
+}
+
+// fanInCount is one cohort's workers at its fan-in on this replica, and whether its lineage is held.
+type fanInCount struct {
+	workers int
+	held    bool
 }
 
 // join adds a pure arrival to its cohort's open batch on this stripe, or opens one it leads (idx 0). It returns a nil
@@ -136,6 +145,70 @@ func (s *cohortStripe) unlock() {
 		close(next)
 	}
 	s.mu.Unlock()
+}
+
+// enterFanIn counts d's worker among this replica's workers at a cohort's fan-in, until leaveFanIn, and holds the
+// cohort's lineage in the cache while they number fanInHoldAt or more - so no worker takes another of the cohort's
+// candidates until enough of its arrivals have landed. It reports whether it counted the worker; one already counted
+// (an arrival that fails on its way through, reaching failStep's stripe from the transition's) is not counted twice.
+//
+// The count is what paces a wide cohort's claims to its fan-in. A worker waiting here holds its candidate, so the
+// crew counts it busy, and holds no turn, so the gate does not stop the next claim: without the hold, a cohort whose
+// branches finish faster than its arrivals land grows the crew by a worker per branch claimed, up to the crew's
+// maximum. Only workers HERE are counted, never those in a task, so a cohort of long tasks still grows the crew as
+// wide as it needs.
+//
+// The cache is called under the stripe's mutex, so two crossings of the depth cannot reach it out of order; the cache
+// never calls out, so the order stripe-then-cache cannot invert.
+func (e *Engine) enterFanIn(stripe *cohortStripe, shard, spawn int, d *dispatch) bool {
+	if d.atFanIn {
+		return false
+	}
+	d.atFanIn = true
+	key := arrivalKey{shard: shard, spawn: spawn}
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	if stripe.atFanIn == nil {
+		stripe.atFanIn = map[arrivalKey]fanInCount{}
+	}
+	c := stripe.atFanIn[key]
+	c.workers++
+	e.settleFanInHold(key, &c)
+	stripe.atFanIn[key] = c
+	return true
+}
+
+// leaveFanIn undoes an enterFanIn that reported true.
+func (e *Engine) leaveFanIn(stripe *cohortStripe, shard, spawn int, d *dispatch) {
+	d.atFanIn = false
+	key := arrivalKey{shard: shard, spawn: spawn}
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	c := stripe.atFanIn[key]
+	c.workers--
+	e.settleFanInHold(key, &c)
+	if c.workers <= 0 {
+		delete(stripe.atFanIn, key)
+		return
+	}
+	stripe.atFanIn[key] = c
+}
+
+// settleFanInHold holds or releases a cohort's lineage to match its count. The depth is read on every call rather
+// than kept, so a cohort whose depth moved is settled by its next arrival or departure, and the last to leave always
+// releases. Callers hold the stripe's mutex.
+func (e *Engine) settleFanInHold(key arrivalKey, c *fanInCount) {
+	at := e.fanInHoldAt.Load()
+	hold := at > 0 && int64(c.workers) >= at
+	if hold == c.held {
+		return
+	}
+	if hold {
+		e.cache.HoldLineage(key.shard, key.spawn)
+	} else {
+		e.cache.ReleaseLineage(key.shard, key.spawn)
+	}
+	c.held = hold
 }
 
 // lockCohortStripe parks a step's worker on its cohort's stripe, keeping the step's lease alive while it waits. It
