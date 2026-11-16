@@ -106,7 +106,7 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 	defer ticker.Stop()
 	begun := time.Now()
 	nextTrace := begun
-	var prevSteps int64
+	var prevSteps, prevStarted, prevCreateErrors int64
 	var prevAt time.Time
 	for {
 		select {
@@ -147,15 +147,18 @@ func (s *gaugeSampler) run(readers []*sdkmetric.ManualReader) {
 					// stall or a sagging tail; this series can. nil = no rate yet (first line) or a failed scrape.
 					var pt *seriesPoint
 					if c := collectAllCounters(readers); c != nil {
-						steps := c["dwarf_steps_executed"]
+						steps, started, createErrs := c["dwarf_steps_executed"], c["dwarf_flows_started"], createErrors.Load()
 						if !prevAt.IsZero() {
+							sec := now.Sub(prevAt).Seconds()
 							pt = &seriesPoint{T: now.Sub(begun).Seconds(),
-								StepsPerSec: float64(steps-prevSteps) / now.Sub(prevAt).Seconds()}
+								StepsPerSec:        float64(steps-prevSteps) / sec,
+								FlowsStartedPerSec: float64(started-prevStarted) / sec,
+								CreateErrorsPerSec: float64(createErrs-prevCreateErrors) / sec}
 							if s.backlog != nil {
 								pt.Outstanding = s.backlog()
 							}
 						}
-						prevSteps, prevAt = steps, now
+						prevSteps, prevStarted, prevCreateErrors, prevAt = steps, started, createErrs, now
 					}
 					// Read every tick, so the probe's baseline advances with the series even past a failed scrape.
 					if w := s.probe.read(); w != nil && pt != nil {
@@ -186,14 +189,18 @@ type gaugeWindow struct {
 	Series     []seriesPoint      `json:"series,omitempty"` // one point per -stats-interval
 }
 
-// seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, the backlog, and
-// the database's WAL pressure over the same interval (absent off Postgres). The backlog is the load generator's
-// own count of flows created and not yet ended (open loop only), not the engine's dwarf_steps_pending gauge:
-// that gauge is refreshed only every 30s, far coarser than a series interval.
+// seriesPoint is one -stats-interval reading: the steps/s executed since the previous one, the flows started and the
+// Create calls that failed over it, the backlog, and the database's WAL pressure over the same interval (absent off
+// Postgres). The backlog is the load generator's own count of flows created and not yet ended (open loop only), not
+// the engine's dwarf_steps_pending gauge: that gauge is refreshed only every 30s, far coarser than a series interval.
+// Flows started come from dwarf_flows_started, which counts a Create only once it commits; a Create that failed never
+// reaches an engine counter, so its rate is the load generator's own (createErrors, open loop only).
 type seriesPoint struct {
-	T           float64 `json:"t"`
-	StepsPerSec float64 `json:"stepsPerSec"`
-	Outstanding int64   `json:"outstanding,omitempty"`
+	T                  float64 `json:"t"`
+	StepsPerSec        float64 `json:"stepsPerSec"`
+	FlowsStartedPerSec float64 `json:"flowsStartedPerSec"`
+	CreateErrorsPerSec float64 `json:"createErrorsPerSec,omitempty"`
+	Outstanding        int64   `json:"outstanding,omitempty"`
 	walPoint
 }
 

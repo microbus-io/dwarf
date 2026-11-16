@@ -615,6 +615,46 @@ def chart_failover():
     finish(fig, "benchmark-cloud-failover.png")
 
 
+# ---- Database failover: a Cloud SQL HA failover under load (redo-hs-20261115, arm hs-d) ----
+# One 32 vCPU Cloud SQL PG16 instance patched to high availability, one c4a-16 engine host with two in-process replicas,
+# `loop` 10 steps at 600 flows/s open loop (6,000 steps/s offered), `-task-delay-dist 0.80:50ms,0.20:2s`, 2 + 12 min,
+# `gcloud sql instances failover` at window minute 6. The series' t counts from the gauge sampler's start, right after
+# the warmup, so the window starts at startedAt + warmupSec (the engines' startup puts it a second or two later; the
+# dispatch gap and the connection errors line up within one 10 s point). The shading runs from the failover request
+# to the engines' last failed connection (their log), i.e. until the new primary accepted connections.
+HS = os.path.join(RESULTS, "redo-hs-20261115")
+DBFO_REQUEST_UTC = "2026-11-16T00:21:29Z"  # the orchestrator's FAILOVER line, just before the gcloud call
+DBFO_LAST_ERROR_UTC = "2026-11-16T00:23:06Z"  # the engines' last "failed to connect"
+
+
+def chart_db_failover():
+    path = os.path.join(HS, "out", "hs-d.json")
+    if not os.path.exists(path):
+        return skip("benchmark-cloud-db-failover.png", f"artifacts not in {HS}")
+    art = json.load(open(path))
+    utc = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()  # noqa: E731
+    start = utc(art["startedAt"][:26] + "Z") + art["config"]["warmupSec"]
+    request, back = (utc(DBFO_REQUEST_UTC) - start) / 60, (utc(DBFO_LAST_ERROR_UTC) - start) / 60
+    pts = [(p["t"] / 60, p["stepsPerSec"]) for p in art["results"][0]["gauges"]["series"]
+           if p.get("stepsPerSec") is not None]
+    fig, ax = plt.subplots(figsize=(10, 4.2))
+    ax.axvspan(request, back, color=OUTAGE, alpha=0.13, lw=0)
+    ax.axvline(request, color=OUTAGE, lw=1.1)
+    ax.plot([t for t, _ in pts], [v for _, v in pts], color=S1, lw=1.8, label="steps executed, both replicas")
+    ax.axhline(6000, color=MUTED, lw=1.2, ls=(0, (4, 3)), label="offered: 600 flows/s, 6,000 steps/s")
+    ax.text(request + 0.08, 8300, "failover\nrequested", color=OUTAGE, fontsize=9, va="top")
+    ax.text(back + 0.08, 8300, "new primary\naccepting", color=INK2, fontsize=9, va="top")
+    ax.set_ylim(0, 8500)
+    ax.set_xlim(0, 12)
+    ax.yaxis.set_major_formatter(kilo)
+    ax.set_ylabel("steps/s (10 s)")
+    ax.set_xlabel("minute of the measurement window   (shaded: from the failover request until the new primary "
+                  "accepted connections)")
+    ax.set_title("Database failover: the managed primary moves to its standby under load")
+    ax.legend(frameon=False, loc="lower left", fontsize=9.5)
+    finish(fig, "benchmark-cloud-db-failover.png")
+
+
 # ---- A day: REAL, three 90-minute day/night cycles over five priority bands (redo-real-20261107) ----
 # Two engine replicas each generate half the commanded rate. A replica's series t counts from the day's shared epoch,
 # so the restarted process (day2-*) lines up with the first (day1-*). Pending and oldest-pending come from the backlog
@@ -883,6 +923,7 @@ chart_headroom()
 chart_volume()
 chart_volume_rows()
 chart_failover()
+chart_db_failover()
 chart_day()
 chart_day_backlog()
 chart_day_database()

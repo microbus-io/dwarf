@@ -468,7 +468,10 @@ the same readings. `delayMs` beside it says which half of the cycle a line belon
 rounding error against 36,000 workers and most of the count against 800 (both columns are printed).
 `steps/s` is the executed-steps counter's delta since the previous line, and each line is also kept in the
 artifact as `results[].gauges.series` (`t`, `stepsPerSec`, `outstanding`) - the only record of a window's shape,
-since `stepsPerSec` is its mean. `cell.sh` reports each run's slowest and fastest interval from it.
+since `stepsPerSec` is its mean. `cell.sh` reports each run's slowest and fastest interval from it. `flows/s`
+(`flowsStartedPerSec`) is `dwarf_flows_started`'s delta, the Creates that committed; `createErr`
+(`createErrorsPerSec`, open loop only) is the load generator's own count of Creates that returned an error, since a
+Create that fails never commits and no engine counter sees it - together they show admission through an outage.
 On Postgres each point also carries the interval's WAL pressure - `walMBps`, `commitsPerSync`, `fpiPerSec`,
 `walBuffersFull`, `walWriteWaiters` and `activeBackends` (means per 50 ms wait poll) - and `results[].db` the
 window totals (`walFpi`, `walBuffersFull`, `walSyncs`, `commits`). A single Postgres instance is WAL-write-bound

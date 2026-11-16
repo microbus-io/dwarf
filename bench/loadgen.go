@@ -133,6 +133,10 @@ var guard struct {
 	stall time.Duration
 }
 
+// createErrors counts the open loop's Create calls that returned an error, for the series' per-interval rate: a Create
+// that fails never commits, so no engine counter sees it.
+var createErrors atomic.Int64
+
 // deleteOnCompletion marks every flow a sweep or open-loop step creates DeleteOnCompletion, set once at startup from
 // -delete-on-completion. Package-level for the reason guard is.
 var deleteOnCompletion bool
@@ -553,6 +557,7 @@ func runStepOpenLoop(ctx context.Context, engines []*engine.Engine, readers []*s
 				createElapsed := time.Since(born)
 				if err != nil {
 					errCount.Add(1)
+					createErrors.Add(1)
 					continue
 				}
 				created.Add(1)
