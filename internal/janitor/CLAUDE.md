@@ -714,3 +714,14 @@ Its tests run on a rig (`rig_test.go`): an isolated shard database, an archive w
 janitor whose settings a test changes between passes. Trees are seeded by direct `INSERT` (`seedTrees`), as valid
 closed trees. The engine keeps the behaviour oracle - archived reads, Purge, Delete, DeleteOnCompletion, expiration,
 the archive metrics - and its own copy of the seeder.
+
+**Every failure a job reports fires `CheckpointJanitorFailed`** - a statement it logs, a batch refused for carrying a
+claim, a failed pass, a root a sweep holds, an archive failure past its episode's first log - never at a stop, so a test
+asserting that no job failed counts its visits rather than log lines. One failure can fire it twice (a sweep's held
+root is an archive failure and a hold), so a count is a floor, not a tally. **A batch a sweep splits is no report**:
+taken again a root at a time, only a root that then fails alone is held and fires it, as only it is logged. The
+expiration job's pass is the engine's and fires it beside its own logs (`expiration.go`). Pinned a site at a time, one
+job's round so no other reports: `TestStage_AFailedChunkIsRetried` (a logged statement),
+`TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes` (fast archiving's episode, sweep archiving's, the hold),
+`TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot`, `TestJanitor_EachBatchTakesAFreshClaim`,
+`TestRecovery_AFailedPassIsNoProgress` and the engine's `TestExpiration_AFailingRootIsPassedOver`.

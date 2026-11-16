@@ -26,6 +26,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/seamster"
 	"go.opentelemetry.io/otel/attribute"
@@ -351,6 +352,7 @@ func (f *FastArchiving) failed(ctx context.Context, what string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
+	f.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	now := time.Now()
 	f.mu.Lock()
 	first := f.failSince.IsZero()
@@ -381,6 +383,7 @@ func (f *FastArchiving) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
+	f.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	f.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
 }
 

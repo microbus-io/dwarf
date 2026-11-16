@@ -536,6 +536,8 @@ func TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes(t *testing.T) {
 	r.seams.InjectN(diagnostics.FaultReapArchiveErr, 10000)
 	defer r.seams.Withdraw(diagnostics.FaultReapArchiveErr)
 	r.fastRounds(ctx)
+	before := r.seams.Visits(diagnostics.CheckpointJanitorFailed)
+	assert.True(before > 0, "fast archiving's failed moves reported")
 	assert.False(r.roundOf(ctx, JobSweepArchiving), "a round of failures makes no progress")
 	assert.Equal(sweepFailureLimit, r.sweep().w.held(), "held as they fail")
 	assert.True(r.sweep().w.sweeping, "the sweep is under way")
@@ -544,6 +546,8 @@ func TestSweep_HeldRootsAreVisibleBeforeTheSweepCompletes(t *testing.T) {
 	assert.Equal(sweepFailureLimit+1, r.sweep().w.held(), "the last complete sweep's count")
 	assert.False(r.sweep().w.sweeping, "complete")
 	assert.Equal(heldLogLimit, r.logs.count("Janitor: a sweep could not remove a tree"), "the first of a sweep logged")
+	assert.Equal(2*(sweepFailureLimit+1), r.seams.Visits(diagnostics.CheckpointJanitorFailed)-before,
+		"every root held reported twice, the archive failure and the hold, past the log limit")
 }
 
 // gaugeOf returns the value of the gauge named name at the point carrying attrs, and whether there is one.

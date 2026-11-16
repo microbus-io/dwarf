@@ -19,6 +19,8 @@ package janitor
 import (
 	"context"
 	"time"
+
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 )
 
 // The names the engine adds its recovery jobs under.
@@ -37,6 +39,7 @@ type RecoveryPass func(ctx context.Context) error
 type Recovery struct {
 	every time.Duration
 	pass  RecoveryPass
+	j     *Janitor
 
 	// ended is when the last pass ended, zero before the first. Only the round and reset touch it.
 	ended time.Time
@@ -47,8 +50,8 @@ func NewRecovery(every time.Duration, pass RecoveryPass) *Recovery {
 	return &Recovery{every: every, pass: pass}
 }
 
-// attach has nothing to create.
-func (r *Recovery) attach(*Janitor, string) {}
+// attach keeps the janitor, whose seams a failed pass is reported through.
+func (r *Recovery) attach(j *Janitor, _ string) { r.j = j }
 
 // detach has nothing to release.
 func (r *Recovery) detach() {}
@@ -73,5 +76,8 @@ func (r *Recovery) round(ctx context.Context, batch batchFunc) (progress bool) {
 		return r.pass(ctx)
 	})
 	r.ended = time.Now()
+	if err != nil && ctx.Err() == nil {
+		r.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
+	}
 	return err == nil
 }

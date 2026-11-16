@@ -278,7 +278,8 @@ const (
 	CheckpointReapArchiveDeleted   = "reapArchiveDeleted"   // a transaction deleting archived trees (Delete, Purge, the archive deletion sweep) has committed
 	CheckpointArchivePassDone      = "archivePassDone"      // the archive loop, after each pass over the shards
 	CheckpointArchiveMaintained    = "archiveMaintained"    // archive retention, after each pass keeping a shard's archive days
-	CheckpointJanitorBatchTurn     = "janitorBatchTurn"     // a janitor's batch has taken its turn, before its first statement
+	CheckpointJanitorBatchTurn     = "janitorBatchTurn"     // bare and by job name: a janitor's batch has taken its turn, before its first statement
+	CheckpointJanitorFailed        = "janitorFailed"        // a janitor job reported a failure - a statement, a refused batch, a pass, a root a sweep held - past the log limits too; never at a stop
 )
 
 // --- Recorded variables ---

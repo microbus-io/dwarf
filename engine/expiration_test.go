@@ -437,6 +437,7 @@ func TestExpiration_AFailingRootIsPassedOver(t *testing.T) {
 	assert.Equal(int64(1), sumAt(collect(t, reader), "dwarf_flows_expired", map[string]string{"shard": "1"}))
 	assert.Equal(int64(2), sumAt(collect(t, reader), "dwarf_flows_expire_failed", map[string]string{"shard": "1"}),
 		"one failed attempt per pass")
+	assert.Equal(2, e.diags.Seams().Visits(diagnostics.CheckpointJanitorFailed), "each reported as its job's failure")
 
 	expireNow(ctx, e)
 	for _, fk := range []string{first, second} {

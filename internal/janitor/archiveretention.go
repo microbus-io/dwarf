@@ -100,6 +100,7 @@ func (a *ArchiveRetention) round(ctx context.Context, batch batchFunc) (progress
 		}
 		if err != nil && ctx.Err() == nil { // a pass cut short by a stop is no failure
 			a.failed.Add(ctx, 1, metric.WithAttributes(a.shardAttr))
+			a.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 			a.j.diags.Logger().ErrorContext(ctx, "Janitor: maintaining the archive tables; the next pass retries",
 				"shard", a.j.shard.Index(), "error", err)
 		}

@@ -3626,7 +3626,7 @@ wiring (`janitor.go`):
   written against background removal whose first pass came 15 s in. It holds the recovery jobs too, so no background
   pass races a test that forges a shape a repair would take. A test of the background running sets it false
   (`shortenDeletion` with a short interval, the `TestJanitor_*` lifecycle tests), and `janitorIdle` shortens the
-  idle wait. A test blocks a real batch, holding its turn, at `diagnostics.CheckpointJanitorBatchTurn`, and one inside
+  idle wait. A test blocks a real batch, holding its turn, at `diagnostics.CheckpointJanitorBatchTurn` - bare, or one job's by its name - and one inside
   its transaction, holding a connection, at `diagnostics.CheckpointReapBatchLocked`.
 
 **The tree delete is unconditional on descendant status, deliberately** - do not 409 on a `running` subgraph

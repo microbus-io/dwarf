@@ -380,6 +380,7 @@ func (j *Janitor) batch(name string) batchFunc {
 	return func(ctx context.Context, fn func(ctx context.Context, h handle) error) error {
 		if database.HasClaim(ctx) {
 			err := errors.New("a batch's context carries a turn claim already")
+			j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 			j.diags.Logger().ErrorContext(ctx, "Janitor: a batch did not run", "shard", j.shard.Index(), "job", name, "error", err)
 			return err
 		}
@@ -388,6 +389,9 @@ func (j *Janitor) batch(name string) batchFunc {
 		defer pass.Return()
 		turned := time.Now()
 		j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorBatchTurn)
+		if j.diags.Seams().Enabled() {
+			j.diags.Seams().Checkpoint(ctx, diagnostics.Join(diagnostics.CheckpointJanitorBatchTurn, name))
+		}
 		err := fn(ctx, j.shard.DB())
 		j.recordBatch(ctx, name, turned.Sub(start), time.Since(turned))
 		return err

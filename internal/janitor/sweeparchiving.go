@@ -25,6 +25,7 @@ import (
 
 	"github.com/microbus-io/dwarf/internal/archiver"
 	"github.com/microbus-io/dwarf/internal/database"
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -319,6 +320,7 @@ func (s *SweepArchiving) failure(ctx context.Context, what string, err error) {
 	if ctx.Err() != nil {
 		return
 	}
+	s.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	s.mu.Lock()
 	first := s.failSince.IsZero()
 	if first {
@@ -337,5 +339,6 @@ func (s *SweepArchiving) logError(ctx context.Context, msg string, args ...any) 
 	if ctx.Err() != nil {
 		return
 	}
+	s.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	s.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", s.j.shard.Index()}, args...)...)
 }

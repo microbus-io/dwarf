@@ -89,11 +89,13 @@ func TestRecovery_AFailedPassIsNoProgress(t *testing.T) {
 	assert.False(j.round(ctx, j.jobs[0]), "a failed pass is no progress")
 	assert.False(j.round(ctx, j.jobs[0]), "and waits the interval")
 	assert.Equal(1, passes)
+	assert.Equal(1, r.seams.Visits(diagnostics.CheckpointJanitorFailed), "a failed pass is reported")
 
 	fail = false
 	j.jobs[0].job.(*Recovery).ended = time.Now().Add(-time.Hour)
 	assert.True(j.round(ctx, j.jobs[0]), "the next pass, completed, is progress")
 	assert.Equal(2, passes)
+	assert.Equal(1, r.seams.Visits(diagnostics.CheckpointJanitorFailed), "a completed pass is not")
 }
 
 // TestRecovery_ADrainRunsOnePass pins that a drain runs the pass once: the round after it waits for the interval.

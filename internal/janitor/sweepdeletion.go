@@ -253,5 +253,6 @@ func (s *SweepDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
+	s.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	s.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", s.j.shard.Index()}, args...)...)
 }

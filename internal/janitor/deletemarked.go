@@ -380,5 +380,6 @@ func (d *DeleteMarked) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
+	d.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	d.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", d.j.shard.Index()}, args...)...)
 }

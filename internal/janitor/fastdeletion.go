@@ -192,6 +192,7 @@ func (f *FastDeletion) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
+	f.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	f.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", f.j.shard.Index()}, args...)...)
 }
 

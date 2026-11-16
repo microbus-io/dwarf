@@ -97,12 +97,14 @@ func TestArchiveRetention_AFailedPassIsCountedAndAStopIsNot(t *testing.T) {
 	round(ctx)
 	assert.Equal(int64(1), failed())
 	assert.Equal(1, r.logs.count(logged))
+	assert.Equal(1, r.seams.Visits(diagnostics.CheckpointJanitorFailed))
 
 	stopped, cancel := context.WithCancel(ctx)
 	cancel()
 	round(stopped)
 	assert.Equal(int64(1), failed(), "a stop is no failure")
 	assert.Equal(1, r.logs.count(logged), "a stop is not logged")
+	assert.Equal(1, r.seams.Visits(diagnostics.CheckpointJanitorFailed), "a stop is not reported")
 }
 
 // TestArchiveRetention_WaitsForATurn pins that a pass runs under a turn on the shard: with the shard's one turn held,

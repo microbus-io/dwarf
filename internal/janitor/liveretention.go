@@ -280,5 +280,6 @@ func (l *LiveRetention) logError(ctx context.Context, msg string, args ...any) {
 	if ctx.Err() != nil {
 		return
 	}
+	l.j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
 	l.j.diags.Logger().ErrorContext(ctx, msg, append([]any{"shard", l.j.shard.Index()}, args...)...)
 }

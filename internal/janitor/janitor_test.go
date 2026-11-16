@@ -26,6 +26,7 @@ import (
 	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/turnstile"
+	"github.com/microbus-io/seamster"
 	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -325,7 +326,9 @@ func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	assert := testarossa.For(t)
 	var claims []turnstile.Claim
 	var nested error
-	j := testJanitor(t, newRig(t, 30).db, nil, func(j *Janitor) { j.SetManual(true); j.shard.SetTurnLimit(4) },
+	d := diagnostics.New()
+	d.SetSeams(seamster.New(true))
+	j := testJanitor(t, newRig(t, 30).db, d, func(j *Janitor) { j.SetManual(true); j.shard.SetTurnLimit(4) },
 		testJob("two", func(ctx context.Context, batch batchFunc) bool {
 			for range 2 {
 				err := batch(ctx, func(batchCtx context.Context, _ handle) error {
@@ -350,6 +353,7 @@ func TestJanitor_EachBatchTakesAFreshClaim(t *testing.T) {
 	assert.NotEqual(claims[0].Seq, claims[1].Seq, "each batch is a job of its own at the turnstile")
 	assert.True(claims[1].Since.After(claims[0].Since), "the second batch's claim is as old as the batch, not the round")
 	assert.Error(nested, "a batch inside a batch")
+	assert.Equal(2, d.Seams().Visits(diagnostics.CheckpointJanitorFailed), "each refused batch reported")
 }
 
 // TestJanitor_JobAgesReportTimeSinceProgress pins the reading: zero at the resume, growing through rounds without

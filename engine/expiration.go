@@ -80,7 +80,7 @@ func (e *Engine) expirePass(ctx context.Context, shard, after int) (next int, pr
 	defer func() { e.metricFlowsExpired(ctx, shard, ended) }()
 	sh, err := e.db.Shard(shard)
 	if err != nil {
-		e.logSweepError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)
+		e.logExpireError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)
 		return after, false
 	}
 	db := sh.DB()
@@ -103,7 +103,7 @@ func (e *Engine) expirePass(ctx context.Context, shard, after int) (next int, pr
 		}
 		roots, last, swept, err := e.expiredPage(ctx, db, after)
 		if err != nil {
-			e.logSweepError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)
+			e.logExpireError(ctx, "Expiring flows; the next pass retries", "shard", shard, "error", err)
 			return after, ended > 0
 		}
 		pages++
@@ -122,7 +122,7 @@ func (e *Engine) expirePass(ctx context.Context, shard, after int) (next int, pr
 				if ctx.Err() == nil {
 					e.metricExpireFailed(ctx, shard)
 				}
-				e.logSweepError(ctx, "Expiring flows: terminating an expired flow; the next sweep retries", "shard", shard,
+				e.logExpireError(ctx, "Expiring flows: terminating an expired flow; the next sweep retries", "shard", shard,
 					"flow", r.flowID, "error", err)
 				continue
 			}
@@ -179,4 +179,14 @@ func (e *Engine) expiredPage(ctx context.Context, db *sequel.DB, after int) (roo
 		return nil, 0, false, errors.Trace(err)
 	}
 	return roots, last, n < e.expirePage, nil
+}
+
+// logExpireError logs a failure of the expiration pass and reports it as its janitor job's - unless the pass's ctx is
+// done: a stop is no failure.
+func (e *Engine) logExpireError(ctx context.Context, msg string, args ...any) {
+	if ctx.Err() != nil {
+		return
+	}
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
+	e.diags.Logger().ErrorContext(ctx, msg, args...)
 }

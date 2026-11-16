@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/errors"
 	"go.opentelemetry.io/otel/metric"
@@ -101,7 +102,11 @@ func (w *sweep) hold(ctx context.Context, j *Janitor, root dueRoot, err error) {
 	w.failed++
 	n := w.failed
 	w.mu.Unlock()
-	if n > heldLogLimit || ctx.Err() != nil {
+	if ctx.Err() != nil {
+		return
+	}
+	j.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointJanitorFailed)
+	if n > heldLogLimit {
 		return
 	}
 	j.diags.Logger().ErrorContext(ctx, "Janitor: a sweep could not remove a tree; the next sweep takes it again",
