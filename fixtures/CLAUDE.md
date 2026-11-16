@@ -228,6 +228,7 @@ bench binary's test seams are inert. A new knob takes the prefix and a row here.
 | `DWARF_TESTING_MEASURE_K` | `engine/roundtrips_test.go` | run the round-trips-per-step measurement (opt-in, slow) |
 | `DWARF_TESTING_COHORT_WIDTH` | `engine/cohortwidth_test.go` | run the wide-cohort measurement at that width |
 | `DWARF_TESTING_KILL_POINT`, `DWARF_TESTING_KILL_DSN`, `DWARF_TESTING_KILL_LOG` | `engine/processkill_test.go` | set by the test for the child process it kills, never by hand |
+| `DWARF_TESTING_DROP_DSN`, `DWARF_TESTING_DROP_KEYS` | `engine/dispatcherdrop_test.go` | set by the test for the child process it kills, never by hand |
 | `DWARF_TESTING_ARCHIVE_DAY`, `DWARF_TESTING_ARCHIVE_GRACE`, `DWARF_TESTING_STAGE_ROWS`, `DWARF_TESTING_STAGE_BYTES` | the bench (`archiveOverrides`, `bench/overrides.go`) | the rig's archive day, grace and staging thresholds (`bench/CLAUDE.md`) |
 | `DWARF_TESTING_RIG_DSN` | `bench/riginvariants_test.go` | the database a rig run left behind, for the invariant checks (skipped without it) |
 
