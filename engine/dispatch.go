@@ -1758,7 +1758,7 @@ func (e *Engine) successorsOf(d *dispatch) successorBatch {
 		flowID: d.row.flowID, flowHour: d.row.createdHour, stepDepth: d.row.stepDepth + 1, timeBudgetMs: d.row.flowTimeBudgetMs, lineageID: d.childLineageID,
 		predecessorID: d.stepID, sleepMs: d.sleep.Milliseconds(), priority: d.row.flowPriority, fairnessKey: d.row.flowFairnessKey,
 		fairnessWeight: d.row.flowFairnessWeight, engineID: e.engineID, inheritCancel: d.inheritCancel,
-		maxBytes: e.maxPayloadBytes,
+		maxBytes: e.maxPayloadBytes, arrays: d.db.DriverName() == "pgx",
 	}
 }
 

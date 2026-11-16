@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/workflow"
@@ -28,9 +29,10 @@ import (
 )
 
 // TestSuccessorBatch_WideFanOutKeepsBranchOrder pins the multi-row successor insert across chunk boundaries. A
-// width of 150 is inserted as chunks of 64, 64, 16, 4 and 2, and the ids each chunk returns are matched back to
-// their rows by token rather than position - so every branch must still carry the ordinal of its own element, and
-// an order-sensitive reducer must fold in input-array order.
+// width of 150 is inserted as chunks of 64, 64, 16, 4 and 2; on PostgreSQL, which inserts by arrays, the width is
+// successorArrayMax+150, two array statements. The ids each chunk returns are matched back to their rows by token
+// rather than position - so every branch must still carry the ordinal of its own element, and an order-sensitive
+// reducer must fold in input-array order.
 func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -42,7 +44,10 @@ func TestSuccessorBatch_WideFanOutKeepsBranchOrder(t *testing.T) {
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	const width = 150
+	width := 150
+	if sh, err := e.db.Shard(1); err == nil && sh.DB().DriverName() == "pgx" {
+		width = successorArrayMax + 150
+	}
 	g := workflow.NewGraph("Wide")
 	g.SetURL("Seed", "wide/seed")
 	g.SetURL("Work", "wide/work")
@@ -193,8 +198,9 @@ func TestSuccessorBatch_LoneSuccessorLinks(t *testing.T) {
 	assert.Zero(strays, "every flow stopped at its own last step")
 }
 
-// TestSuccessorBatch_FullByRowsOrBytes pins when pending successor rows are sent: at successorBatchMax rows, or
-// before a row that would take their payloads past maxBytes - but never before a row that has nothing to join.
+// TestSuccessorBatch_FullByRowsOrBytes pins when pending successor rows are sent: at successorBatchMax rows
+// (successorArrayMax for rows sent by arrays), or before a row that would take their payloads past maxBytes - but
+// never before a row that has nothing to join.
 func TestSuccessorBatch_FullByRowsOrBytes(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -213,6 +219,12 @@ func TestSuccessorBatch_FullByRowsOrBytes(t *testing.T) {
 	assert.True(s.full(row(1)), "successorBatchMax rows are sent however small")
 	s.rows = s.rows[:successorBatchMax-1]
 	assert.False(s.full(row(1)))
+
+	arrays := successorBatch{maxBytes: 1000, arrays: true}
+	arrays.rows = make([]successorRow, successorBatchMax)
+	assert.False(arrays.full(row(1)), "rows sent by arrays are not held to the multi-row INSERT's count")
+	arrays.rows = make([]successorRow, successorArrayMax)
+	assert.True(arrays.full(row(1)), "successorArrayMax rows are sent however small")
 }
 
 // TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder runs a fan-out whose branch states are each over half the
@@ -283,4 +295,59 @@ func TestSuccessorBatch_ByteBoundedFanOutKeepsBranchOrder(t *testing.T) {
 	}
 	assert.NoError(rows.Err())
 	assert.Equal(width, count)
+}
+
+// TestSuccessorBatch_SleepingFanOutDefersEveryBranch pins a transition's Sleep across a multi-row insert: every
+// branch of a fan-out whose source slept is written not due until the sleep has passed, by the same expression the
+// single-row INSERT uses - on PostgreSQL inside the array insert. A wrong offset, or a sleep bound to the wrong
+// column, shows as a branch due early or late.
+func TestSuccessorBatch_SleepingFanOutDefersEveryBranch(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	assert := testarossa.For(t)
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	mux := hosts.NewMux()
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	const sleep = 700 * time.Millisecond
+	g := workflow.NewGraph("SleepWide")
+	g.SetURL("Seed", "sleepwide/seed")
+	g.SetURL("Work", "sleepwide/work")
+	g.SetURL("Join", "sleepwide/join")
+	g.SetFanIn("Join")
+	g.AddTransitionForEach("Seed", "Work", "items", "n")
+	g.AddTransitionChain("Work", "Join", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("sleepwide/wf", g)
+	mux.HandleTask("sleepwide/seed", func(ctx context.Context, f *workflow.Flow) error {
+		f.Sleep(sleep)
+		return nil
+	})
+	mux.HandleTask("sleepwide/work", func(ctx context.Context, f *workflow.Flow) error { return nil })
+	mux.HandleTask("sleepwide/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
+
+	_, outcome, err := e.Run(ctx, "sleepwide/wf", map[string]any{"items": []int{1, 2, 3, 4, 5}}, nil)
+	assert.NoError(err)
+	assert.Equal(workflow.StatusCompleted, outcome.Status)
+
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	rows, err := sh.DB().QueryContext(ctx, "SELECT DATE_DIFF_MILLIS(not_before, created_at) FROM dwarf_steps WHERE task_name='Work'")
+	assert.Must(assert.NoError(err))
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var deferredMs float64
+		assert.NoError(rows.Scan(&deferredMs))
+		// The two stamps come from one statement's clock (PostgreSQL's is the transaction's): the gap is the sleep,
+		// give or take the millisecond the columns hold.
+		assert.True(deferredMs >= float64(sleep.Milliseconds()-1) && deferredMs <= float64(sleep.Milliseconds()+50),
+			"a branch is due %v ms after it was written, not the source's %v", deferredMs, sleep)
+		count++
+	}
+	assert.NoError(rows.Err())
+	assert.Equal(5, count)
 }

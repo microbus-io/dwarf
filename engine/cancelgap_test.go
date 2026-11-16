@@ -78,8 +78,9 @@ func TestCancelInTransitionGap(t *testing.T) {
 }
 
 // TestCancelInTransitionGap_WideFanOut is the transition-gap Cancel on a fan-out wide enough to be inserted in
-// several multi-row chunks: every branch takes its mark from the watermark the transition's lock grab read, so
-// every branch must be preempted and the flow must resolve cancelled.
+// several multi-row chunks - on PostgreSQL, a full array statement and a remainder of one row, which takes the
+// single-row INSERT: every branch takes its mark from the watermark the transition's lock grab read, so every branch
+// must be preempted and the flow must resolve cancelled.
 func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
@@ -105,7 +106,11 @@ func TestCancelInTransitionGap_WideFanOut(t *testing.T) {
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
-	items := make([]int, 150)
+	width := 150
+	if sh, err := e.db.Shard(1); err == nil && sh.DB().DriverName() == "pgx" {
+		width = successorArrayMax + 1
+	}
+	items := make([]int, width)
 	e.diags.Seams().Break(diagnostics.CheckpointBeforeTransitionTx)
 	fk, err := e.Create(ctx, "cgapw/g", map[string]any{"items": items}, nil)
 	assert.NoError(err)

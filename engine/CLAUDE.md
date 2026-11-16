@@ -349,8 +349,9 @@ and does nothing else. Each marked step consumes its own mark at one of exactly 
 column off a write they make anyway, so an uncancelled flow pays no extra round trip - **except the completion
 write on MySQL**, which lacks `RETURNING`/`OUTPUT` and reads the mark with a follow-up `SELECT`: +1 round trip per
 completed step (+1 to `k` in the ceiling equation), accepted like the claim's own follow-up read (the site comment
-says why not `LAST_INSERT_ID(expr)`, which the claim does use). The successor's mark adds no round trip: each successor row reads the
-watermark in its own INSERT, one primary-key lookup on the flow row the transaction already holds.
+says why not `LAST_INSERT_ID(expr)`, which the claim does use). The successor's mark adds no round trip: the INSERT
+that writes a successor reads the watermark, one primary-key lookup on the flow row the transaction already holds -
+per row, or once per statement for the rows PostgreSQL inserts by arrays.
 
 - **The claim.** The claim CAS returns `cancelling`; a marked step is preempted - `ExecuteTask` is skipped and
   `cancelmarker.New(reason)` takes the path a task error would (`onError`, else `failStep`). Retry-rewound,
@@ -373,10 +374,11 @@ covered" exemption covers the handler's own insert, whose source existed before.
 `Cancel`, "at or below the watermark and not covered" is exactly "terminal when the mark ran", which is the gap.
 It is race-free and free of round trips because every insert of a flow's steps holds that flow row's lock and
 `cancel()` writes the watermark under it: either the insert sees the new watermark, or `cancel()` waits and its
-mark then finds the successors pending. Every successor row decides its own mark: its `cancelling` value is a scalar
-subquery on the flow's `cancel_watermark` (`successorRowSQL`), evaluated by the INSERT itself, after the
-transaction already holds the flow-row lock - so a transition's inserts can be batched with the lock grab without
-waiting for anything the grab returns.
+mark then finds the successors pending. The INSERT decides the mark itself: a successor's `cancelling` value is a
+scalar subquery on the flow's `cancel_watermark` - per row in `successorRowSQL`, one InitPlan for a whole statement in
+PostgreSQL's `successorArraySQL`, whose rows all share it - evaluated after the transaction already holds the
+flow-row lock, so a transition's inserts can be batched with the lock grab without waiting for anything the grab
+returns.
 `cancel_watermark` defaults to 0 (never cancelled), and **Fork deliberately does not copy it**: a fork is not
 under cancellation. Pinned by `engine/cancelgap_test.go` and by `ran_covered_with_onerror`'s handler successor.
 
@@ -990,13 +992,17 @@ not parallelism:
   most 64 rows (24 binds each, under SQL Server's 2,100-parameter ceiling). The ids come back by `RETURNING`/`OUTPUT`
   and are matched to rows by `step_token`, since neither promises VALUES order. MySQL inserts row by row: it has no
   `RETURNING`, and under the default `innodb_autoinc_lock_mode=2` a multi-row insert's ids are not guaranteed
-  contiguous.
+  contiguous. **On PostgreSQL several successors go in by arrays** (`successorArraySQL`: the per-row columns as
+  arrays, expanded by `unnest`), up to `successorArrayMax` (4,096) a statement: one text and one plan whatever the
+  count, and the Cancel mark, the same for every row, one InitPlan instead of a subquery per row. A wide spawn sends a
+  statement per 4,096 branches instead of per 64. A lone successor keeps the single-row INSERT, which the next
+  statement names by `currval`.
 - **The transition, `completeFlow` and flow creation are statement batches** (`txBatch`: `queue` pairs a
   statement with the function that reads its result, `flush` sends and reads in order; one round trip per flush on
   PostgreSQL, other drivers run the same statements one by one). A flush happens where something must be read
   before the next statement can be written - an id, or the cohort bump - where nothing else may run while results
-  are open, and every 64 successor rows or `maxPayloadBytes` of their payloads, to bound memory and the
-  statement (`successorBatch.full`).
+  are open, and every 64 successor rows (4,096 by arrays on PostgreSQL) or `maxPayloadBytes` of their payloads, to
+  bound memory and the statement (`successorBatch.full`).
   Measured on PostgreSQL (`TestRoundTrips_*`, simulated RTT, about +-0.5): a linear step ~5 round trips, a one-step
   flow ~11, a fan-out cycle of two branches ~20.5.
 - **On PostgreSQL the claim returns the flow row too** (`UPDATE dwarf_steps s ... FROM dwarf_flows f ...
@@ -1017,9 +1023,9 @@ not parallelism:
   InitPlan; compared directly, the volatile function cannot be an index key (measured on a 100k-row table: a
   sequential scan against a primary-key index scan). `SET` and `VALUES` take it bare. A flow INSERT that draws
   its own id (`selfFlowInsertSQL`) calls `nextval`, which sets `currval` as a default-filled id does.
-- **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows or `maxPayloadBytes`, so a
-  wide fan-out holds only one batch's branch states in memory) and the fenced own-row write. It writes nothing to
-  the flow row.
+- **The transition** queues the lock grab, the successor INSERTs (flushed every 64 rows, 4,096 on PostgreSQL, or
+  `maxPayloadBytes`, so a wide fan-out holds only one batch's branch states in memory) and the fenced own-row write.
+  It writes nothing to the flow row.
   - A **lone successor** (every linear and goto step, every step inside a forEach branch) is named by
     `insertedID`, so on PostgreSQL the transition is BEGIN, one batch, COMMIT. Pinned by
     `TestSuccessorBatch_LoneSuccessorLinks` (concurrent flows, every link checked against `predecessor_id`, every

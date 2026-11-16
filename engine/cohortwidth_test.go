@@ -32,7 +32,8 @@ import (
 
 // TestCohortWidth_Measure times one wide forEach's arrivals: how long the fan-in waits after the last branch's task
 // returned, which is the time the cohort takes to absorb the arrivals still queued, and the most workers the crew
-// held meanwhile. A measurement, not a pin: it runs only when DWARF_TESTING_COHORT_WIDTH names the width, and
+// held meanwhile. spawn is from the source task's return to the first branch's start: the spawn transaction,
+// mostly. A measurement, not a pin: it runs only when DWARF_TESTING_COHORT_WIDTH names the width, and
 // DWARF_TESTING_COHORT_HOLD=0 runs it with the fan-in hold off, as the control.
 func TestCohortWidth_Measure(t *testing.T) {
 	width, _ := strconv.Atoi(os.Getenv("DWARF_TESTING_COHORT_WIDTH"))
@@ -51,15 +52,16 @@ func TestCohortWidth_Measure(t *testing.T) {
 	g.AddTransitionForEach("Seed", "Branch", "items", "item")
 	g.AddTransitionChain("Branch", "Join", workflow.End)
 	mux.HandleGraph("width/g", g)
+	var seedAt, lastBranch, firstBranch atomic.Int64
 	mux.HandleTask("width/seed", func(ctx context.Context, f *workflow.Flow) error {
 		items := make([]int, width)
 		for i := range items {
 			items[i] = i
 		}
 		f.Set("items", items)
+		seedAt.Store(time.Now().UnixNano())
 		return nil
 	})
-	var lastBranch, firstBranch atomic.Int64
 	mux.HandleTask("width/branch", func(ctx context.Context, f *workflow.Flow) error {
 		now := time.Now().UnixNano()
 		firstBranch.CompareAndSwap(0, now)
@@ -121,14 +123,16 @@ func TestCohortWidth_Measure(t *testing.T) {
 	total := time.Since(start)
 	close(stopSampling)
 	<-sampled
+	spawn := time.Duration(firstBranch.Load() - seedAt.Load())
 	branches := time.Duration(lastBranch.Load() - firstBranch.Load())
 	drain := time.Duration(joinAt.Load() - lastBranch.Load())
 	driver := ""
 	if sh, err := e.db.Shard(1); err == nil {
 		driver = sh.DB().DriverName()
 	}
-	t.Logf("width=%d driver=%s hold=%v total=%v branches-ran-over=%v join-after-last-branch=%v (%.0f arrivals/s overall) crew-peak=%d (resident %d, max %d, hold at %d) heap-peak=%dMB",
-		width, driver, !holdOff, total.Round(time.Millisecond), branches.Round(time.Millisecond), drain.Round(time.Millisecond),
+	t.Logf("width=%d driver=%s hold=%v total=%v spawn=%v branches-ran-over=%v join-after-last-branch=%v"+
+		" (%.0f arrivals/s overall) crew-peak=%d (resident %d, max %d, hold at %d) heap-peak=%dMB",
+		width, driver, !holdOff, total.Round(time.Millisecond), spawn.Round(time.Millisecond), branches.Round(time.Millisecond), drain.Round(time.Millisecond),
 		float64(width)/time.Duration(joinAt.Load()-firstBranch.Load()).Seconds(),
 		crewPeak.Load(), e.crew.Min(), e.crew.Max(), e.fanInHoldAt.Load(), heapPeak.Load()>>20)
 }
