@@ -21,7 +21,6 @@ ALTER SYSTEM SET maintenance_work_mem = '1GB';
 ALTER SYSTEM SET autovacuum_work_mem = '1GB';
 ALTER SYSTEM SET max_wal_size = '20GB';
 ALTER SYSTEM SET checkpoint_timeout = '15min';
-ALTER SYSTEM SET wal_compression = 'lz4';
 ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
 ALTER SYSTEM SET track_io_timing = on;
 ALTER SYSTEM SET track_wal_io_timing = on;

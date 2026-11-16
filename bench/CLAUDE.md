@@ -94,6 +94,15 @@ small ones by its 0.8 ms latency. Four things to hold onto:
   (a 1 KB value stays inline and uncompressed, a 2 KB one is compressed). Unconfirmed - those runs' stored bytes
   were not recorded; `archiveStepsBytes` in `results[].db` now does.
 - **`W` depends on compressibility.** The incompressible default payload logs more per byte; quote which one.
+- **Which TOAST compressor is faster depends on what binds, so the rigs keep PostgreSQL's default (pglz).** On a
+  WAL-bound shard (documents of a few KB) pglz's tighter output logs less per step and wins; on a CPU-bound one
+  (documents near a megabyte) lz4's cheaper compression wins, by more. Neither is recommended to operators. An arm that
+  changes it sets it on the bench's role (`ALTER ROLE postgres SET default_toast_compression`), which every new
+  session reads: no flag patch, no restart, and a fresh database per arm keeps earlier values out.
+- **The archive's copy is part of `W`.** An arm with archiving held off (`DWARF_TESTING_ARCHIVE_GRACE`) is not the
+  shipped rate: the copy and the delete add WAL per step, a saturated shard pays it as longer flushes, and the held-off
+  arm runs faster by about the difference in flush time. Compare such arms by steps/s x flush_ms, and quote the
+  archive-on one.
 - **A flush also costs per commit, so a bigger `N` does not pay.** At 0 B on one draw, `-max-connections 500` against
   the shipped 250 raised commits per flush 62 -> 85 and flush time 1.03 -> 1.38 ms (+34%): ~61,000 commits/s either
   way, +2% steps/s, the extra backends queued on `WALWrite` (2026-11-06). The two terms above are fitted where bytes
@@ -269,12 +278,14 @@ into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, fai
   campaign used, with their pass criteria in the header.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
-- **Every rig runs the recommended database settings unless the run says otherwise (user):** `max_wal_size` 20 GB,
-  `checkpoint_timeout` 15 min, `wal_compression=lz4` - the deployment guidance on docs.dwarf.run, and the settings of
-  every published cloud number since 2026-11-06. **The orchestrators add them** (`x-rig.sh`, `xp-rig.sh`, `s2-rig.sh`,
-  `real-rig.sh`), with `autovacuum_work_mem`, to whatever `DBFLAGS` holds - so logging flags such as `auto_explain`
-  are added to them, not instead - and a flag `DBFLAGS` sets itself keeps its value: that is how a run goes off them
-  (`max_wal_size=1504` for Cloud SQL's own). Cloud SQL's defaults are 1.5 GB, 5 min and off. At saturation those checkpoint every 5-10 s, so nearly every page
+- **Every rig runs the recommended database settings unless the run says otherwise (user):** `max_wal_size` 20 GB and
+  `checkpoint_timeout` 15 min - the deployment guidance on docs.dwarf.run. **Not `wal_compression`:** the docs
+  recommend leaving it off, since it compresses only full-page images, which here hold TOAST data already compressed
+  (lz4 measured +3% at 8 KB, +1% at 1 MB), and a rig measures what operators are told to set. The published cloud
+  numbers from 2026-11-06 to 2026-11-15 ran with `wal_compression=lz4`; their sections say so. **The orchestrators add
+  them** (`x-rig.sh`, `xp-rig.sh`, `s2-rig.sh`, `real-rig.sh`), with `autovacuum_work_mem`, to whatever `DBFLAGS` holds
+  - so logging flags such as `auto_explain` are added to them, not instead - and a flag `DBFLAGS` sets itself keeps its
+  value: that is how a run goes off them (`max_wal_size=1504` for Cloud SQL's own). Cloud SQL's defaults are 1.5 GB and 5 min. At saturation those checkpoint every 5-10 s, so nearly every page
   written after a checkpoint is logged whole, and each minute's autovacuum of the live tables - which archiving
   turns over every minute - queued every backend on `WALWrite` and cut commits ~40% for 5-10 s. A run off the
   recommended settings states which it uses and why, beside its numbers.
