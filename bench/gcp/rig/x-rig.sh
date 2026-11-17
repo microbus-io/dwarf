@@ -3,6 +3,8 @@
 # c4a-standard-16 that is both the engine host (pinned binary $BIN) and the admin host (psql, monitors). Sources
 # $D/<step> (which uses one_run / the helpers below), pulls, tears down. Nothing else is created; the instance and
 # the VM are created together because every step uses both from its first minute.
+# REUSE=1 runs the step on the rig an earlier orchestrator of the same <name> left (kill -9 between arms, or in
+# its teardown grace) instead of creating one; this one tears it down at the end.
 set -u
 NAME=$1 DISK=$2 STEP=$3 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
 # DBFLAGS (optional) passes Cloud SQL database flags, e.g. slow-statement plans and lock waits:
@@ -35,36 +37,45 @@ trap 'pull; teardown; log EXIT' EXIT
 pass=$(cat $S/dbpass)
 authok
 
-log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"
-DBFLAGS=${DBFLAGS:-}
-# The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
-# unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
-# rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
-for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900; do
-  [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
-done
-log "database flags: $DBFLAGS"
-gc sql instances create "$DB" --database-version=POSTGRES_16 --tier=${TIER:-db-custom-32-131072} --edition=enterprise \
-  --zone=$ZONE --storage-type=SSD --storage-size="$DISK" --insights-config-query-insights-enabled \
-  --network="projects/$PROJECT/global/networks/dwarf-bench-net" --no-assign-ip \
-  ${DBFLAGS:+--database-flags="$DBFLAGS"} --root-password="$pass" > "$OUT/create-db.log" 2>&1 &
-gc compute instances create "$ADMIN" --zone=$ZONE --machine-type=${VMTYPE:-c4a-standard-16} --network=dwarf-bench-net \
-  --image-family=debian-12-arm64 --image-project=debian-cloud --labels=app=dwarf-bench > "$OUT/vm.log" 2>&1 ||
-  { log "VM create failed"; exit 1; }
-deployed=""
-for i in 1 2 3 4 5 6; do
-  gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
-    gc compute scp --zone=$ZONE "$S/$BIN" "$ADMIN":~/dwarf-bench.bin >/dev/null 2>&1 &&
-    vmssh "$ADMIN" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh fsync.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
-  fw; sleep 20
-done
-[ -n "$deployed" ] || { log "DEPLOY FAILED"; exit 1; }
-vmssh "$ADMIN" 'sudo apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client >/dev/null 2>&1; command -v psql' >/dev/null ||
-  { log "no psql"; exit 1; }
-wait
-# A failed create can still produce a RUNNABLE instance (bench/CLAUDE.md, INTERNAL_ERROR), so poll for it.
-for i in $(seq 1 45); do [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] && break; sleep 20; done
-[[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] || { log "$DB not RUNNABLE"; exit 1; }
+if [ -n "${REUSE:-}" ]; then
+  # The instance and the VM exist and the VM holds the binary. Whatever the orchestrator that left them had running
+  # there (a run, a monitor, an injection waiting out its delay) is stopped, so the step starts clean.
+  log "reusing $DB + $ADMIN; step $STEP"
+  [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] || { log "$DB not RUNNABLE"; exit 1; }
+  vmssh "$ADMIN" 'for p in dwarf-bench g-run.sh inject.sh rss-mon.sh slow-mon.sh s-mon.sh v-mon.sh age-mon.sh ff-set.sh; do pkill -x "$p"; done; true' ||
+    { log "$ADMIN not reachable"; exit 1; }
+else
+  log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"
+  DBFLAGS=${DBFLAGS:-}
+  # The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
+  # unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
+  # rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
+  for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900; do
+    [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
+  done
+  log "database flags: $DBFLAGS"
+  gc sql instances create "$DB" --database-version=POSTGRES_16 --tier=${TIER:-db-custom-32-131072} --edition=enterprise \
+    --zone=$ZONE --storage-type=SSD --storage-size="$DISK" --insights-config-query-insights-enabled \
+    --network="projects/$PROJECT/global/networks/dwarf-bench-net" --no-assign-ip \
+    ${DBFLAGS:+--database-flags="$DBFLAGS"} --root-password="$pass" > "$OUT/create-db.log" 2>&1 &
+  gc compute instances create "$ADMIN" --zone=$ZONE --machine-type=${VMTYPE:-c4a-standard-16} --network=dwarf-bench-net \
+    --image-family=debian-12-arm64 --image-project=debian-cloud --labels=app=dwarf-bench > "$OUT/vm.log" 2>&1 ||
+    { log "VM create failed"; exit 1; }
+  deployed=""
+  for i in 1 2 3 4 5 6; do
+    gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/s-mon.sh" "$D/v-mon.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
+      gc compute scp --zone=$ZONE "$S/$BIN" "$ADMIN":~/dwarf-bench.bin >/dev/null 2>&1 &&
+      vmssh "$ADMIN" 'ln -sf dwarf-bench.bin dwarf-bench && chmod +x g-run.sh s-mon.sh v-mon.sh fsync.sh dwarf-bench.bin && mkdir -p out' && { deployed=1; break; }
+    fw; sleep 20
+  done
+  [ -n "$deployed" ] || { log "DEPLOY FAILED"; exit 1; }
+  vmssh "$ADMIN" 'sudo apt-get update -qq >/dev/null 2>&1; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client >/dev/null 2>&1; command -v psql' >/dev/null ||
+    { log "no psql"; exit 1; }
+  wait
+  # A failed create can still produce a RUNNABLE instance (bench/CLAUDE.md, INTERNAL_ERROR), so poll for it.
+  for i in $(seq 1 45); do [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] && break; sleep 20; done
+  [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] || { log "$DB not RUNNABLE"; exit 1; }
+fi
 IPS=("$(gc sql instances describe "$DB" --format='value(ipAddresses[0].ipAddress)')")
 
 adm() { vmssh "$ADMIN" "psql '$1' -X -q -At -F' ' -c \"$2\""; }
