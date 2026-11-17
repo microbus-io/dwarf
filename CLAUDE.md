@@ -303,7 +303,8 @@ The user tags and publishes a release; the agent prepares it. Work through these
    coordination ran beside the previous release on one database. Before v1.0.0 only the sequence name is held,
    so the notes give the statements an existing database needs.
 3. **The wire format.** `workflow/testdata/carrier` is unchanged, or `CarrierVersion` was raised with it
-   (`workflow/CLAUDE.md`, "The carrier's wire format").
+   (`workflow/CLAUDE.md`, "The carrier's wire format"). Before v1.0.0 a golden file may change at the same version,
+   so the notes say that task servers and the engine roll out together.
 4. **CI on the commit to be tagged:** the five dialect jobs and govulncheck pass.
 5. **The notes,** `tmp/release/<tag>.md` and its title in `tmp/release/<tag>.title`: what the release adds and
    changes, the upgrade path from the previous release and whether it needs a maintenance window. They state what

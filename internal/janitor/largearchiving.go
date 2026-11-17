@@ -34,7 +34,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// JobLargeArchiving is the name the engine adds its large-tree archiving job under.
+// JobLargeArchiving is the kind of the engine's large-tree archiving jobs, each added under
+// ShareName(JobLargeArchiving, k).
 const JobLargeArchiving = "large_archiving"
 
 // stageGroup is how many of a tree's descendant flows share one archive time in a staged copy. It is a fixed constant,

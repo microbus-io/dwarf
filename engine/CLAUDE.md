@@ -442,11 +442,11 @@ for it. The flow's own `error` column gets that failure's text for a failed flow
 one (`flowErrorText`), whose explanation is its `cancel_reason` - as a terminated flow's is - so the lists and
 `Snapshot` agree that a cancelled flow carries no error.
 
-*`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and
-`flow.Subgraph` decodes it. That is what carries the cancellation marker across the boundary - a cancelled child
-reaches its caller as an error `IsCancelled` recognizes, so a caller that returns it resolves `cancelled` - and
-it keeps a real child error's status code and properties, which a bare message lost. The column is a JSON
-column, `{}` for no error (`subgraphErrorText` maps it to none at the claim); its writer, inside the child's
+*`subgraph_error` holds the delivered error's `TracedError` JSON, stack stripped, not its message*, and the claim
+decodes it (`subgraphErrorOf`) for `flow.Subgraph` to return. That is what carries the cancellation marker across the
+boundary - a cancelled child reaches its caller as an error `IsCancelled` recognizes, so a caller that returns it
+resolves `cancelled` - and it keeps a real child error's status code and properties, which a bare message lost. The
+column is a JSON column, `{}` for no error (`subgraphErrorOf` maps it to none); its writer, inside the child's
 terminating transaction, keeps only the message and status code when the properties would make the JSON
 unstorable (JSON `checkPayload` refuses), since a failure write that cannot
 land is read by the classifier as the database being down.

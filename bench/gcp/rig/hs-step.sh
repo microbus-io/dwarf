@@ -3,7 +3,7 @@
 # the recommended settings, one c4a-16, a fresh database per arm, 2 min warmup + 6 min window unless stated. One draw,
 # n=1: hardware differs more between instances than runs differ on one, so repeats come from later rigs.
 #   hs-warm   3 min saturated, not read: a fresh instance's first checkpoints create its WAL files (bench/CLAUDE.md).
-#   hs-a      A, the 0 B headline: saturated linear 0 B, cap 2,000, archiving on. Also _WORK.md #75's "on" arm:
+#   hs-a      A, the 0 B headline: saturated linear 0 B, cap 2,000, archiving on. Also whether archiving keeps up:
 #             out/age-hs-a.log, the oldest closed root still live, stays near the 60 s grace.
 #   hs-off    archiving held off (DWARF_TESTING_ARCHIVE_GRACE=24h): what archiving costs dispatch on this draw.
 #   hs-del    every flow DeleteOnCompletion: fast deletion keeps up (out/age-hs-del.log's sixth field, the oldest
