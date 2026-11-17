@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/microbus-io/dwarf/hosts"
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/internal/keys"
@@ -248,4 +249,54 @@ func TestCohortBatch_LeaderPanicReleasesTheBatch(t *testing.T) {
 		"the panicked arrivals' leases never lapsed")
 	c.e.recoverOrphanedFlows(ctx, c.db, c.shard)
 	c.await(t)
+}
+
+// TestCohortBatch_ALandedMemberTakesNoTurn pins the pass held after each batch outcome:
+// only a landed member that lost its flow takes a turn back.
+func TestCohortBatch_ALandedMemberTakesNoTurn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		outcome arrivalOutcome
+		lost    bool
+		retakes bool
+	}{
+		{"landed", arrivalLanded, false, false},
+		{"fenced", arrivalFenced, false, false},
+		{"landed_into_a_lost_flow", arrivalLanded, true, true},
+		{"handed_back", arrivalSolo, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert := testarossa.For(t)
+			sh := database.NewShard(1, nil)
+			sh.SetTurnLimit(1)
+			e := &Engine{leaseMargin: time.Hour, persistLeaseExtension: time.Hour} // no lease tick during the test
+			var stripe cohortStripe
+			assert.True(stripe.lock(time.Hour, nil)) // held, so the arrival joins a batch
+			b, _ := stripe.join(arrivalKey{shard: 1, spawn: 7}, &dispatch{shard: 1, cohortSpawnID: 7})
+			ctx, pass := sh.WaitTurn(context.Background())
+			d := &dispatch{shard: 1, cohortSpawnID: 7, pass: pass, leaseFrom: time.Now()}
+			got := make(chan arrivalOutcome, 1)
+			go func() {
+				outcome, _ := e.arriveInBatch(ctx, &stripe, d)
+				got <- outcome
+			}()
+			assert.True(enginetest.WaitUntil(t, 5*time.Second, func() bool { free, _ := sh.Turns(); return free == 1 }),
+				"the member kept its turn while it waited")
+			if tc.lost {
+				d.loss.status = workflow.StatusFailed
+			}
+			b.outcomes = []arrivalOutcome{arrivalLanded, tc.outcome}
+			close(b.done)
+			assert.Equal(tc.outcome, <-got)
+			free, _ := sh.Turns()
+			if tc.retakes {
+				assert.Equal(0, free, "the member did not take a turn back for the lost flow's tail")
+			} else {
+				assert.Equal(1, free, "the member took an unnecessary turn after its batch wait")
+			}
+			d.pass.Return()
+		})
+	}
 }

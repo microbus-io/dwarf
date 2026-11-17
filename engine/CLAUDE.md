@@ -1440,6 +1440,13 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
   source) that finds the stripe held joins its cohort's open batch; the first to join leads it, queuing on the stripe
   like any waiter, and seals it when served, so later arrivals open the next. The others wait on the batch, holding no
   turn, keeping their leases on the stripe's schedule.
+  - *A member takes a turn back only when it landed into a flow it lost by resolving its cohort*, whose tail can
+    re-offer a parked caller with a read. A member handed back (`arrivalSolo`) does not hold the stripe, so `advance`
+    queues it there with the turn handed back and takes one after. **Do not re-take unconditionally** (`yieldTurn`'s
+    shape): a landed or fenced member does no database work after the wait, and a handed-back one returns any turn
+    at once, so every member of every batch would queue for a turn only to return it, each ranked ahead of every
+    gate acquirer by its older claim. Pinned by `TestCohortBatch_ALandedMemberTakesNoTurn` (fails with the
+    unconditional re-take).
   - *Each member's arrival still commits with its own row*, which is what makes this sound. The transaction writes
     the spawn's `+total` first (the lone bump's order), then every member's fenced `advancing=0`, then reads the
     counters; a member whose fence matched nothing is taken back off the counter before anything reads it, and the

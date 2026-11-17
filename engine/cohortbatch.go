@@ -22,6 +22,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/errors"
 	"github.com/microbus-io/sequel"
@@ -67,14 +68,25 @@ type arrivalBatch struct {
 // Its wait holds no turn, as a stripe waiter's does; it keeps its lease alive on the same schedule
 // (extendWaitingLease) and never abandons, because the leader may be using its dispatch. A member whose lease was taken
 // back meanwhile is fenced by the batch's own write.
+//
+// A member returns holding a turn only when it landed into a flow it lost by resolving its cohort, whose tail can
+// re-offer a parked caller with a read. A member handed back (arrivalSolo) does not hold the stripe, so the caller
+// queues for it with the turn handed back and takes one after; a landed member has only metrics and the doorbell
+// left, and a fenced one nothing. The re-take is not deferred as yieldTurn's is: after a panic in the wait nothing
+// touches the database (recoverStep does nothing on one).
 func (e *Engine) arriveInBatch(ctx context.Context, stripe *cohortStripe, d *dispatch) (outcome arrivalOutcome, holdsStripe bool) {
 	b, idx := stripe.join(arrivalKey{shard: d.shard, spawn: d.cohortSpawnID}, d)
 	if b == nil {
 		return arrivalSolo, true
 	}
 	if idx > 0 {
-		yieldTurn(ctx, &d.pass, func() { e.awaitBatch(ctx, b, d) })
-		return b.outcomes[idx], false
+		d.pass.Return()
+		e.awaitBatch(ctx, b, d)
+		outcome = b.outcomes[idx]
+		if outcome == arrivalLanded && d.loss.status != "" {
+			d.pass = database.WaitTurn(ctx)
+		}
+		return outcome, false
 	}
 	e.leadBatch(ctx, stripe, b, d)
 	return b.outcomes[0], false

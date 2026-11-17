@@ -82,7 +82,8 @@ type dispatch struct {
 	cancelTask context.CancelFunc // nil when the step has no budget
 
 	// Set by processStep after the host call: the turn every outcome write runs under. yieldTurn swaps it, so it
-	// is returned through a closure that reads it at the end.
+	// is returned through a closure that reads it at the end. arriveInBatch leaves it returned for a batch member
+	// with no database work left.
 	pass database.Pass
 
 	// Set by outcome; complete rewrites them for a Cancel-covered step it reroutes to its handler.
