@@ -45,13 +45,18 @@
 #             and steps/s is lower in neither; at 0 B neither WAL per step nor steps/s is worse beyond noise; and
 #             dwarf_steps' size levels off within the window rather than growing. A mixed or small result keeps the
 #             default.
+#   hw-sf100k8, hw-sf50k8, hw-sf50k64, hw-sf100k64 (group sfbig): the same at 8 KB and 64 KB -payload-json, one pair
+#             each, alternated. Expected to show little or nothing: PostgreSQL compresses this JSON ~3.4x before
+#             moving it out of line, so 8 KB sits at the TOAST threshold and 64 KB is out of line for certain, and an
+#             update that leaves a TOASTed value alone re-logs only its pointer. One pair per size can confirm a
+#             near-zero effect or flag a surprise, not settle a small one.
 #   hw-wide-k last, the one arm a short session drops: hw-wide with the wide flows on a fairness key of their own
 #             (INJECT_ARGS='-fairness-keys 2'; the background keeps the default key) - the background's latency when
 #             a wide flow does what the docs advise.
 # Every arm: pgss-<tag>.txt, and out/slow-<tag>.log on the wide arms, the statements active over 500 ms every 250 ms.
 # HW_STOP (an epoch) moves the orchestrator's hard deadline earlier: past it the run stops where it is, pulls the
 # artifacts and tears the rig down; hw-sf100z and hw-wide-k are skipped whole when they would end past it.
-# HW_ARMS picks the groups to run (default: warm a wide ff sf wide-k); a group run on a rig the earlier groups
+# HW_ARMS picks the groups to run (default: warm a wide ff sf sfbig wide-k); a group run on a rig the earlier groups
 # already used reads hw-a's rate from out/hw-a.json there.
 HARD=${HW_STOP:-$HARD}
 gc compute scp --zone=$ZONE "$D/slow-mon.sh" "$D/rss-mon.sh" "$D/inject.sh" "$D/ff-set.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
@@ -59,7 +64,7 @@ gc compute scp --zone=$ZONE "$D/slow-mon.sh" "$D/rss-mon.sh" "$D/inject.sh" "$D/
   { log "HW DEPLOY FAILED"; exit 1; }
 SAT="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 256 -max-outstanding 2000"
 # arm <group>: whether HW_ARMS asks for the group.
-arm() { [[ " ${HW_ARMS:-warm a wide ff sf wide-k} " == *" $1 "* ]]; }
+arm() { [[ " ${HW_ARMS:-warm a wide ff sf sfbig wide-k} " == *" $1 "* ]]; }
 # fits <minutes>: whether an arm that long ends before the hard deadline, so a short session skips it whole rather
 # than cutting it off mid-window.
 fits() { (( $(date +%s) + $1 * 60 < HARD )); }
@@ -123,6 +128,12 @@ if arm sf; then
   sf 100b 100 -payload 1024 -payload-json
   sf 50z 50 -payload 0
   if fits 11; then sf 100z 100 -payload 0; else log "hw-sf100z skipped: it would end past the deadline"; fi
+fi
+if arm sfbig; then
+  sf 100k8 100 -payload 8192 -payload-json
+  sf 50k8 50 -payload 8192 -payload-json
+  sf 50k64 50 -payload 65536 -payload-json
+  sf 100k64 100 -payload 65536 -payload-json
 fi
 
 if arm wide-k; then
