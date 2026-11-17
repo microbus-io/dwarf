@@ -406,8 +406,14 @@ over dead tuples is that fragmentation persists while latency recovers.
   a lower fillfactor. A higher ratio needs the claim and completion to stop writing an indexed column - a schema
   change, not a storage setting. `dwarf_flows` is the opposite case - its rows are few and wide, so whether an update's new version
   stays on its page, HOT or not, is decided by page room, which fillfactor does control (next section). The one place
-  it shows on `dwarf_steps` is a row kept wide and inline by a sub-KB state field: fillfactor 80 then moves
-  more of the non-HOT updates onto the same page and trims WAL per step a little. Nothing above or below that band.
+  it shows on `dwarf_steps` is a row kept wide and inline by its payload (~1-2 KB): its claim and completion leave
+  their page and log the whole row, and a lower fillfactor keeps them on it. **The default stays anyway, because what
+  that buys at 1 KB it costs at large payloads.** Saturated on a 32 vCPU PostgreSQL 16 at the recommended checkpoint
+  spacing, fillfactor 50 against the default: at 1 KB inline, +5.6% steps/s and -16% WAL per step (updates leaving
+  their page 52% -> 15%) for a ~30% larger table; at 0 B, neutral; at 64 KB, -5.9% steps/s, +20% WAL and +44%
+  full-page images per step - the payload is out of line, so there is little rewriting to save, and twice the heap
+  pages are imaged again after every checkpoint. Do not lower it for the 1 KB gain without measuring large payloads
+  at the same setting.
 - **`SET STORAGE MAIN` on `state`/`changes`, to keep a value inline instead of TOASTing it:** raises WAL per
   step sharply. A row held inline at 2-8 KB leaves no room on its page, so HOT all but stops and nearly every
   claim and completion re-logs the whole wide tuple onto a new page. fillfactor 80 does not
@@ -457,15 +463,15 @@ pointer. So no `dwarf_flows` row is ever wider than ~2 KB inline, whatever the g
 costs a write nothing. The exposed range is the inline one, up to ~2 KB. `toast_tuple_target` does not
 move the threshold down: lowering it leaves a sub-2 KB row's graph inline.
 
-**`dwarf_flows` takes the default fillfactor, and whether a lower one pays is unmeasured at today's write
-rate.** Measured with the flow row rewritten on every step, `fillfactor=80` kept its writes on their page across
-the whole inline range (88-90% HOT at widths from ~1.1 KB to the ~2 KB TOAST threshold, against 73-75% at the
-default for widths on the cliff), and `fillfactor=90` did not. The row is now written two to four times per flow,
-so the cliff costs far fewer row versions and that measurement no longer decides it. A lower fillfactor costs heap
-space (pages left partly empty at insert). Before setting one, measure the table's size against `n_live_tup` at
-the default and at 80 on a realistic row width, under a workload with interrupts and Resume. Any column added to
-`dwarf_flows` moves the row's width; check on PostgreSQL that the table does not grow far past `n_live_tup`
-rather than assume it.
+**`dwarf_flows` takes the default fillfactor: a lower one keeps more writes on their page and buys nothing for
+it.** With the flow row rewritten on every step, `fillfactor=80` kept its writes on their page across the whole
+inline range (88-90% HOT at widths from ~1.1 KB to the ~2 KB TOAST threshold, against 73-75% at the default for
+widths on the cliff), and `fillfactor=90` did not. The row is now written two to four times per flow - on a linear
+workload one of those writes is an update, never HOT - and measured that way (32 vCPU PostgreSQL 16, a ~1.9 KB row,
+a fixed 906 flows/s with the archive on), 80 halved the updates leaving their page (65% -> 33%) while WAL per flow
+stayed at ~110 KB and the table grew 21%, the same live rows with more dead and free space. Do not reintroduce it
+without a workload that writes the flow row more often than that. Any column added to `dwarf_flows` moves the
+row's width; check on PostgreSQL that the table does not grow far past `n_live_tup` rather than assume it.
 
 ### The lists get no live indexes of their own, and their `ORDER BY` is not a bug
 
