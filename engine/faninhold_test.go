@@ -108,6 +108,10 @@ func TestFanInHold_AQueuedFanInStopsTheCrew(t *testing.T) {
 	mux.HandleTask("fih/branch", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	mux.HandleTask("fih/join", func(ctx context.Context, f *workflow.Flow) error { return nil })
 	e.SetHost(mux)
+	// The cohort's width is three times the bound, and the bound grows with the pool the shard derives, which SQL Server
+	// derives far larger than PostgreSQL: there the cohort ran to tens of thousands of branches and did not queue the
+	// hold's depth within the deadline. A pinned pool gives every dialect the same width.
+	assert.NoError(e.SetShard(ShardSpec{Index: 1, MaxConnections: 16}))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
 	floor, depth, capacity := e.crew.Min(), int(e.fanInHoldAt.Load()), e.cache.Capacity()
