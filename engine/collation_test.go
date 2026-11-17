@@ -22,6 +22,7 @@ import (
 
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
+	"github.com/microbus-io/dwarf/internal/migrations"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/testarossa"
 )
@@ -96,4 +97,50 @@ func TestQuery_FiltersMatchCaseExactly(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(1, n, "a tenant's Purge removed another tenant's flow")
 	assert.Equal([]string{upper}, listed(workflow.Query{Search: "collation/"}))
+}
+
+// TestCollation_PostgresIdentityColumnsAreC pins that on PostgreSQL every VARCHAR column of the live tables and of an
+// archive day is collated "C", and the free-text columns are not. Left at the database's collation, a libc locale on
+// most servers, an index on a key or URL is ordered by rules a glibc update changes, and is then out of order until
+// reindexed. The free text keeps the database's collation: Search lowercases it, which under "C" changes only ASCII.
+func TestCollation_PostgresIdentityColumnsAreC(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(context.Background())
+	e.SetHost(hosts.NewMux())
+	assert.Must(assert.NoError(e.Startup(ctx)))
+	sh, err := e.db.Shard(1)
+	assert.Must(assert.NoError(err))
+	db := sh.DB()
+	if db.DriverName() != "pgx" {
+		t.Skip("PostgreSQL only: the other dialects' binary collations are pinned by TestQuery_FiltersMatchCaseExactly")
+	}
+	today, err := e.archiveOn(1).Today(ctx)
+	assert.Must(assert.NoError(err))
+	tables := []any{"dwarf_flows", "dwarf_steps", migrations.FlowsTable(today), migrations.StepsTable(today)}
+
+	rows, err := db.QueryContext(ctx,
+		"SELECT table_name, column_name, data_type, COALESCE(collation_name, '') FROM information_schema.columns"+
+			" WHERE table_schema=current_schema() AND table_name IN (?, ?, ?, ?) AND data_type IN ('character varying', 'text')",
+		tables...)
+	assert.Must(assert.NoError(err))
+	defer rows.Close()
+	seen := map[string]int{}
+	for rows.Next() {
+		var table, column, dataType, collation string
+		assert.Must(assert.NoError(rows.Scan(&table, &column, &dataType, &collation)))
+		seen[table]++
+		if dataType == "text" {
+			assert.Equal("", collation, "%s.%s is free text and keeps the database's collation", table, column)
+		} else {
+			assert.Equal("C", collation, "%s.%s", table, column)
+		}
+	}
+	assert.NoError(rows.Err())
+	for _, table := range tables {
+		assert.True(seen[table.(string)] > 0, "no text columns read from %s", table)
+	}
 }

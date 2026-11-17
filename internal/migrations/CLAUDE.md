@@ -622,13 +622,25 @@ SQL Server payload storage and transfer, which matters on a byte-throughput-boun
 server-side `JSON_VALUE` on these columns is foreclosed (already deferred - see the `JSON_FIELD` note in
 `internal/staterefs/CLAUDE.md`).
 
-### Text columns compare in binary: `utf8mb4_bin` on MySQL and MariaDB, `Latin1_General_100_BIN2` on SQL Server
+### Text columns compare in binary: `utf8mb4_bin` on MySQL and MariaDB, `Latin1_General_100_BIN2` on SQL Server, `"C"` on PostgreSQL
 
 **Every text column of `dwarf_flows` and `dwarf_steps`, live and archive, is binary-collated**: each MySQL-family
 table is converted to `utf8mb4_bin` right after its `CREATE TABLE` (which also makes it the table's default, so a
-column added later inherits it), and each SQL Server `NVARCHAR` column carries `COLLATE Latin1_General_100_BIN2`.
-PostgreSQL and SQLite need nothing: PostgreSQL's equality is byte-wise under any deterministic collation, and
-SQLite's default is `BINARY`.
+column added later inherits it), each SQL Server `NVARCHAR` column carries `COLLATE Latin1_General_100_BIN2`, and
+each PostgreSQL `VARCHAR` column carries `COLLATE "C"`. SQLite's default is `BINARY`.
+
+**On PostgreSQL the collation sets an index's order, not equality.** Equality is byte-wise under any deterministic
+collation, so two values never merged there. But a column left at the database's collation - a C library locale such
+as `en_US.UTF-8` on most servers, the managed ones included, and on the local test servers - orders its indexes by
+that library's rules, and a glibc update can change them (2.28 reordered punctuation, the `-`, `_`, `.` and `/` that
+keys and URLs hold). An index built before such an update is out of order after it, and a scan can miss rows until a
+`REINDEX`: on `fairness_key` that is the selection index, the dispatch fetch's. `"C"` orders by bytes, never changes,
+and is the order Go and the other dialects use.
+- **The free-text and payload columns keep the database's collation**: `error`, `cancel_reason` (Search lowercases
+  both, and under `"C"` `lower()` changes only ASCII letters) and `final_state`. Nothing indexes or orders them.
+- **A new `VARCHAR` column needs `COLLATE "C"`**, in the live migration and its archive twin.
+  `TestCollation_PostgresIdentityColumnsAreC` fails without it. A `"C"` column compared with a default-collation one
+  is not an error (a non-default collation wins over the default); two different non-default ones are.
 
 **Why.** The engine treats a fairness key, a workflow URL, a task name and the rest as exact identities in Go,
 and the database must agree, because the same values are grouped and matched in SQL as well: the planner's tally
