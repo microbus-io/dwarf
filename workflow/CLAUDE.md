@@ -468,6 +468,15 @@ back where in process it backs off to a minute. Decoding saturates at the `Durat
 overflowing. Timestamps stay RFC 3339 strings. Field names are case-sensitive to any other implementation, though
 Go's decoder matches them case-insensitively; the golden files spell them exactly.
 
+**A subgraph's error is a JSON object, never a string holding one.** `subgraphError` is the child's
+`errors.TracedError` as its own `MarshalJSON` writes it: `error` (the message), `statusCode`, `trace`, and its
+properties as keys beside them - the cancellation marker that makes `IsCancelled` true for a cancelled child is one.
+A string of that JSON made a receiver in another language decode twice and copy a Go library's format to read it.
+It carries no stack: `SetSubgraphResolution` drops it, as the engine's stored copy already has (`deliveredError`), so
+no Go frame reaches the wire. The engine decodes the `subgraph_error` column into the object at the claim
+(`subgraphErrorOf`); `Subgraph` hands the task a copy, so a task that traces the error leaves the carrier's as
+delivered. Pinned by the `subgraph_returned` golden files.
+
 **Every duration dwarf writes as JSON is an integer number of milliseconds**, its key ending `Millis` wherever
 dwarf names the key: the carrier's three, `FlowOptions`' `timeBudgetMillis` and `ShardSummary`'s `latencyMillis`
 (each Go field tagged `json:"-"` and written by the type's own `MarshalJSON`), and `SetDuration` in state, where the

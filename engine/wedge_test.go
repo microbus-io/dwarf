@@ -357,7 +357,7 @@ func TestWedgeSweep_ChildLiveAgainIsLeftAlone(t *testing.T) {
 		assert.Equal(workflow.StatusRunning, status)
 		assert.Equal(parkedSubgraph, parked)
 		assert.Equal(0, subgraphDone)
-		assert.Equal("", subgraphErrorText(subgraphErr))
+		assert.NoError(subgraphErrorOf(subgraphErr), "no error delivered")
 	}
 
 	// And the flow finishes normally once its child does.

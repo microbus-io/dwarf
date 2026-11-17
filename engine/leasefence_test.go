@@ -838,7 +838,7 @@ func TestFailStep_HeldStates(t *testing.T) {
 				var parked int
 				assert.NoError(db.QueryRowContext(ctx, "SELECT parked, subgraph_error FROM dwarf_steps WHERE step_id=1").Scan(&parked, &parentErr))
 				assert.Equal(parkedSubgraph, parked, "no failure is delivered to the parent of a completed child")
-				assert.Equal("", subgraphErrorText(parentErr))
+				assert.NoError(subgraphErrorOf(parentErr), "no error delivered")
 			default:
 				assert.Equal(workflow.StatusFailed, stepStatus)
 				assert.Equal(workflow.StatusFailed, gotFlowStatus)

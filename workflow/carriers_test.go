@@ -138,7 +138,7 @@ func TestCarrierGolden(t *testing.T) {
 			return f.Set("answer", out["answer"])
 		}},
 		{"subgraph_returned", func(f *RawFlow) error {
-			f.SetSubgraphResolution(mustState(t, map[string]any{"score": 9}), `{"error":"child failed","statusCode":503}`)
+			f.SetSubgraphResolution(mustState(t, map[string]any{"score": 9}), errors.New("child failed", http.StatusServiceUnavailable, "quota", "daily"))
 			_, err := f.Subgraph("child.workflow", nil, nil)
 			return f.Set("childError", errors.StatusCode(err))
 		}},

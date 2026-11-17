@@ -608,7 +608,7 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 		if derr != nil {
 			sideErr = errors.New("unreadable subgraph result: %v", derr)
 		}
-		flow.SetSubgraphResolution(subgraphResult, subgraphErrorText(d.row.subgraphErrorJSON))
+		flow.SetSubgraphResolution(subgraphResult, subgraphErrorOf(d.row.subgraphErrorJSON))
 	}
 	var derr error
 	d.baggage, derr = workflow.NewState(d.row.baggageJSON)

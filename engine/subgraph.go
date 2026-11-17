@@ -517,14 +517,20 @@ func (e *Engine) encodeSubgraphError(err error) ([]byte, error) {
 	return encoded, nil
 }
 
-// subgraphErrorText is what a subgraph_error column delivers to flow.Subgraph: the child's error as TracedError
-// JSON, or "" for none, which the column holds as {}.
-func subgraphErrorText(col []byte) string {
+// subgraphErrorOf is what a subgraph_error column delivers to flow.Subgraph: the child's error decoded from its
+// TracedError JSON, so its status code and properties - a cancellation marker among them - survive the hop, or
+// nil for none, which the column holds as {}. A value that is not such JSON is taken as a bare message, passed as
+// an argument rather than as the pattern, which would read any % in it as a format verb.
+func subgraphErrorOf(col []byte) error {
 	s := strings.TrimSpace(string(col))
-	if s == "{}" {
-		return ""
+	if s == "" || s == "{}" {
+		return nil
 	}
-	return s
+	var te errors.TracedError
+	if json.Unmarshal([]byte(s), &te) == nil && te.Err != nil && te.Error() != "" {
+		return &te
+	}
+	return errors.New("%s", s)
 }
 
 // allSubgraphFlows finds all active (non-terminal) descendant subgraph flows of flowID. It fetches the

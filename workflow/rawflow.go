@@ -19,6 +19,8 @@ package workflow
 import (
 	"math"
 	"time"
+
+	"github.com/microbus-io/errors"
 )
 
 // RawFlow is the side of a Flow the engine drives: it sets what a task reads and reads back what a task
@@ -113,12 +115,21 @@ func (f *RawFlow) SetInterruptResolution(resumeData State) {
 }
 
 // SetSubgraphResolution records that a subgraph park has resolved, with the child's final state (result)
-// and error, so flow.Subgraph returns them (with yield=false) on re-entry instead of re-arming. The
-// orchestrator calls this only once the child flow has actually completed.
-func (f *RawFlow) SetSubgraphResolution(result State, errStr string) {
+// and error (nil for none), so flow.Subgraph returns them (with yield=false) on re-entry instead of re-arming.
+// The orchestrator calls this only once the child flow has actually completed. The error is kept as an
+// *errors.TracedError without its stack: its message, status code, trace ID and properties reach the task.
+func (f *RawFlow) SetSubgraphResolution(result State, err error) {
 	f.subgraphDone = true
 	f.subgraphResult = result
-	f.subgraphError = errStr
+	f.subgraphError = nil
+	if err != nil {
+		delivered := errors.TracedError{Err: err}
+		if traced, ok := err.(*errors.TracedError); ok {
+			delivered = *traced
+		}
+		delivered.Stack = nil
+		f.subgraphError = &delivered
+	}
 }
 
 // --- Control signal inspection (what the task asked of the orchestrator) ---

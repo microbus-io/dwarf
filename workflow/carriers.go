@@ -75,32 +75,32 @@ func ResultCarrier(f *Flow) Carrier {
 // integer at its word. A sleep is truncated, as the engine truncates it; a backoff delay is rounded up, so a
 // positive one never arrives as 0.
 type flowJSON struct {
-	V                         *int               `json:"v,omitempty"`
-	FlowKey                   string             `json:"flowKey,omitzero"`
-	StepKey                   string             `json:"stepKey,omitzero"`
-	State                     State              `json:"state,omitzero"`
-	Reducers                  map[string]Reducer `json:"reducers,omitzero"`
-	Changes                   Changes            `json:"changes,omitzero"`
-	Goto                      string             `json:"goto,omitzero"`
-	Retry                     bool               `json:"retry,omitzero"`
-	SleepMillis               int64              `json:"sleepMillis,omitzero"`
-	Interrupt                 bool               `json:"interrupt,omitzero"`
-	InterruptPayload          State              `json:"interruptPayload,omitzero"`
-	SubgraphURL               string             `json:"subgraphURL,omitzero"`
-	SubgraphInput             State              `json:"subgraphInput,omitzero"`
-	InterruptDone             bool               `json:"interruptDone,omitzero"`
-	ResumeData                State              `json:"resumeData,omitzero"`
-	SubgraphDone              bool               `json:"subgraphDone,omitzero"`
-	SubgraphResult            State              `json:"subgraphResult,omitzero"`
-	SubgraphError             string             `json:"subgraphError,omitzero"`
-	Attempt                   int                `json:"attempt,omitzero"`
-	BackoffInitialDelayMillis int64              `json:"backoffInitialDelayMillis,omitzero"`
-	BackoffDelayMultiplier    float64            `json:"backoffDelayMultiplier,omitzero"`
-	BackoffMaxDelayMillis     int64              `json:"backoffMaxDelayMillis,omitzero"`
-	CreatedAt                 time.Time          `json:"createdAt,omitzero"`
-	UpdatedAt                 time.Time          `json:"updatedAt,omitzero"`
-	StepCreatedAt             time.Time          `json:"stepCreatedAt,omitzero"`
-	InBranch                  bool               `json:"inBranch,omitzero"`
+	V                         *int                `json:"v,omitempty"`
+	FlowKey                   string              `json:"flowKey,omitzero"`
+	StepKey                   string              `json:"stepKey,omitzero"`
+	State                     State               `json:"state,omitzero"`
+	Reducers                  map[string]Reducer  `json:"reducers,omitzero"`
+	Changes                   Changes             `json:"changes,omitzero"`
+	Goto                      string              `json:"goto,omitzero"`
+	Retry                     bool                `json:"retry,omitzero"`
+	SleepMillis               int64               `json:"sleepMillis,omitzero"`
+	Interrupt                 bool                `json:"interrupt,omitzero"`
+	InterruptPayload          State               `json:"interruptPayload,omitzero"`
+	SubgraphURL               string              `json:"subgraphURL,omitzero"`
+	SubgraphInput             State               `json:"subgraphInput,omitzero"`
+	InterruptDone             bool                `json:"interruptDone,omitzero"`
+	ResumeData                State               `json:"resumeData,omitzero"`
+	SubgraphDone              bool                `json:"subgraphDone,omitzero"`
+	SubgraphResult            State               `json:"subgraphResult,omitzero"`
+	SubgraphError             *errors.TracedError `json:"subgraphError,omitzero"`
+	Attempt                   int                 `json:"attempt,omitzero"`
+	BackoffInitialDelayMillis int64               `json:"backoffInitialDelayMillis,omitzero"`
+	BackoffDelayMultiplier    float64             `json:"backoffDelayMultiplier,omitzero"`
+	BackoffMaxDelayMillis     int64               `json:"backoffMaxDelayMillis,omitzero"`
+	CreatedAt                 time.Time           `json:"createdAt,omitzero"`
+	UpdatedAt                 time.Time           `json:"updatedAt,omitzero"`
+	StepCreatedAt             time.Time           `json:"stepCreatedAt,omitzero"`
+	InBranch                  bool                `json:"inBranch,omitzero"`
 }
 
 // MarshalJSON encodes every field of the Flow, both directions, in the version it was decoded with (or

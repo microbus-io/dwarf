@@ -25,7 +25,11 @@
   "subgraphResult": {
     "score": 9
   },
-  "subgraphError": "{\"error\":\"child failed\",\"statusCode\":503}",
+  "subgraphError": {
+    "error": "child failed",
+    "quota": "daily",
+    "statusCode": 503
+  },
   "attempt": 1,
   "createdAt": "2026-11-07T12:00:00Z",
   "updatedAt": "2026-11-07T12:00:01Z",

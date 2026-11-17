@@ -17,7 +17,6 @@ limitations under the License.
 package workflow
 
 import (
-	"encoding/json"
 	"math"
 	"net/http"
 	"slices"
@@ -91,7 +90,7 @@ type Flow struct {
 	resumeData     State
 	subgraphDone   bool
 	subgraphResult State
-	subgraphError  string
+	subgraphError  *errors.TracedError
 
 	// Backoff retry
 	attempt                int
@@ -512,8 +511,10 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 				return false, errors.Trace(err)
 			}
 		}
-		if f.subgraphError != "" {
-			return false, decodeSubgraphError(f.subgraphError)
+		if f.subgraphError != nil {
+			// A copy, so a task that traces or annotates the error leaves the carrier's as delivered.
+			delivered := *f.subgraphError
+			return false, &delivered
 		}
 		return false, nil
 	}
@@ -546,18 +547,6 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 	f.subgraphURL = workflowURL
 	f.subgraphInput = inputState
 	return true, nil
-}
-
-// decodeSubgraphError rebuilds the error a child flow delivered. The engine stores it as the error's
-// TracedError JSON, so its status code and properties - a cancellation marker among them - survive the hop.
-// A value that is not such JSON is taken as a bare message, and passed as an argument rather than as the
-// pattern, which would read any % in it as a format verb.
-func decodeSubgraphError(s string) error {
-	var te errors.TracedError
-	if json.Unmarshal([]byte(s), &te) == nil && te.Err != nil && te.Error() != "" {
-		return &te
-	}
-	return errors.New("%s", s)
 }
 
 /*
