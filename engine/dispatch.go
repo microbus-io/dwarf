@@ -44,8 +44,9 @@ import (
 
 // dispatch is one run of processStep over one step: claim, load, execute, record the outcome, transition. It is
 // data only. Each stage is an Engine method taking it, and the fields are grouped by the stage that sets them: a
-// later stage reads a group and does not rewrite it, except where a field says otherwise. It lives for one call
-// and is never reused: the step's next claim takes a new lease generation.
+// later stage reads a group and does not rewrite it, except where a field says otherwise and where the payload is
+// let go (dropInput, dropPayload). It lives for one call and is never reused: the step's next claim takes a new lease
+// generation.
 type dispatch struct {
 	// Set by processStep, before the claim. db is set by claim.
 	shard           int
@@ -69,7 +70,7 @@ type dispatch struct {
 	fanIn         *faninmap.Map
 	state         workflow.State // the resolved input, kept pristine: the successors are folded from it
 	inheritedRefs staterefs.Refs
-	refBytes      int // the bytes the dispatch's ref resolve put into the carrier
+	heldBytes     int // the input bytes the host call holds: the claimed state and changes, and the refs resolved
 	priorChanges  workflow.Changes
 	reducers      map[string]workflow.Reducer
 	flow          *workflow.RawFlow
@@ -124,6 +125,23 @@ type dispatch struct {
 	loss           flowLoss       // a cohort resolving as a loss fails the flow in the transaction
 	txBytes        stateByteCount // emitted only after commit (see stateByteCount)
 	flowRowLocked  bool
+}
+
+// dropInput lets go of the step's input - its decoded state and prior changes, the carrier, the baggage - and of the
+// changes the completion wrote, once the transition has minted the successors' states from them. Nothing past the
+// mint reads them, and a worker can wait long after it: queued at its cohort's fan-in, or backing off a write.
+func dropInput(d *dispatch) {
+	d.state, d.priorChanges, d.baggage = workflow.State{}, workflow.Changes{}, workflow.State{}
+	d.flow, d.result = nil, nil
+	d.changesJSON, d.row.baggageJSON = nil, nil
+}
+
+// dropPayload lets go of all of the step's payload the dispatch holds, the output and the successors' minted states
+// included, for a worker whose remaining writes carry none of it: a pure fan-in arrival, and a failing step.
+func dropPayload(d *dispatch) {
+	dropInput(d)
+	d.changes, d.successorBase, d.inheritedRefs = workflow.Changes{}, workflow.State{}, nil
+	d.linearStateJSON, d.linearRefsJSON, d.folds, d.inlineFolded = nil, nil, nil, nil
 }
 
 // processStep acquires a step, executes its task, and enqueues the next step if applicable.
@@ -530,10 +548,11 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 	if err == nil {
 		d.inheritedRefs, err = staterefs.Parse(d.row.stateRefsJSON)
 	}
+	refBytes := 0
 	if err == nil {
 		// No turn here: the resolve takes one only around an anchor read, so a step with no refs, a cache hit
 		// and a wait on another dispatch's read touch no connection and queue for nothing.
-		d.refBytes, err = e.resolveDispatchRefs(ctx, d.db, d.shard, d.row.flowToken, d.state, d.inheritedRefs, d.row.workflowURL)
+		refBytes, err = e.resolveDispatchRefs(ctx, d.db, d.shard, d.row.flowToken, d.state, d.inheritedRefs, d.row.workflowURL)
 	}
 	// Unreadable prior changes fail the step too: running the task without its earlier runs' writes would
 	// lose them silently.
@@ -607,6 +626,16 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 		flow.Goto(d.row.replayGoto)
 		flow.Sleep(time.Duration(max(d.row.replaySleepLeftMs, 0)) * time.Millisecond)
 	}
+	// The resolved refs count by what the resolve put into the carrier, not by the read bytes reported to
+	// dwarf_state_read_bytes: those are whole anchor ROWS and are zero on a resolve-cache hit, which is the common
+	// case across a fan-out's branches - so a large carried document would read as nothing on all but the first
+	// branch, in the one measurement the in-flight gauge exists to make.
+	d.heldBytes = len(d.row.stateJSON) + len(d.row.priorChangesJSON) + refBytes
+	// The decode copied every field out of the claimed columns, so their bytes are a second copy of the input that
+	// nothing reads past here, and the host call would hold them for as long as the task runs. The baggage column
+	// stays until the transition: a subgraph spawn hands it to the child as stored.
+	d.row.stateJSON, d.row.priorChangesJSON, d.row.stateRefsJSON = nil, nil, nil
+	d.row.resumeDataJSON, d.row.subgraphResultJSON, d.row.subgraphErrorJSON = nil, nil, nil
 	return false, nil
 }
 
@@ -659,12 +688,7 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 	// rather than a throughput one. Bracketed rather than deferred for the same reason returnGateTurn is
 	// not deferred; the release is safe unbracketed because CatchPanic converts a host panic into a return
 	// rather than unwinding past it, and a runtime throw takes the process with it either way.
-	//
-	// refBytes, not the read bytes reported to dwarf_state_read_bytes: those are whole anchor ROWS and are
-	// zero on a resolve-cache hit, which is the common case across a fan-out's branches - so a large
-	// carried document would read as nothing on all but the first branch, in the one measurement it exists
-	// to make.
-	heldBytes := int64(len(d.row.stateJSON) + len(d.row.priorChangesJSON) + d.refBytes)
+	heldBytes := int64(d.heldBytes)
 	e.inFlightStateBytes.Add(heldBytes)
 	e.inFlightStateSteps.Add(1)
 	hostCallStart := time.Now()
@@ -1448,6 +1472,7 @@ func (e *Engine) transition(ctx context.Context, d *dispatch) error {
 	if err != nil {
 		return errors.Trace(e.failAndReturn(ctx, d, err))
 	}
+	dropInput(d)
 	return e.advance(ctx, d)
 }
 
@@ -1474,6 +1499,12 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 	// unlock is only the panic backstop; the normal release is the explicit one before the switch.
 	var cohortMu *cohortStripe
 	if d.fanInArrivals > 0 && d.cohortSpawnID != 0 {
+		pureArrival := len(d.normalNexts) == 0 && !d.isPushTransition
+		if pureArrival {
+			// It inserts nothing, and the fan-in is folded from the members' rows, so none of its payload is read
+			// again - and the wait below lasts as long as the arrivals ahead of it take to land.
+			dropPayload(d)
+		}
 		stripe := &e.cohortLocks[cohortLockStripe(d.shard, d.cohortSpawnID)]
 		if e.enterFanIn(stripe, d.shard, d.cohortSpawnID, d) {
 			defer e.leaveFanIn(stripe, d.shard, d.cohortSpawnID, d)
@@ -1481,7 +1512,7 @@ func (e *Engine) advance(ctx context.Context, d *dispatch) error {
 		// A PURE arrival that finds the stripe held joins the batch of arrivals queued for its cohort, which one
 		// transaction lands together (arriveInBatch). It runs its own transaction below only when the batch hands it
 		// back, or when the stripe was free - and then it already holds it.
-		if len(d.normalNexts) == 0 && !d.isPushTransition {
+		if pureArrival {
 			outcome, holds := e.arriveInBatch(ctx, stripe, d)
 			switch outcome {
 			case arrivalLanded:

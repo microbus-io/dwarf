@@ -945,7 +945,7 @@ the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection t
 `*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a closed flow, a deferral, a failed step).
 
 - **`dispatch` is data only: no methods.** Its fields are grouped by the stage that sets them; a later stage reads a
-  group and does not rewrite it, except where a field's comment says so. The claimed columns are the named field
+  group and does not rewrite it, except where a field's comment says so and where the payload is let go (below). The claimed columns are the named field
   `row claimRow`, held by value, not embedded (embedding would promote `destinations()` onto it). The dispatch is
   the step's one per-dispatch allocation, so a value a stage needs later lives in it rather than escaping on its own.
 - **Every defer that must outlive a stage is registered in `processStep`**, in this order: the entry-phase
@@ -957,6 +957,18 @@ the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection t
 - **`processStep` owns `ctx`.** It moves the claim stamp after the host call (`database.Away`) and publishes the held
   turn (`withHeldTurn`), and the recovery reads the ctx it holds at the end. A stage that moves its own `ctx`
   (`parkSubgraph`'s `yieldTurnAway`) moves only its copy.
+- **A dispatch lets go of the step's payload once nothing reads it** (`dropInput`, `dropPayload`), because what a
+  worker holds while it waits, every worker waiting with it holds too - at a queued fan-in, as many as the hold's
+  depth. Three points:
+  - `load` drops the claimed columns once decoded. The decode copies every field, so they are a second copy of the
+    input, held across the host call. The in-flight gauge's count is taken first (`heldBytes`).
+  - The transition drops the input, the carrier and the stored changes once it has minted the successors' states.
+  - A pure fan-in arrival and a failing step, whose remaining writes carry none of the payload, drop the output and
+    the minted states too, before they wait at the fan-in. A worker queued there then holds its stack alone.
+
+  **A dropped field reads as empty, not as a crash:** a new read of a payload field past one of those points moves
+  the drop with it, or it reads nothing, silently. Pinned for a queued arrival by
+  `TestDropPayload_AQueuedArrivalHoldsNoPayload`.
 - The persist/fail family (`failStep`, `failAndReturn`, `failOnPersistError`, `settlePersist`, `persistStep`,
   `persistYielding`, `persistStepYielding`) and `deferNewerPayload`, `handleInterrupt` and `fireFanInDirect` take
   `*dispatch` too: every caller is a dispatch. The primitives under them (`persist`, `extendLease`, `releaseLease`)

@@ -76,6 +76,9 @@ const (
 // re-granted to a peer, or the step is no longer in the held state - its fenced step UPDATE matched zero rows, so it
 // wrote nothing and the caller must abandon quietly rather than fail a flow the peer is healthily re-executing.
 func (e *Engine) failStep(ctx context.Context, d *dispatch, taskErr error, held stepHeld) (fenced bool, err error) {
+	// A failure writes the step's status and error and none of its payload, and a failing branch may wait at its
+	// cohort's fan-in below for as long as the arrivals ahead of it take to land.
+	dropPayload(d)
 	shardNum, stepID, leaseSeq, taskName := d.shard, d.stepID, d.row.leaseSeq, d.row.taskName
 	flowID, flowHour, flowToken := d.row.flowID, d.row.createdHour, d.row.flowToken
 	if e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultFailStepErr, taskName)) {
