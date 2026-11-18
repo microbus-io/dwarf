@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/workflow"
 	"github.com/microbus-io/errors"
@@ -125,7 +126,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
 				ph, ids := inList(chunk)
 				tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET changes=CASE WHEN step_id=? THEN ? ELSE changes END, changes_bytes=CASE WHEN step_id=? THEN ? ELSE changes_bytes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+					database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"),
+						"changes=CASE WHEN step_id=? THEN ? ELSE changes END, changes_bytes=CASE WHEN step_id=? THEN ? ELSE changes_bytes END, interrupt_done=CASE WHEN step_id=? THEN 1 ELSE interrupt_done END, status=?, parked=?, lease_expires=NOW_UTC(), updated_at=NOW_UTC()",
+						"step_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"),
 					append([]any{stepID, changesJSON, stepID, len(changesJSON), stepID, workflow.StatusInterrupted, parkedNone}, ids...)...,
 				)
 			}
@@ -208,7 +211,8 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			for chunk := range slices.Chunk(allStepIDs, inListChunk) {
 				ph, ids := inList(chunk)
 				tx.ExecContext(ctx,
-					"UPDATE dwarf_steps SET interrupt_payload=?, interrupt_payload_bytes=? WHERE step_id IN ("+ph+") AND "+emptyGuard,
+					database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"),
+						"interrupt_payload=?, interrupt_payload_bytes=?", "step_id IN ("+ph+") AND "+emptyGuard),
 					append([]any{payloadJSON, len(payloadJSON)}, ids...)...,
 				)
 			}
@@ -237,8 +241,9 @@ func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayl
 			args = append(args, workflow.StatusInterrupted)
 			args = append(args, ids...)
 			tx.ExecContext(ctx,
-				"UPDATE dwarf_flows SET stopped_step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE stopped_step_id END ELSE stopped_step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch"+
-					" WHERE flow_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')",
+				database.UpdateSQL(tx.DriverName(), "dwarf_flows", database.SeekPrimaryKey("flow_id"),
+					"stopped_step_id=CASE WHEN status='"+workflow.StatusRunning+"' THEN CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE stopped_step_id END ELSE stopped_step_id END, status=?, updated_at=NOW_UTC(), touch=1-touch",
+					"flow_id IN ("+ph+") AND status IN ('"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"),
 				args...,
 			)
 		}

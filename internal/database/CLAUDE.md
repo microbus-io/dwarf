@@ -94,7 +94,8 @@ which then has no tables. A switch whose `default` arm is the MySQL form needs n
 `mariadb://` testing DSN: a MySQL-format DSN to the same server exercises only `mysql`.
 
 **SQL Server.** Enable `READ_COMMITTED_SNAPSHOT ON` per shard database for Postgres-like non-blocking reads and
-near-zero deadlock risk. No other tuning mandatory.
+near-zero deadlock risk. No other tuning mandatory. It does not cover a write's read of its own table, which the
+engine makes seek instead (below).
 
 **SQLite - one replica at a modest flow rate.** Single-writer means deadlocks are structurally impossible (writes
 serialize) but throughput tops out at one transaction at a time. Supported in production for one replica on a file
@@ -164,6 +165,34 @@ the millisecond the columns hold (`internal/migrations/CLAUDE.md`, "Timestamps c
 UTC, cast to the dialect's column type, and clamped to the year 9999. The engine's lists and the janitor's scans both
 use it; a second copy would split the rounding that keeps an inclusive and an exclusive bound exact. Pinned by
 `sqltime_test.go`, on every dialect and in a PostgreSQL session whose zone is not UTC.
+
+## On SQL Server a write by ids reaches its rows by a seek (`sqlseek.go`)
+
+Every `UPDATE` or `DELETE` whose `WHERE` clause is not one primary-key equality is built with `UpdateSQL` or
+`DeleteSQL`, naming the index it seeks (`SeekPrimaryKey`, `SeekIndex`). This covers the live tables, a day's
+archive tables and the directory, in the engine, the janitor and the archiver alike. A single primary-key
+equality needs nothing: SQL Server always seeks it.
+
+- **Why.** On a small table SQL Server plans a clustered-index scan for `flow_id IN (...)`, `step_id IN (?, ?)` or
+  `flow_id=?` on `dwarf_steps`. A scanning `UPDATE` or `DELETE` takes an update lock on every row it passes, rows it
+  does not change included, and waits on each one another transaction holds. `READ_COMMITTED_SNAPSHOT` does not help:
+  it versions reads, never a modification's read of its own table. So a write waits on unrelated flows' in-flight
+  rows, and two transactions that each hold rows and scan past the other's deadlock. A transaction that dies in its
+  first statement loses every retry too, since SQL Server kills the one cheapest to roll back. Without the seeks the
+  janitor's moves failed `TestDispatcherDrop_TheJanitorsKeepEveryFlow`'s shutdown arm on these deadlocks.
+- **The target is aliased in a `FROM` clause, by its own name**, because SQL Server refuses `FORCESEEK` on an
+  `UPDATE` or `DELETE` target named directly (error 10724). Any other alias breaks a fragment that names the table:
+  Cancel's mark guard correlates on `dwarf_steps.flow_id`, and under `t` it failed with error 4104.
+- **Name the index; a bare `FORCESEEK` may seek another one whose range covers other rows.** The janitor's due
+  conditions match the status index, whose range spans every closed root, and `day<?` matches the directory's day
+  index. A day's archive tables name their indexes for the table (`idx_<table>_root`, `idx_<table>_flow_id`), so
+  `SeekIndex` composes the name from the table.
+- **A wrong seek fails loudly, not slowly.** A `WHERE` clause that does not restrict the named index's leading column
+  fails every execution with error 8622, so the SQL Server suite catches it at once.
+
+Pinned by `TestSeek_AWriteReachesOnlyItsOwnFlowsRows` (engine: the cohort bump, Terminate's step pass and the
+flow-row lock by a list, with another flow's rows held) and `TestMove_PassesARootHeldOutsideTheBatch` (janitor).
+Each fails on SQL Server without the seeks.
 
 ## Sharding mechanics
 

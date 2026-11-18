@@ -192,7 +192,8 @@ func (e *Engine) recoverExpiredLeases(ctx context.Context, db *sequel.DB, shard 
 		stepIDs = stepIDs[len(batch):]
 		ph, args := database.IDList(batch)
 		res, err := db.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, not_before=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND "+expired,
+			database.UpdateSQL(db.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), "status=?, not_before=NOW_UTC(), updated_at=NOW_UTC()",
+				"step_id IN ("+ph+") AND "+expired),
 			append([]any{workflow.StatusPending}, args...)...,
 		)
 		if err != nil {
@@ -573,8 +574,9 @@ func (e *Engine) sweepOpenFlows(ctx context.Context, db *sequel.DB, shard int, a
 				).Scan(&held))
 			}
 			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
-					" WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()",
+				database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekIndex("dwarf_steps", "flow_id", "flow_id"),
+					"status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()",
+					"flow_id=? AND status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()"),
 				workflow.StatusPending, o.flowID,
 			)
 			if err != nil {

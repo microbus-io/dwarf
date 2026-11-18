@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"maps"
 
+	"github.com/microbus-io/dwarf/internal/database"
 	"github.com/microbus-io/dwarf/internal/diagnostics"
 	"github.com/microbus-io/dwarf/internal/keys"
 	"github.com/microbus-io/dwarf/internal/staterefs"
@@ -40,25 +41,27 @@ import (
 // order is the one every other writer takes. A fan-out source arriving at its own fan-in is its own spawn
 // (spawnID == stepID): the one row takes both writes, and the source's own fenced write has already run.
 func bumpCohortArrivals(ctx context.Context, tx *sequel.Tx, spawnID, n, stepID, leaseSeq int) (arrivals, size, failures, cancellations, spawnLineageID int, err error) {
-	const set = "SET cohort_arrivals = cohort_arrivals + CASE WHEN step_id=? THEN ? ELSE 0 END, advancing = CASE WHEN step_id=? THEN 0 ELSE advancing END"
-	const where = " WHERE step_id IN (?, ?) AND (step_id=? OR (lease_seq=? AND advancing=1))"
+	const set = "cohort_arrivals = cohort_arrivals + CASE WHEN step_id=? THEN ? ELSE 0 END, advancing = CASE WHEN step_id=? THEN 0 ELSE advancing END"
+	const where = "step_id IN (?, ?) AND (step_id=? OR (lease_seq=? AND advancing=1))"
 	const cols = "step_id, cohort_arrivals, cohort_size, cohort_failures, cohort_cancellations, lineage_id"
 	args := []any{spawnID, n, stepID, spawnID, stepID, spawnID, leaseSeq}
+	driver := tx.DriverName()
+	seek := database.SeekPrimaryKey("step_id")
 	var rows *sequel.Rows
-	switch tx.DriverName() {
+	switch driver {
 	case "pgx", "sqlite":
-		rows, err = tx.QueryContext(ctx, "UPDATE dwarf_steps "+set+where+" RETURNING "+cols, args...)
+		rows, err = tx.QueryContext(ctx, database.UpdateSQL(driver, "dwarf_steps", seek, set, where)+" RETURNING "+cols, args...)
 	case "mssql":
-		rows, err = tx.QueryContext(ctx, "UPDATE dwarf_steps "+set+
-			" OUTPUT INSERTED.step_id, INSERTED.cohort_arrivals, INSERTED.cohort_size, INSERTED.cohort_failures, INSERTED.cohort_cancellations, INSERTED.lineage_id"+
-			where, args...)
+		rows, err = tx.QueryContext(ctx, database.UpdateSQL(driver, "dwarf_steps", seek,
+			set+" OUTPUT INSERTED.step_id, INSERTED.cohort_arrivals, INSERTED.cohort_size, INSERTED.cohort_failures, INSERTED.cohort_cancellations, INSERTED.lineage_id",
+			where), args...)
 	default:
 		// MySQL lacks RETURNING, so the bump and the read are two statements, serial on the transaction's one
 		// connection. The fence is RowsAffected, which is honest here although MySQL counts CHANGED rows: every
 		// row this statement matches changes - the spawn's arrivals rise by n (always at least one) and the arriving
 		// step's flag goes 1 -> 0, the fence requiring it set. The read then needs only the spawn row, which this
 		// transaction just wrote, so it sees the bump whatever snapshot the transaction holds.
-		res, xerr := tx.ExecContext(ctx, "UPDATE dwarf_steps "+set+where, args...)
+		res, xerr := tx.ExecContext(ctx, database.UpdateSQL(driver, "dwarf_steps", seek, set, where), args...)
 		if xerr != nil {
 			return 0, 0, 0, 0, 0, errors.Trace(xerr)
 		}

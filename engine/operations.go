@@ -960,10 +960,9 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 				}
 				args = append(args, ids...)
 				tx.ExecContext(ctx,
-					"UPDATE dwarf_flows SET cancel_reason=?,"+
-						" cancel_watermark=CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE cancel_watermark END,"+
-						" touch=1-touch WHERE flow_id IN ("+ph+") AND status NOT IN ("+database.TerminalStatusesSQL+")"+
-						" AND cancel_watermark=0",
+					database.UpdateSQL(tx.DriverName(), "dwarf_flows", database.SeekPrimaryKey("flow_id"),
+						"cancel_reason=?, cancel_watermark=CASE flow_id"+strings.Repeat(" WHEN ? THEN ?", len(chunk))+" ELSE cancel_watermark END, touch=1-touch",
+						"flow_id IN ("+ph+") AND status NOT IN ("+database.TerminalStatusesSQL+") AND cancel_watermark=0"),
 					args...,
 				)
 			}
@@ -1318,11 +1317,13 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// handleInterrupt's do (see there).
 		for chunk := range slices.Chunk(lockOrder(append([]any{leafStepID}, parkStepIDs...)), inListChunk) {
 			ph, ids := inList(chunk)
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET interrupt_payload=?, interrupt_payload_bytes=? WHERE step_id IN ("+ph+")", append([]any{emptyJSON, len(emptyJSON)}, ids...)...)
+			tx.ExecContext(ctx, database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), "interrupt_payload=?, interrupt_payload_bytes=?", "step_id IN ("+ph+")"),
+				append([]any{emptyJSON, len(emptyJSON)}, ids...)...)
 		}
 		for chunk := range slices.Chunk(lockOrder(parkStepIDs), inListChunk) {
 			ph, ids := inList(chunk)
-			tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, parked=?, updated_at=NOW_UTC() WHERE step_id IN ("+ph+") AND status='"+workflow.StatusInterrupted+"'",
+			tx.ExecContext(ctx, database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), "status=?, parked=?, updated_at=NOW_UTC()",
+				"step_id IN ("+ph+") AND status='"+workflow.StatusInterrupted+"'"),
 				append([]any{workflow.StatusRunning, parkedSubgraph}, ids...)...)
 		}
 

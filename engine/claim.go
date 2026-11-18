@@ -92,7 +92,8 @@ func (r *claimRow) destinations() (step, flow []any) {
 //
 // SQLite and SQL Server flip the non-indexed touch column. SQLite must take its write lock up front: a read takes
 // a SHARED lock, and two readers deadlock on the upgrade. On SQL Server a locking read is UPDLOCK, whose reads
-// under READ_COMMITTED_SNAPSHOT are unverified.
+// under READ_COMMITTED_SNAPSHOT are unverified. where must restrict flow_id, by = or IN: on SQL Server the flip
+// seeks on the primary key.
 func lockFlowRowsSQL(driverName string, where string) string {
 	return lockRowsSQL(driverName, liveTables.flows, where)
 }
@@ -105,7 +106,7 @@ func lockRowsSQL(driverName string, flows string, where string) string {
 	case "mysql", "mariadb":
 		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR UPDATE"
 	}
-	return "UPDATE " + flows + " SET touch=1-touch WHERE " + where
+	return database.UpdateSQL(driverName, flows, database.SeekPrimaryKey("flow_id"), "touch=1-touch", where)
 }
 
 // locksByReading reports whether lockFlowRowsSQL is a locking read on the driver.

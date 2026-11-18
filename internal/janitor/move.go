@@ -140,8 +140,8 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 				return errors.Trace(err)
 			}
 		}
-		steps := deleteSQL(tx.DriverName(), "dwarf_steps", "idx_dwarf_steps_flow_id(flow_id)", "flow_id IN ("+trees+")")
-		flows := deleteSQL(tx.DriverName(), "dwarf_flows", "idx_dwarf_flows_root(root_flow_id)", "root_flow_id IN ("+ids+")")
+		steps := database.DeleteSQL(tx.DriverName(), "dwarf_steps", database.SeekIndex("dwarf_steps", "flow_id", "flow_id"), "flow_id IN ("+trees+")")
+		flows := database.DeleteSQL(tx.DriverName(), "dwarf_flows", database.SeekIndex("dwarf_flows", "root", "root_flow_id"), "root_flow_id IN ("+ids+")")
 		stepsArgs, flowsArgs := idArgs, idArgs
 		if d != nil {
 			// diagnostics.FaultReapContention fails every attempt of an archive move on lock contention.
@@ -271,8 +271,7 @@ func archivedAtSQL(driverName string, dayEnds time.Time) (expr string, args []an
 // skipHeld, a row another transaction holds is left out rather than waited for (SKIP LOCKED) on PostgreSQL and MySQL.
 // SQL Server and SQLite wait as without it: SQLite has one writer, so nothing there is held. Do not put READPAST on
 // the statements that copy and delete a locked tree on SQL Server: it would leave a held row out of the copy. where
-// must restrict flow_id, by = or IN: on SQL Server the rows are reached by a seek on the primary key, as deleteSQL's
-// are.
+// must restrict flow_id, by = or IN: on SQL Server the rows are reached by a seek on the primary key.
 func lockRoots(ctx context.Context, tx *sequel.Tx, sfx string, skipHeld bool, where string, args ...any) ([]int, error) {
 	var stmt string
 	switch tx.DriverName() {
@@ -282,7 +281,7 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, sfx string, skipHeld bool, wh
 			stmt += " SKIP LOCKED"
 		}
 	case "mssql":
-		stmt = "UPDATE t SET touch=1-touch OUTPUT inserted.flow_id FROM dwarf_flows" + sfx + " t WITH (FORCESEEK(1(flow_id))) WHERE " + where
+		stmt = database.UpdateSQL("mssql", "dwarf_flows"+sfx, database.SeekPrimaryKey("flow_id"), "touch=1-touch OUTPUT inserted.flow_id", where)
 	default:
 		stmt = "UPDATE dwarf_flows" + sfx + " SET touch=1-touch WHERE " + where + " RETURNING flow_id"
 	}
@@ -304,25 +303,6 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, sfx string, skipHeld bool, wh
 	}
 	slices.Sort(locked)
 	return locked, nil
-}
-
-// deleteSQL returns a DELETE of the rows of table that where matches. On SQL Server the rows are reached by a seek on
-// the index seek names, as FORCESEEK takes it - an index name or id, and its column: "1(flow_id)" for the primary key -
-// so where must restrict that column by = or IN.
-func deleteSQL(driverName, table, seek, where string) string {
-	if driverName == "mssql" {
-		return "DELETE t FROM " + table + " t WITH (FORCESEEK(" + seek + ")) WHERE " + where
-	}
-	return "DELETE FROM " + table + " WHERE " + where
-}
-
-// updateSQL returns an UPDATE of the rows of table that where matches, with set. On SQL Server the rows are reached by
-// a seek on the index seek names, as deleteSQL's are.
-func updateSQL(driverName, table, seek, set, where string) string {
-	if driverName == "mssql" {
-		return "UPDATE t SET " + set + " FROM " + table + " t WITH (FORCESEEK(" + seek + ")) WHERE " + where
-	}
-	return "UPDATE " + table + " SET " + set + " WHERE " + where
 }
 
 // targetedFault fails when fault is injected targeted at any of roots.

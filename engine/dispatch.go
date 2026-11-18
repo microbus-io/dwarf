@@ -1919,13 +1919,14 @@ func (e *Engine) resolveCohort(ctx context.Context, d *dispatch, tx *sequel.Tx, 
 		if err != nil {
 			return err
 		}
-		// The exit steps are targeted by primary key, collected from the cohort read, so the write locks
-		// only those rows: a (flow_id, lineage_id, task_name IN ...) predicate has no supporting index
+		// The exit steps are targeted by primary key, collected from the cohort read, and reached by a seek, so the
+		// write locks only those rows: a (flow_id, lineage_id, task_name IN ...) predicate has no supporting index
 		// and scan-locked dwarf_steps, deadlocking concurrent fan-ins on SQL Server.
 		// Chunked, since a forEach has as many exits as branches; the chunks share the batch.
 		for chunk := range slices.Chunk(exits, inListChunk) {
 			ph, ids := inList(chunk)
-			batch.queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" WHERE step_id IN ("+ph+")", append(append([]any{}, fanInArgs...), ids...)...)
+			batch.queue(execOnly, database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), "successor_id="+fanInID, "step_id IN ("+ph+")"),
+				append(append([]any{}, fanInArgs...), ids...)...)
 		}
 		return nil
 	}

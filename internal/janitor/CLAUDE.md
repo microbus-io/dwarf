@@ -257,21 +257,11 @@ A batch of trees leaves the live tables in one transaction: moved into a day's a
   and MySQL. The engine's Fork locks its source root `FOR NO KEY UPDATE`, which conflicts with it, so a Fork and a
   removal of one tree serialize. Either side weakening its lock breaks the other; the engine's `lockRows` names this
   one.
-- **On SQL Server every janitor statement that locks, updates or deletes rows by their ids reaches them by a forced
-  seek** (`lockRoots`, `deleteSQL`, `updateSQL`), so a transaction locks only its own trees' rows. On a small table
-  SQL Server plans a clustered-index scan for `flow_id IN (...)` and `root_flow_id IN (...)`. That scan takes an update
-  lock on every row it passes, rows it does not change included, even under `READ_COMMITTED_SNAPSHOT`, which versions
-  reads but not a modification's read of its own target. Two janitor transactions, each holding its roots and
-  scanning past the other's, deadlock. Every retry loses too, because the move dies in its first statement and SQL
-  Server kills the transaction cheapest to roll back. Without the hints, `TestDispatcherDrop_TheJanitorsKeepEveryFlow`'s
-  shutdown arm failed on these deadlocks.
-  `FORCESEEK` is refused on an `UPDATE` or `DELETE` target (error 10724), so the target is aliased in a `FROM` clause.
-  The hint names its index because a bare `FORCESEEK` may pick another one whose range covers other trees' rows:
-  - `lockRoots`' due conditions match the status index, whose range spans every closed root.
-  - Large archiving's `day<>N` matches the directory's day index.
-
-  A day table's indexes are named for the table (`idx_<table>_root`, `idx_<table>_flow_id`).
-  `TestMove_PassesARootHeldOutsideTheBatch` pins it.
+- **On SQL Server every janitor statement that locks, updates or deletes rows by their ids reaches them by a seek**
+  (`database.UpdateSQL`/`DeleteSQL`; why is in `internal/database/CLAUDE.md`), so a transaction locks only its own
+  trees' rows. Unhinted, two janitors' moves each held their roots and scanned past the other's, and deadlocked.
+  `lockRoots` seeks the primary key by name because its due conditions also match the status index, whose range spans
+  every closed root. `TestMove_PassesARootHeldOutsideTheBatch` pins it.
 - **The janitor makes no table.** It archives into today only while the archive's record holds tomorrow whole; a
   missing tomorrow holds closed trees live while the deletions go on (`TestMove_NoClosedTreeMovesWhileTomorrowIsNotWhole`).
 - **`archived_at` is the move's time, clamped to its filing day's last millisecond** (`archivedAtSQL`), so a day holds
