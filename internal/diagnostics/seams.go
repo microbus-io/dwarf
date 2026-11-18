@@ -240,8 +240,9 @@ const (
 
 	CheckpointRecoveryPassDone = "recoveryPassDone" // a recovery job's pass, once it has returned, cancelled or not; joined with the job's name and the shard
 
-	// Connection pools:
-	CheckpointPoolPushHeld = "poolPushHeld" // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
+	// Startup and connection pools:
+	CheckpointRuntimeStarted = "runtimeStarted" // initRuntime, once the engine reports itself started and before FaultInitRuntime is consulted or the crew is built
+	CheckpointPoolPushHeld   = "poolPushHeld"   // recomputePools, inside poolsLock between reading the roles and pushing the sizes; reached only by the recompute FaultSlowPoolPush picks
 
 	// The refiller, each fired bare and by shard:
 

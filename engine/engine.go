@@ -328,6 +328,9 @@ type Engine struct {
 	started        atomic.Bool
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
+	// lifecycleMu is held by Startup and by Shutdown for the whole of each, so neither runs while the other is under
+	// way. started cannot say so: it is false throughout a Shutdown, and true inside a Startup that can still fail.
+	lifecycleMu sync.Mutex
 	// The calls to exported operations in flight (admitIngress), each by the cancel of the context it runs on, so
 	// Shutdown can end them and wait for them (closeIngress). ingressDrained's lock is ingressMu; it wakes Shutdown as
 	// the last call returns. Owned by ingressMu, which also orders the check of started with the count-in.
@@ -766,7 +769,12 @@ func (e *Engine) SetDebugLogger() error {
 // Startup opens the connections to every shard, applies the schema migrations each shard is missing, and starts the
 // engine's workers and background loops; every other operation returns 503 until it has returned nil. On PostgreSQL it
 // fails unless it connects as the role that owns the dwarf tables. Calling it on a started engine is a 409.
+//
+// Startup and Shutdown do not overlap: a call to either while the other, or another Startup, is under way waits for
+// that one to finish first.
 func (e *Engine) Startup(ctx context.Context) error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
 	if e.started.Load() {
 		return errors.New("engine is already started", http.StatusConflict)
 	}
@@ -910,6 +918,9 @@ func (e *Engine) Startup(ctx context.Context) error {
 // that is not running (never started, or already shut down) is a no-op, so it is safe to defer and to call
 // more than once.
 //
+// Shutdown and Startup do not overlap: a Shutdown called while Startup is under way waits for it to finish, then stops
+// the engine it started, and one called while another Shutdown is under way returns once the engine has stopped.
+//
 // Calls to the engine's operations still in progress when Shutdown is called - an Await, a Run, a Create waiting on
 // the host's LoadGraph - are cancelled and return a 503, and Shutdown waits for each to return before it stops
 // anything else; a host's LoadGraph that ignores its ctx delays it until that call returns. A call cancelled while
@@ -923,6 +934,8 @@ func (e *Engine) Startup(ctx context.Context) error {
 // waited for, and is completed by another replica or the next start. Making an archive day's tables is the
 // exception: once begun it runs to its end, so Shutdown can wait for it.
 func (e *Engine) Shutdown(ctx context.Context) error {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
 	if !e.closeIngress() {
 		return nil
 	}
@@ -978,6 +991,7 @@ func (e *Engine) initRuntime() error {
 	}
 	e.started.Store(true)
 
+	e.diags.Seams().Checkpoint(e.lifetimeCtx, diagnostics.CheckpointRuntimeStarted)
 	if e.diags.Seams().IsFault(diagnostics.FaultInitRuntime) {
 		e.unwindRuntime()
 		return errors.New("injected fault: " + diagnostics.FaultInitRuntime)

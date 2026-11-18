@@ -4041,6 +4041,20 @@ signals are the cache, the gate and `drainStop`, and a per-step deadline belongs
 
 ### Shutdown ordering: the calls in flight, then janitors, then workers, then archive/latch, then the pistons, then the Sonars
 
+**Startup and Shutdown each hold `lifecycleMu` for their whole run, so neither overlaps the other.** `started` cannot
+say so: it is false throughout a Shutdown (`closeIngress` flips it first) and true inside a Startup that can still
+fail (`initRuntime` sets it before the crew is built). Without the lock, a Startup during a Shutdown re-initializes
+the runtime the drain is stopping, and the drain then waits on it forever; and a Shutdown landing in a failing
+Startup's window takes the flip and drains a crew that was never built (a nil dereference).
+- **The second call waits; it is not refused.** A Shutdown refused during a Startup would leave the engine that
+  Startup brings up running, with nothing left to stop it. So a Shutdown during a Startup stops what it started, a
+  Startup during a Shutdown starts afterwards, and a second Shutdown returns once the engine has stopped.
+- **Nothing inside either takes it again, and nothing holding another lock takes it**, so it adds no lock order. A
+  Shutdown called from inside a host call already waits for itself (see "Every public operation is admitted").
+
+Pinned by `engine/lifecycle_test.go`, which holds a Startup at `CheckpointRuntimeStarted` with `FaultInitRuntime`
+armed, and holds a Shutdown on an admitted call whose `LoadGraph` ignores its ctx.
+
 There is no timer goroutine and no wake channel to close (see "A cycle is UNCONDITIONAL"), so no send can
 race a close and panic a worker mid-`processStep`. `Shutdown` runs `closeIngress` first - every call to an exported
 operation it admitted is cancelled and returned (see "Every public operation is admitted") - and then `drainRuntime`:
