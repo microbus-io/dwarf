@@ -218,8 +218,8 @@ func stampPastRetention(ctx context.Context, h handle, seams *seamster.Seamster,
 		}
 		none, noneArg := NoAttemptSQL(tx.DriverName())
 		ph, args = database.IDList(locked)
-		if _, err := tx.ExecContext(ctx, "UPDATE dwarf_flows SET delete_after_ms=1, archive_attempt_at="+none+
-			", updated_at=NOW_UTC() WHERE flow_id IN ("+ph+")", append([]any{noneArg}, args...)...); err != nil {
+		if _, err := tx.ExecContext(ctx, updateSQL(tx.DriverName(), "dwarf_flows", "1(flow_id)",
+			"delete_after_ms=1, archive_attempt_at="+none+", updated_at=NOW_UTC()", "flow_id IN ("+ph+")"), append([]any{noneArg}, args...)...); err != nil {
 			return errors.Trace(err)
 		}
 		stamped = len(locked)

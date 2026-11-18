@@ -337,13 +337,13 @@ func deleteMarkedTrees(ctx context.Context, h handle, seams *seamster.Seamster, 
 		ids, idArgs := database.IDList(locked)
 		trees := "SELECT flow_id FROM dwarf_flows" + sfx + " WHERE root_flow_id IN (" + ids + ")"
 		// The directory and the steps before the flows: their subqueries read the flow rows.
-		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" WHERE flow_id IN ("+trees+")", idArgs...); err != nil {
+		if _, err := tx.ExecContext(ctx, deleteSQL(tx.DriverName(), archiver.DirectoryTable, "1(flow_id)", "flow_id IN ("+trees+")"), idArgs...); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" WHERE flow_id IN ("+trees+")", idArgs...); err != nil {
+		if _, err := tx.ExecContext(ctx, deleteSQL(tx.DriverName(), "dwarf_steps"+sfx, "idx_dwarf_steps"+sfx+"_flow_id(flow_id)", "flow_id IN ("+trees+")"), idArgs...); err != nil {
 			return errors.Trace(err)
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" WHERE root_flow_id IN ("+ids+")", idArgs...); err != nil {
+		if _, err := tx.ExecContext(ctx, deleteSQL(tx.DriverName(), "dwarf_flows"+sfx, "idx_dwarf_flows"+sfx+"_root(root_flow_id)", "root_flow_id IN ("+ids+")"), idArgs...); err != nil {
 			return errors.Trace(err)
 		}
 		// FaultArchiveDelete, targeted at a root, fails the transaction that would delete it, after its statements ran.

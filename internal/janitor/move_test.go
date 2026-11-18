@@ -662,6 +662,60 @@ func TestMove_AHeldRootIsSkippedNotWaitedFor(t *testing.T) {
 	assert.Equal(2, moved.flows, "the held tree moved once it was let go")
 }
 
+// TestMove_PassesARootHeldOutsideTheBatch pins that a move reaches only the rows of its own trees: a root another
+// transaction holds, outside the batch, holds back neither an archive move nor a deletion.
+func TestMove_PassesARootHeldOutsideTheBatch(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	r := newRig(t, 30)
+	db := r.db
+	switch db.DriverName() {
+	case "sqlite":
+		t.Skip("SQLite has one writer")
+	case "mysql":
+		t.Skip("on MySQL a move's steps delete waits on a root held outside its batch once a tree has left the table")
+	}
+	roots := seedTrees(t, db, 3, callShape)
+	held, archived, deleted := roots[0], roots[1], roots[2]
+
+	locked := make(chan error, 1)
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- db.Transact(ctx, func(tx *sequel.Tx) error {
+			_, err := lockRoots(ctx, tx, "", false, "flow_id=?", held)
+			locked <- err
+			<-release
+			return err
+		})
+	}()
+	assert.NoError(<-locked)
+
+	today, err := r.archive.Today(ctx)
+	assert.NoError(err)
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second*timeoutScale)
+	defer cancel()
+	due, dueArgs := closedDueSQL(0)
+	moved, err := move(bounded, db, r.seams, []int{archived}, due, dueArgs, &filingDay{day: today, archive: r.archive})
+	if assert.NoError(err, "the archive move did not wait on the held root") {
+		assert.Equal(2, moved.flows, "the archived tree moved: its root and its child")
+	}
+	removed, err := move(bounded, db, r.seams, []int{deleted}, due, dueArgs, nil)
+	if assert.NoError(err, "the deletion did not wait on the held root") {
+		assert.Equal(2, removed.flows, "the deleted tree went: its root and its child")
+	}
+	close(release)
+	assert.NoError(<-holderDone)
+
+	flows, _ := treeCount(t, r, "dwarf_flows", "dwarf_steps", held)
+	assert.Equal(2, flows, "the held tree was left in the live tables")
+	flows, _ = treeCount(t, r, migrations.FlowsTable(today), migrations.StepsTable(today), archived)
+	assert.Equal(2, flows, "the archived tree is in today's tables")
+	flows, _ = treeCount(t, r, "dwarf_flows", "dwarf_steps", deleted)
+	assert.Zero(flows, "the deleted tree is gone")
+}
+
 // TestMove_DirectoryNamesOnlyWhatTheLocateCannotFind pins the directory's rule, through the move: a tree archived on
 // its creation day or the day after gets no row - the locate finds it by its key's hour - while one archived two or
 // more days after its creation day, or on a day before it, has every flow named. The locate finds each in the day it
