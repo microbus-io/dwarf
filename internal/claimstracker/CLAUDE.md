@@ -77,3 +77,9 @@ for up to the full ~4s. **Every path that re-offers a step to this replica must 
 The call sites and the measured cost of missing one are in `engine/CLAUDE.md`; a relinquish for a step id
 this replica never reserved is a harmless no-op, which is why the guard belongs at the shared entry point
 rather than at each caller.
+
+**Lease recovery and the orphan repair do not relinquish, and need not:** a lease lapses at least the lease
+margin (30s) after its claim, long after the entry expired. A test that skips that time - a backdated lease, or a
+lost reply that skips the re-offer - skips the window too, so it turns the tracker off (`SetEnabled`, the engine's
+`setClaimsTrackerEnabled`); left on, such a test waits up to 4s per re-dispatch. Only such a test: the rest keep the
+tracker as production runs it.

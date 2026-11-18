@@ -1107,6 +1107,7 @@ func TestDispatchers_ResumeOnAReaderRunsOnADispatcher(t *testing.T) {
 	disp, reader := twoReplicaFleet(t, build(&dispRan), build(&readRan))
 	defer disp.Shutdown(ctx)
 	defer reader.Shutdown(ctx)
+	disp.setClaimsTrackerEnabled(false)
 
 	fk, err := disp.Create(ctx, "ronr/g", nil, nil)
 	assert.NoError(err)

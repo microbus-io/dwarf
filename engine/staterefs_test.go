@@ -272,6 +272,7 @@ func TestStateRefs_UnreadableSideColumnFailsTheStep(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	sh, err := e.db.Shard(1)

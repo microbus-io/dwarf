@@ -136,6 +136,7 @@ func TestStepKey_AStaleWorkerAndItsReplacementShareTheKey(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	assert.NoError(eng.SetHost(mux))
 	assert.Must(assert.NoError(eng.Startup(t.Context())))

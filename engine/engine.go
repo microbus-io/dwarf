@@ -698,6 +698,14 @@ func (e *Engine) setRefillInterval(d time.Duration) error {
 	return nil
 }
 
+// setClaimsTrackerEnabled turns this replica's in-flight claim tracker on or off, live. For a test that puts a step
+// back to pending within its last claim's window - a backdated lease, a lost reply that skipped the re-offer - and
+// would otherwise wait out the window before claiming it again. Off changes no outcome: the tracker only spares
+// claim round trips, and the claim CAS decides.
+func (e *Engine) setClaimsTrackerEnabled(enabled bool) {
+	e.claims.SetEnabled(enabled)
+}
+
 // SetHost registers the host the engine reaches the outside world through: it loads graphs and executes
 // tasks. Host has exactly two methods, LoadGraph and ExecuteTask, both required. Construction-time only.
 func (e *Engine) SetHost(h Host) error {

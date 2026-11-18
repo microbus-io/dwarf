@@ -166,6 +166,7 @@ func slowWorkerReplay(t *testing.T, e *Engine, mux *hosts.Mux, flowURL string, i
 	ctx := context.Background()
 
 	e.SetHost(mux)
+	e.setClaimsTrackerEnabled(false)
 	if !assert.NoError(e.Startup(t.Context())) {
 		t.FailNow()
 	}

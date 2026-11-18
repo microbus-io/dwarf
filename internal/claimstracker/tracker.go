@@ -52,11 +52,12 @@ const generation = 2 * time.Second
 
 // Tracker is the two-generation in-flight set. Safe for concurrent use.
 type Tracker struct {
-	mu    sync.Mutex
-	curr  map[key]bool // this generation's claims
-	prev  map[key]bool // the last generation's, still checked until the next roll drops them
-	stamp int64        // the generation the maps currently represent (Unix time in generations)
-	now   func() time.Time
+	mu       sync.Mutex
+	curr     map[key]bool // this generation's claims
+	prev     map[key]bool // the last generation's, still checked until the next roll drops them
+	stamp    int64        // the generation the maps currently represent (Unix time in generations)
+	now      func() time.Time
+	disabled bool // TryClaim grants every reservation (SetEnabled)
 }
 
 // New returns an empty Tracker anchored at the current generation.
@@ -77,6 +78,9 @@ func (t *Tracker) TryClaim(shard, stepID int) bool {
 	k := key{shard: shard, stepID: stepID}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.disabled {
+		return true
+	}
 	t.rollMaps()
 	if t.curr[k] || t.prev[k] {
 		return false
@@ -94,6 +98,15 @@ func (t *Tracker) RelinquishClaim(shard, stepID int) {
 	t.mu.Lock()
 	delete(t.curr, k)
 	delete(t.prev, k)
+	t.mu.Unlock()
+}
+
+// SetEnabled turns the tracker on or off. Off, TryClaim grants every reservation, and the claim CAS alone decides,
+// as it always does. For tests that put a step back to pending sooner than the window outlasts its last claim, and
+// would otherwise wait for it to expire.
+func (t *Tracker) SetEnabled(enabled bool) {
+	t.mu.Lock()
+	t.disabled = !enabled
 	t.mu.Unlock()
 }
 

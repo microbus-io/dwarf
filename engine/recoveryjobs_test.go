@@ -106,6 +106,7 @@ func TestRecoveryJobs_ADrainRecoversLeases(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	defer close(release) // before Shutdown, which waits for the held worker
 	assert.NoError(e.SetHost(mux))
 	assert.Must(assert.NoError(e.Startup(t.Context())))
@@ -160,6 +161,7 @@ func TestRecoveryJobs_AHeldOrphanRepairDelaysNoLeaseReset(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	defer close(release)
 	e.janitorManual = false
 	e.recoveryInterval = 500 * time.Millisecond

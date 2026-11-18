@@ -346,6 +346,7 @@ func TestFault_LeaseStaleWrite(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 

@@ -102,6 +102,21 @@ func TestRollWindow_TwoToFourSeconds(t *testing.T) {
 	assert.True(tr.TryClaim(1, 8), "gone at 4 s")
 }
 
+// TestSetEnabled pins that a disabled tracker grants every reservation, a step claimed a moment ago included, and
+// that enabled again it turns a repeat away.
+func TestSetEnabled(t *testing.T) {
+	assert := testarossa.For(t)
+	tr := New()
+	assert.True(tr.TryClaim(1, 7))
+	assert.False(tr.TryClaim(1, 7))
+	tr.SetEnabled(false)
+	assert.True(tr.TryClaim(1, 7), "a disabled tracker turned a claim away")
+	assert.True(tr.TryClaim(1, 8))
+	tr.SetEnabled(true)
+	assert.True(tr.TryClaim(1, 9))
+	assert.False(tr.TryClaim(1, 9), "enabled again, a repeat is turned away")
+}
+
 func TestRoll_WithinSameGenerationDoesNotExpire(t *testing.T) {
 	assert := testarossa.For(t)
 	tr, off := clockAt(time.Unix(1000, 0))

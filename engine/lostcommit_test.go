@@ -59,6 +59,7 @@ func newLostCommitEngine(t *testing.T, mux *hosts.Mux) (*Engine, sdkmetric.Reade
 	t.Cleanup(func() { e.Shutdown(context.Background()) })
 	e.SetHost(mux)
 	e.persistBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	e.setClaimsTrackerEnabled(false)
 	reader := withManualReader(e)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 	return e, reader

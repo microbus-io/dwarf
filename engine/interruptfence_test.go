@@ -79,6 +79,7 @@ func TestFault_InterruptStaleWriteRollback(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	e.SetHost(mux)
 	reader := withManualReader(e)
 	e.SetTimeBudget(200 * time.Millisecond)

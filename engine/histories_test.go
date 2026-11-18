@@ -1072,6 +1072,7 @@ func runHistory(t *testing.T, h hHistory, cov *hCoverage) {
 	t.Cleanup(func() { close(r.done) }) // before the shutdown, so no task waits at the door through it
 	r.e.SetHost(r.mux())
 	r.e.persistBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	r.e.setClaimsTrackerEnabled(false)
 	assert.Must(assert.NoError(r.e.Startup(t.Context())))
 
 	var err error

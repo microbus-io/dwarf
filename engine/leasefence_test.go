@@ -220,6 +220,7 @@ func TestLeaseFence_CompletionNoDuplicateSuccessor(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
@@ -294,6 +295,7 @@ func TestLeaseFence_CohortNoDoubleArrival(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(4))
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
@@ -360,6 +362,7 @@ func TestLeaseFence_RecoveryResetFenced(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
@@ -476,6 +479,7 @@ func TestLeaseFence_RetryRewindFenced(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
@@ -556,6 +560,7 @@ func TestLeaseFence_SubgraphParkFenced(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	assert.Must(assert.NoError(eng.Startup(t.Context())))
@@ -625,6 +630,7 @@ func TestLeaseRecovery_EndToEnd(t *testing.T) {
 
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	assert.NoError(eng.SetWorkers(3))
 	eng.SetHost(mux)
 	eng.SetMeterProvider(mp)

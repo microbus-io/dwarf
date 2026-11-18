@@ -233,6 +233,7 @@ func TestTelemetry_CarriesNoKeyToken(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	eng := NewEngineUnderTest(t.Name())
 	defer eng.Shutdown(ctx)
+	eng.setClaimsTrackerEnabled(false)
 	defer releaseHold() // below the Shutdown defer, so it runs first
 	assert.NoError(eng.SetHost(mux))
 	assert.NoError(eng.SetWorkers(6))

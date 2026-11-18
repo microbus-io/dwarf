@@ -142,6 +142,7 @@ func TestLeaseRecovery_RecoversAStepNeitherWriteCouldRecord(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(ctx)
+	e.setClaimsTrackerEnabled(false)
 	e.SetHost(mux)
 	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))

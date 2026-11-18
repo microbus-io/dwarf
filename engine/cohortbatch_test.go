@@ -160,6 +160,7 @@ func TestCohortBatch_FencedMemberIsLeftOut(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	c := newBatchedCohort(t, 0)
+	c.e.setClaimsTrackerEnabled(false)
 	leader := c.batch().members[0].stepID
 	_, err := c.db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_seq=lease_seq+1, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE step_id=?", leader)
 	assert.NoError(err)
@@ -231,6 +232,7 @@ func TestCohortBatch_LeaderPanicReleasesTheBatch(t *testing.T) {
 	assert := testarossa.For(t)
 	ctx := context.Background()
 	c := newBatchedCohort(t, time.Second)
+	c.e.setClaimsTrackerEnabled(false)
 	b := c.batch()
 	c.e.diags.Seams().InjectN(diagnostics.FaultPanicLeaseTick, batchedWidth)
 	select {
