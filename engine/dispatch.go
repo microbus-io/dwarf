@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/cancelmarker"
@@ -869,11 +868,8 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	}
 	// Refused as Create refuses it. flow.Subgraph does already, but a carrier from a host that is not this
 	// package's code arms the URL without it.
-	if strings.TrimSpace(subgraphURL) != subgraphURL {
-		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: workflow URL must not begin or end with whitespace", http.StatusBadRequest)))
-	}
-	if !isPrintableASCII(subgraphURL) {
-		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: workflow URL must be printable ASCII", http.StatusBadRequest)))
+	if !workflow.IsValidURL(subgraphURL) {
+		return errors.Trace(e.resolveFailedSpawn(ctx, d, subgraphURL, errors.New("cannot start subgraph: invalid workflow URL %q", subgraphURL, http.StatusBadRequest)))
 	}
 	// Bound the subgraph LoadGraph by the caller flow's budget (the create-time LoadGraph uses the caller's ctx).
 	loadCtx, loadCancel := context.WithTimeout(workflow.ContextWithBaggage(ctx, d.baggage), time.Duration(d.row.flowTimeBudgetMs)*time.Millisecond)
@@ -1089,11 +1085,10 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 // ran to its handler. done means the dispatch ends here.
 func (e *Engine) complete(ctx context.Context, d *dispatch) (done bool, err error) {
 	taskName := d.row.taskName
-	// The completion write records the Goto target in advance_goto, a column as wide as task_name. A longer target,
-	// or one Graph.Validate would refuse as a task name, names no task, so it fails here with the error the transition
-	// would have given it, rather than as a column overflow or a refused NUL on the completion write (retried, then
-	// classified as a payload fault).
-	if gotoTarget := d.result.GotoRequested(); len(gotoTarget) > maxGotoTargetLen || !isPrintableASCII(gotoTarget) {
+	// The completion write records the Goto target in advance_goto. A target Graph.Validate would refuse as a task
+	// name names no task, so it fails here with the error the transition would have given it, rather than as a column
+	// overflow or a refused NUL on the completion write (retried, then classified as a payload fault).
+	if gotoTarget := d.result.GotoRequested(); gotoTarget != "" && !workflow.IsValidName(gotoTarget) {
 		err = errors.New("task '%s' requested goto to '%s' but no goto transition exists from this task", stripProto(taskName), stripProto(gotoTarget))
 		return true, errors.Trace(e.failAndReturn(ctx, d, err))
 	}

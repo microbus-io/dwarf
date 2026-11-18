@@ -191,7 +191,8 @@ matching one before working there:**
 - **Text PostgreSQL refuses is refused on every dialect.** A payload holding a NUL, invalid UTF-8 or an unpaired
   surrogate escape fails `checkPayload` (a 400), which every payload column write calls. The other dialects store
   some of it (all of them a NUL), so without the check a flow that passes the SQLite suite fails on PostgreSQL.
-  Names are held to more: a graph name, task name, task URL and workflow URL must be printable ASCII.
+  Names are held to more: a graph name and task name pass `workflow.IsValidName`, a task URL and workflow URL
+  `workflow.IsValidURL` - 1 to 512 printable ASCII characters (the columns' width), not padded with a space.
   (`engine/CLAUDE.md`)
 - **Write-first transactions:** every flow-terminating transaction must take the flow-row lock first
   (`lockFlowRows`: a locking read on PostgreSQL and MySQL, a `touch` flip elsewhere), or the flow strands as a
@@ -223,7 +224,7 @@ names.
 
 **Naming convention.** Graph and task names are PascalCase (`Reserve`, `Charge`) - graph-topology
 identifiers, kept visually distinct from the lowercased dispatch URLs and the camelCase state fields. The engine
-imposes no casing, only printable ASCII (`Graph.Validate`); PascalCase is a fixture/example convention.
+imposes no casing, only `workflow.IsValidName` (`Graph.Validate`); PascalCase is a fixture/example convention.
 
 **Task** - A named unit of work within a workflow, identified by a task name/URL and executed via the injected
 `ExecuteTask`. Tasks receive state via a `workflow.Flow` carrier, read input from state fields, perform work, and

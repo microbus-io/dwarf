@@ -1263,8 +1263,8 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 // with Resume (which, unlike a separate start, also delivers a payload).
 //
 // An error from the host's LoadGraph is returned with its own status code, so a 503 (the graph's source
-// unreachable) tells the caller to try again; nothing is created. A workflowURL that is empty, begins or ends
-// with whitespace, or holds a character outside printable ASCII is a 400.
+// unreachable) tells the caller to try again; nothing is created. A workflowURL that is not valid
+// (workflow.IsValidURL) is a 400.
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
 	ctx, release, err := e.admitIngress(ctx, "create")
 	if err != nil {

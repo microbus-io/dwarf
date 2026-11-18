@@ -115,8 +115,8 @@ type Graph struct {
 // NewGraph creates a new workflow graph with the given display name. The name is a human-friendly
 // label (surfaced in rendering and Validate error messages); it is NOT the resolve key. The value
 // passed to Create/Run and to the host's LoadGraph is a separate opaque workflow URL that the engine
-// keeps with the flow - it is never kept on the graph itself. Validate rejects a name that is empty, begins or
-// ends with whitespace, or holds a character outside printable ASCII.
+// keeps with the flow - it is never kept on the graph itself. Validate rejects a name that is not valid
+// (IsValidName).
 func NewGraph(name string) *Graph {
 	return &Graph{
 		name: name,
@@ -151,8 +151,7 @@ func (g *Graph) Transitions() []Transition {
 // (used by transitions, fan-in, goto); the URL is the opaque downstream endpoint the engine
 // hands to the host's ExecuteTask. The first task bound
 // becomes the default entry point unless SetEntryPoint is called explicitly. End is not
-// registered. The name must not be empty or begin or end with whitespace, and the name and the URL must be printable
-// ASCII; Validate rejects such a task.
+// registered. The name must be valid (IsValidName) and the URL too (IsValidURL), or Validate rejects the task.
 //
 // The same URL may be bound under multiple names. This is how a workflow author reuses the same task
 // code at distinct positions in the graph with different downstream transitions per position.
@@ -432,16 +431,11 @@ func (g *Graph) Reducers() map[string]Reducer {
 }
 
 // Validate checks the graph for structural errors. It also checks the graph's text: the graph name and every task
-// name and URL must be printable ASCII (a space through '~'), and every 'when' expression valid UTF-8 without a NUL.
+// name must be valid (IsValidName), every task URL valid (IsValidURL), and every 'when' expression valid UTF-8
+// without a NUL.
 func (g *Graph) Validate() error {
-	if g.name == "" {
-		return errors.New("graph name is required")
-	}
-	if strings.TrimSpace(g.name) != g.name {
-		return errors.New("graph name %q has leading or trailing whitespace", g.name)
-	}
-	if !isPrintableASCII(g.name) {
-		return errors.New("graph name %q must be printable ASCII", g.name)
+	if !IsValidName(g.name) {
+		return errors.New("invalid graph name %q: %s", g.name, nameRule)
 	}
 	if len(g.tasks) == 0 {
 		return errors.New("graph '%s' has no tasks", g.name)
@@ -449,28 +443,15 @@ func (g *Graph) Validate() error {
 	taskSet := make(map[string]bool, len(g.tasks)+1)
 	taskSet[End] = true
 	for _, t := range g.tasks {
-		// "" means "no task" throughout the engine (no successor, no Goto, no entry point yet), so a task by that
-		// name would be skipped, not run.
-		if t.Name == "" {
-			return errors.New("task with URL '%s' in graph '%s' has no name", t.URL, g.name)
-		}
-		// A name is its identity exactly as given. A padded one would differ from its trimmed spelling in Go but not
-		// in a SQL comparison on MySQL or SQL Server, which ignores trailing spaces.
-		if strings.TrimSpace(t.Name) != t.Name {
-			return errors.New("task %q in graph '%s' has leading or trailing whitespace", stripProto(t.Name), g.name)
-		}
-		if !isPrintableASCII(t.Name) {
-			return errors.New("task %q in graph '%s' must be named in printable ASCII", stripProto(t.Name), g.name)
+		if !IsValidName(t.Name) {
+			return errors.New("invalid task name %q in graph '%s': %s", stripProto(t.Name), g.name, nameRule)
 		}
 		if taskSet[t.Name] {
 			return errors.New("duplicate task '%s' in graph '%s'", stripProto(t.Name), g.name)
 		}
 		taskSet[t.Name] = true
-		if t.URL == "" {
-			return errors.New("task '%s' in graph '%s' has no URL", stripProto(t.Name), g.name)
-		}
-		if !isPrintableASCII(t.URL) {
-			return errors.New("task '%s' in graph '%s' has URL %q; it must be printable ASCII", stripProto(t.Name), g.name, t.URL)
+		if !IsValidURL(t.URL) {
+			return errors.New("invalid URL %q for task '%s' in graph '%s': %s", t.URL, stripProto(t.Name), g.name, nameRule)
 		}
 	}
 	if !taskSet[g.entryPoint] {
@@ -739,22 +720,6 @@ func stripProto(s string) string {
 		x = s
 	}
 	return x
-}
-
-// isPrintableASCII reports whether every byte of s is printable ASCII, a space through '~' - the rule for a graph
-// name, a task name and a URL. A name is a key matched byte for byte (transitions, Goto, fan-in, the stored graph,
-// the lists' filters), and ASCII leaves no two spellings that look alike and differ: no Unicode normalization forms,
-// homoglyphs or direction overrides. Nor invalid UTF-8, which encoding/json replaces with U+FFFD, so two names that
-// differ only in invalid bytes would be one name in the stored graph and the engine would dispatch by a graph other
-// than the one Validate passed; nor a NUL, which PostgreSQL refuses; nor a control character, which the renderers'
-// escaping does not cover. A URL is ASCII by RFC 3986; a host percent-encodes anything else.
-func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < ' ' || s[i] > '~' {
-			return false
-		}
-	}
-	return true
 }
 
 // stripProtoAll is stripProto of every name in names, as a new slice.

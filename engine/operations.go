@@ -46,14 +46,8 @@ import (
 
 // create inserts a new flow for a workflow and runs it.
 func (e *Engine) create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	if workflowURL == "" {
-		return "", errors.New("workflow URL is required", http.StatusBadRequest)
-	}
-	if strings.TrimSpace(workflowURL) != workflowURL {
-		return "", errors.New("workflow URL must not begin or end with whitespace", http.StatusBadRequest)
-	}
-	if !isPrintableASCII(workflowURL) {
-		return "", errors.New("workflow URL must be printable ASCII", http.StatusBadRequest)
+	if !workflow.IsValidURL(workflowURL) {
+		return "", errors.New("invalid workflow URL %q", workflowURL, http.StatusBadRequest)
 	}
 	// Reject a negative priority/weight/budget rather than silently coercing it to the default
 	// (resolveFlowOptions treats <=0 as "unset"): a negative value is a caller bug, and swallowing it hides
@@ -786,17 +780,6 @@ func checkReason(reason string) error {
 		return errors.New("reason must be valid UTF-8 without NUL characters", http.StatusBadRequest)
 	}
 	return nil
-}
-
-// isPrintableASCII reports whether every byte of s is printable ASCII, a space through '~' - the rule Graph.Validate
-// holds a graph's names and task URLs to, and so the rule for a workflow URL and a Goto target.
-func isPrintableASCII(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] < ' ' || s[i] > '~' {
-			return false
-		}
-	}
-	return true
 }
 
 // terminate forcefully stops a flow and its whole subgraph subtree, unconditionally. Root-only: a subgraph

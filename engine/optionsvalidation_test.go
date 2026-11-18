@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,6 +302,40 @@ func TestCreate_RejectsAWorkflowURLOutsidePrintableASCII(t *testing.T) {
 	assert.Zero(enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
 }
 
+// TestCreate_HoldsTheWorkflowURLToItsColumn pins that a flow whose workflow URL, graph name, task name and task URL
+// are each 512 characters, the width of their columns, is stored and runs, and that Create refuses a 513-character
+// workflow URL before any flow is stored, rather than failing on the write.
+func TestCreate_HoldsTheWorkflowURLToItsColumn(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	mux := hosts.NewMux()
+	fits := "longurl/" + strings.Repeat("u", 512-len("longurl/"))
+	g := workflow.NewGraph(strings.Repeat("G", 512))
+	g.SetURL(strings.Repeat("T", 512), fits)
+	g.AddTransition(strings.Repeat("T", 512), workflow.End)
+	mux.HandleGraph(fits, g)
+	mux.HandleGraph(fits+"u", g)
+	var ran atomic.Int32
+	mux.HandleTask(fits, func(ctx context.Context, f *workflow.Flow) error { ran.Add(1); return nil })
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	_, out, err := e.Run(ctx, fits, nil, nil)
+	if assert.NoError(err) {
+		assert.Equal(workflow.StatusCompleted, out.Status, out.Error)
+	}
+	assert.Equal(int32(1), ran.Load())
+
+	_, _, err = e.Run(ctx, fits+"u", nil, nil)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err), "%v", err)
+	assert.Equal(int32(1), ran.Load())
+	assert.Equal(1, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"))
+}
+
 // TestCreate_RejectsAGraphWithAnUnstorableName pins that Create refuses a graph whose task names differ only in
 // invalid UTF-8, before any flow is stored: the stored graph JSON would decode them as one name, bound to the wrong URL.
 func TestCreate_RejectsAGraphWithAnUnstorableName(t *testing.T) {
@@ -364,7 +399,7 @@ func TestSubgraph_UnstorableURLFromAWireCarrierFailsTheSpawn(t *testing.T) {
 	_, out, err := e.Run(ctx, "unstorablesub/g", nil, nil)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusFailed, out.Status)
-		assert.Contains(out.Error, "printable ASCII")
+		assert.Contains(out.Error, "invalid workflow URL")
 	}
 	assert.Equal(1, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"), "a child was created under the URL")
 }
@@ -403,7 +438,7 @@ func TestSubgraph_PaddedURLFromAWireCarrierFailsTheSpawn(t *testing.T) {
 	_, out, err := e.Run(ctx, "paddedsub/g", nil, nil)
 	if assert.NoError(err) {
 		assert.Equal(workflow.StatusFailed, out.Status)
-		assert.Contains(out.Error, "whitespace")
+		assert.Contains(out.Error, "invalid workflow URL")
 	}
 	assert.Equal(1, enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_flows"), "a child was created under the padded URL")
 }

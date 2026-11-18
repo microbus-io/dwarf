@@ -90,9 +90,6 @@ var errLeaseFenced = errors.New("dispatch lease fenced")
 // the same clean no-op as a bail before any write, so the transaction's caller maps it to nil.
 var errTransitionFlowTerminal = errors.New("flow terminal at transition")
 
-// maxGotoTargetLen is the width of dwarf_steps.advance_goto, which matches task_name's.
-const maxGotoTargetLen = 512
-
 // handleInterrupt pauses a flow for external input.
 func (e *Engine) handleInterrupt(ctx context.Context, d *dispatch, interruptPayload workflow.State) error {
 	shardNum, db, stepID, leaseSeq, changesJSON := d.shard, d.db, d.stepID, d.row.leaseSeq, d.changesJSON

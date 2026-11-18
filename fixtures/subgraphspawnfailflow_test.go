@@ -131,7 +131,7 @@ func TestSubgraphSpawnFailFlow(t *testing.T) {
 			{"unreachable", http.StatusServiceUnavailable, "no worker serves"},
 			{"missing", http.StatusNotFound, "subgraph graph not found"},
 			{"invalid", http.StatusBadRequest, "invalid subgraph graph"},
-			{"empty-name", http.StatusBadRequest, "has no name"},
+			{"empty-name", http.StatusBadRequest, "invalid task name"},
 			{"panics", http.StatusInternalServerError, "graph loader exploded"},
 		}
 		for _, tc := range cases {

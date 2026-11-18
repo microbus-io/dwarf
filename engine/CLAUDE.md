@@ -133,7 +133,7 @@ checked anyway: the scan is linear and cheap beside the write, and one call at e
 Pinned by `TestPayloadText_NamesWhatPostgresRefuses`, `TestPayloadText_CreateAndResumeRefuseUnstorableText` and
 `TestPayloadText_UnstorableChangesFailTheStepOnce`. A Terminate or Cancel reason is held to the same text rule
 (`checkReason`), a list or Purge text filter likewise (`queryClauses`), and a workflow URL and a Goto target to the
-rule `Graph.Validate` holds names and task URLs to (printable ASCII, `isPrintableASCII`). An error the engine stores for a task to read -
+rule `Graph.Validate` holds names and task URLs to (`workflow.IsValidURL`, `workflow.IsValidName`). An error the engine stores for a task to read -
 an `onErr`, a `subgraph_error` - is made storable instead of refused (`deliveredError`): refusing it would lose the
 error itself.
 

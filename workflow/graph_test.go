@@ -1597,3 +1597,40 @@ func TestGraph_ValidateRejectsAPaddedGraphName(t *testing.T) {
 		assert.Error(decoded.Validate(), "%q decoded", name)
 	}
 }
+
+// TestGraph_ValidateRejectsAPaddedTaskURL pins that a task URL beginning or ending with a space is refused, as a padded
+// name is. A space inside the URL is allowed, since a task first named in a transition dispatches as its own name.
+func TestGraph_ValidateRejectsAPaddedTaskURL(t *testing.T) {
+	assert := testarossa.For(t)
+	for _, url := range []string{" svc/join", "svc/join ", " svc/join "} {
+		g := NewGraph("Test")
+		g.SetURL("Start", "svc/start")
+		g.SetURL("Join", url)
+		g.AddTransitionChain("Start", "Join", End)
+		assert.Error(g.Validate(), "%q", url)
+	}
+	g := NewGraph("Test")
+	g.AddTransitionChain("Start", "Join Them", End)
+	assert.NoError(g.Validate())
+}
+
+// TestGraph_ValidateHoldsNamesAndURLsToTheirColumns pins that a graph name, task name or task URL longer than the
+// 512-character column it is stored in is refused, so the overflow cannot surface as a failed write mid-flow, and
+// that one exactly as long passes.
+func TestGraph_ValidateHoldsNamesAndURLsToTheirColumns(t *testing.T) {
+	assert := testarossa.For(t)
+
+	build := func(graphName, taskName, taskURL string) *Graph {
+		g := NewGraph(graphName)
+		g.SetURL("Start", "svc/start")
+		g.SetURL(taskName, taskURL)
+		g.AddTransitionChain("Start", taskName, End)
+		return g
+	}
+	fits := strings.Repeat("n", maxNameLen)
+	over := strings.Repeat("n", maxNameLen+1)
+	assert.NoError(build(fits, fits, fits).Validate())
+	assert.Error(build(over, "Join", "svc/join").Validate(), "graph name")
+	assert.Error(build("Test", over, "svc/join").Validate(), "task name")
+	assert.Error(build("Test", "Join", over).Validate(), "task URL")
+}
