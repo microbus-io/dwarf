@@ -701,9 +701,9 @@ func (e *Engine) pickShard(ctx context.Context) (int, error) {
 		//
 		// An EMPTY index set is not a shardless engine - Startup always opens at least the default shard, so
 		// this only happens off a live engine: before Startup, or AFTER Shutdown (ShardSet.Close nils the
-		// indices). The second is not API misuse but an ordinary shutdown race - a host still serving while
-		// it tears the engine down, or a Create in flight when Shutdown lands - and indexing the empty slice
-		// panicked the host's process for it. A library owes that caller an error.
+		// indices). No exported operation gets here then - Shutdown ends every call it admitted before it closes
+		// the shards - but indexing the empty slice panicked the host's process, so a caller that does is
+		// owed an error rather than resting on that order.
 		indices := e.db.Indices()
 		if len(indices) == 0 {
 			return 0, errors.New("engine is not started", http.StatusServiceUnavailable)

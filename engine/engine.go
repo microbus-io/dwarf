@@ -328,6 +328,13 @@ type Engine struct {
 	started        atomic.Bool
 	lifetimeCtx    context.Context
 	lifetimeCancel context.CancelFunc
+	// The calls to exported operations in flight (admitIngress), each by the cancel of the context it runs on, so
+	// Shutdown can end them and wait for them (closeIngress). ingressDrained's lock is ingressMu; it wakes Shutdown as
+	// the last call returns. Owned by ingressMu, which also orders the check of started with the count-in.
+	ingressMu      sync.Mutex
+	ingress        map[uint64]context.CancelCauseFunc
+	ingressNext    uint64
+	ingressDrained sync.Cond
 
 	// Recovery/await/reap timing. Effectively constants in production (defaulted in NewEngine, then
 	// read-only); a white-box test shortens one directly, before Startup for the one read once at Startup
@@ -391,6 +398,8 @@ func NewEngine() *Engine {
 	e.lastAppliedSlots = map[int]int{}
 	e.fleetOverLimit = map[int]bool{}
 	e.heldDivisors = map[int]int{}
+	e.ingress = map[uint64]context.CancelCauseFunc{}
+	e.ingressDrained.L = &e.ingressMu
 	e.leaseMargin = 30 * time.Second
 	// The detector's cost scales with concurrent AWAITERS, not with step throughput - one small indexed
 	// IN-lookup per shard holding one, and nothing at all when nobody is waiting - so the cadence is picked
@@ -901,13 +910,20 @@ func (e *Engine) Startup(ctx context.Context) error {
 // that is not running (never started, or already shut down) is a no-op, so it is safe to defer and to call
 // more than once.
 //
+// Calls to the engine's operations still in progress when Shutdown is called - an Await, a Run, a Create waiting on
+// the host's LoadGraph - are cancelled and return a 503, and Shutdown waits for each to return before it stops
+// anything else; a host's LoadGraph that ignores its ctx delays it until that call returns. A call cancelled while
+// writing may still have taken effect, as one whose caller gives up may: a Create can have made its flow. An Await
+// whose flow stops as Shutdown lands can return the 503 rather than the outcome. Do not call Shutdown from inside a
+// call the engine made to the host: it waits for that call to return.
+//
 // Shutdown does not consult ctx: it waits for the steps in flight to finish (each task is bounded by its
 // time budget), and a deadline or cancellation on ctx does not make it return sooner. Background maintenance
 // in progress - crash recovery, removing deleted flows, dropping expired archive days - is abandoned rather than
 // waited for, and is completed by another replica or the next start. Making an archive day's tables is the
 // exception: once begun it runs to its end, so Shutdown can wait for it.
 func (e *Engine) Shutdown(ctx context.Context) error {
-	if !e.started.CompareAndSwap(true, false) {
+	if !e.closeIngress() {
 		return nil
 	}
 	e.drainRuntime()
@@ -954,7 +970,7 @@ func (e *Engine) initRuntime() error {
 	e.graphs = graphcache.New(graphCacheFlows, graphCacheGraphs)
 
 	// Create the dwarf_* instruments and register the observable-gauge callback before the engine reports itself
-	// started: an operation records into them once it passes ensureStarted, and the started flag is what orders
+	// started: an operation records into them once admitIngress admits it, and the started flag is what orders
 	// that read after this write. Falls back to the global (no-op) provider when none was injected.
 	err := e.initMetrics()
 	if err != nil {
@@ -1078,16 +1094,17 @@ func (e *Engine) initRuntime() error {
 }
 
 // unwindRuntime undoes the part of initRuntime that runs before any goroutine is spawned, so a failed
-// Startup leaves an engine that reports itself stopped rather than started-but-inert. Only the metrics
-// callback needs undoing - it is registered with the OTEL reader and would otherwise query a database
+// Startup leaves an engine that reports itself stopped rather than started-but-inert. The engine reported itself
+// started, so a call may have been admitted; it is ended first, as Shutdown ends one, before Startup closes the
+// shards. Then the metrics callback - it is registered with the OTEL reader and would otherwise query a database
 // nobody is driving.
 func (e *Engine) unwindRuntime() {
+	e.closeIngress()
 	e.closeMetrics()
-	e.started.Store(false)
 }
 
-// drainRuntime stops all goroutines in order. The caller (Shutdown) has already flipped e.started to false
-// via CompareAndSwap, which also serves as the single-shutdown guard.
+// drainRuntime stops all goroutines in order. The caller (Shutdown) has already ended every admitted call and
+// flipped e.started to false (closeIngress), which also serves as the single-shutdown guard.
 func (e *Engine) drainRuntime() {
 	// Tell the workers a shutdown started, before anything waits on them. A worker sleeping out a persistence
 	// backoff wakes here, hands its step back (fenced), and exits, rather than making the drain wait out a
@@ -1184,9 +1201,9 @@ func (e *Engine) drainRuntime() {
 	}
 	e.sonarPool.Wait()
 	e.leaveFleet(context.Background())
-	// Wake every blocked Await so it returns a shutdown error rather than waiting out its own context on a
-	// board nothing will ever release again - every goroutine that could have is drained above. A caller
-	// already holding a stop status keeps it and returns that outcome instead.
+	// Close the latch boards, which nothing releases any more - every goroutine that could have is drained above. No
+	// Await is parked on one: closeIngress ended every admitted call before the drain began. A board refuses a park
+	// once closed.
 	for _, a := range e.allActors() {
 		a.latch.Close()
 	}
@@ -1240,25 +1257,6 @@ func (e *Engine) resolveFlowOptions(opts *workflow.FlowOptions) *workflow.FlowOp
 
 // --- Public API ---
 
-// ensureStarted rejects an operation on an engine that is not live - never started, or already shut down.
-// It is not merely a nicety: without it the failure is a LIE rather than an error. Every key-addressed
-// operation routes through ShardSet.Shard, which returns "flow not found" (404) when no shard is open, so a
-// stopped engine tells the caller its flow does not exist - and a caller may act on that (stop retrying,
-// recreate the work). The cross-shard operations are worse: the lists, Purge and ShardInfo fan out over an EMPTY index
-// set and return SUCCESS with an empty result - "you have no flows". Both are indistinguishable from the
-// truth. 503 says the one true thing: the engine is not available, come back later.
-//
-// The shutdown half is not API misuse: a host still serving while it tears the engine down, or a request in
-// flight when Shutdown lands, is an ordinary race. (pickShard keeps its own no-open-shards guard for exactly
-// that race - `started` can flip after this check - where indexing an empty index slice would panic the
-// host's process.)
-func (e *Engine) ensureStarted() error {
-	if !e.started.Load() {
-		return errors.New("engine is not started", http.StatusServiceUnavailable)
-	}
-	return nil
-}
-
 // Create creates a new flow for a workflow and starts it, returning the running flow's key. opts carries
 // the flow's policy (scheduling, DeleteOnCompletion, Baggage); nil uses defaults.
 // For a flow that must wait for an external trigger, have the entry task call flow.Interrupt and resume it
@@ -1268,10 +1266,11 @@ func (e *Engine) ensureStarted() error {
 // unreachable) tells the caller to try again; nothing is created. A workflowURL that is empty, begins or ends
 // with whitespace, or holds a character outside printable ASCII is a 400.
 func (e *Engine) Create(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "create")
+	if err != nil {
 		return "", errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "create", &err)
+	defer release(&err)
 	return e.create(ctx, workflowURL, initialState, opts)
 }
 
@@ -1282,10 +1281,11 @@ func (e *Engine) Create(ctx context.Context, workflowURL string, initialState an
 // archived flow's, or one marked for deletion until it is removed. Returns 404 for an unknown key, including a
 // deleted flow, and 400 for a malformed one.
 func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "snapshot")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "snapshot", &err)
+	defer release(&err)
 	return e.snapshot(ctx, flowKey)
 }
 
@@ -1294,10 +1294,11 @@ func (e *Engine) Snapshot(ctx context.Context, flowKey string) (outcome *workflo
 // or changes, and is the same while nothing does, so a caller can poll it and read Snapshot or History only when it
 // moves. Errors as Snapshot.
 func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint string, status string, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "fingerprint")
+	if err != nil {
 		return "", "", errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "fingerprint", &err)
+	defer release(&err)
 	return e.fingerprint(ctx, flowKey)
 }
 
@@ -1308,10 +1309,11 @@ func (e *Engine) Fingerprint(ctx context.Context, flowKey string) (fingerprint s
 // malformed key or a subgraph child's, or resume data that is not JSON-marshalable or holds text the database
 // cannot store, 413 for resume data over the size limit, and 409 for a flow that is not interrupted, including one a Terminate stopped first.
 func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) (err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "resume")
+	if err != nil {
 		return errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "resume", &err)
+	defer release(&err)
 	return e.resume(ctx, flowKey, resumeData)
 }
 
@@ -1320,10 +1322,11 @@ func (e *Engine) Resume(ctx context.Context, flowKey string, resumeData any) (er
 // has already closed is a no-op that returns nil and leaves its outcome as it was, archived or not; an unknown or
 // deleted flow is a 404. The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is refused with a 400.
 func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) (err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "terminate")
+	if err != nil {
 		return errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "terminate", &err)
+	defer release(&err)
 	return e.terminate(ctx, flowKey, reason)
 }
 
@@ -1348,10 +1351,11 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) (
 // The reason is a human-readable note of at most 4,096 bytes of UTF-8 text with no NUL; any other reason is
 // refused with a 400.
 func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) (err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "cancel")
+	if err != nil {
 		return errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "cancel", &err)
+	defer release(&err)
 	return e.cancel(ctx, flowKey, reason)
 }
 
@@ -1360,10 +1364,11 @@ func (e *Engine) Cancel(ctx context.Context, flowKey string, reason string) (err
 // modified. The fork inherits the original's scheduling and baggage (it does not take FlowOptions).
 // Returns the new flow's key.
 func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (flowKey string, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "fork")
+	if err != nil {
 		return "", errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "fork", &err)
+	defer release(&err)
 	return e.forkFlow(ctx, stepKey, stateOverrides)
 }
 
@@ -1373,10 +1378,11 @@ func (e *Engine) Fork(ctx context.Context, stepKey string, stateOverrides any) (
 // included, and so does an archived flow's. Returns 404 for an unknown key, including a flow deleted or marked for
 // deletion, and 400 for a malformed one.
 func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.FlowStep, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "history")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "history", &err)
+	defer release(&err)
 	return e.history(ctx, flowKey)
 }
 
@@ -1385,10 +1391,11 @@ func (e *Engine) History(ctx context.Context, flowKey string) (steps []workflow.
 // a flow take, and ParentStepKey the step that called the child. Returns 404 for an unknown key, including a flow
 // deleted or marked for deletion, and 400 for a malformed one.
 func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow.FlowSummary, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "summary")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "summary", &err)
+	defer release(&err)
 	return e.summary(ctx, flowKey)
 }
 
@@ -1397,10 +1404,11 @@ func (e *Engine) Summary(ctx context.Context, flowKey string) (summary *workflow
 // Returns 404 for an unknown key, for a step of a flow marked for deletion once its deletion is due (at once after
 // Delete, after the grace for DeleteOnCompletion), and 400 for a malformed one.
 func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowStep, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "step")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "step", &err)
+	defer release(&err)
 	return e.step(ctx, stepKey)
 }
 
@@ -1415,10 +1423,11 @@ func (e *Engine) Step(ctx context.Context, stepKey string) (step *workflow.FlowS
 // once for ListRecentlyClosed, and moves on to ListClosed when it is archived, about a minute later, longer while
 // archiving lags or fails. A flow deleted without archiving - DeleteOnCompletion, a retention of 0 - is never in ListClosed.
 func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "list_open")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "list_open", &err)
+	defer release(&err)
 	return e.listOpen(ctx, query)
 }
 
@@ -1444,10 +1453,11 @@ func (e *Engine) ListOpen(ctx context.Context, query workflow.Query) (summaries 
 // Archive times come from each shard's database and the window is cut by this process's clock, so flows within the
 // skew between them may be listed out of order, or, at a window's edge, missed.
 func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "list_closed")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "list_closed", &err)
+	defer release(&err)
 	limit, err := listLimit(query)
 	if err != nil {
 		return nil, errors.Trace(err)
@@ -1471,10 +1481,11 @@ func (e *Engine) ListClosed(ctx context.Context, query workflow.Query) (summarie
 // deleted, about a minute after it closes. Like ListOpen it has no pagination, and flows closed within the clock skew
 // between two shard servers may be listed out of order.
 func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "list_recently_closed")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "list_recently_closed", &err)
+	defer release(&err)
 	return e.listRecentlyClosed(ctx, query)
 }
 
@@ -1487,10 +1498,11 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
 // for an open flow: Terminate it first.
 func (e *Engine) Delete(ctx context.Context, flowKey string) (err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "delete")
+	if err != nil {
 		return errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "delete", &err)
+	defer release(&err)
 	return e.deleteFlow(ctx, flowKey)
 }
 
@@ -1515,10 +1527,11 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) (err error) {
 // Deleting rows writes in proportion to them and leaves dead rows for the database to vacuum; Purge is for removing
 // specific records, and bulk removal is the retention's (SetRetention) and PurgeBefore's, which drop whole days.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (removed int, done bool, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "purge")
+	if err != nil {
 		return 0, false, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "purge", &err)
+	defer release(&err)
 	return e.purge(ctx, query)
 }
 
@@ -1526,11 +1539,17 @@ func (e *Engine) Purge(ctx context.Context, query workflow.Query) (removed int, 
 // shard even when some are down, with the failure recorded on that shard's row, so it is the call to make when a
 // shard is suspect. It reads no table, so it costs the same however large the shards grow.
 func (e *Engine) ShardInfo(ctx context.Context) (shards []ShardSummary, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "shard_info")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "shard_info", &err)
-	return e.shardInfo(ctx)
+	defer release(&err)
+	shards, err = e.shardInfo(ctx)
+	// A probe's failure is recorded on its row, not returned, so a probe Shutdown cancelled would read as a shard down.
+	if shutErr := shutdownErr(ctx); shutErr != nil {
+		return nil, shutErr
+	}
+	return shards, err
 }
 
 // Await blocks until a flow stops, then returns its outcome. Running out of time is an error; the flow is
@@ -1544,10 +1563,11 @@ func (e *Engine) ShardInfo(ctx context.Context) (shards []ShardSummary, err erro
 // A wait that runs out - the ctx's deadline or that fallback budget - returns a 408 error that satisfies
 // errors.Is(err, context.DeadlineExceeded).
 func (e *Engine) Await(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "await")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "await", &err)
+	defer release(&err)
 	return e.awaitStopped(ctx, flowKey)
 }
 
@@ -1559,11 +1579,19 @@ func (e *Engine) Await(ctx context.Context, flowKey string) (outcome *workflow.F
 // The ctx deadline IS the budget, so pass one; without it Poll blocks on the same long fallback budget as
 // Await before answering, which is rarely what a polling caller wants.
 func (e *Engine) Poll(ctx context.Context, flowKey string) (outcome *workflow.FlowOutcome, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "poll")
+	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "poll", &err)
-	return e.await(ctx, flowKey)
+	defer release(&err)
+	outcome, err = e.await(ctx, flowKey)
+	if err == nil && !outcome.Stopped() {
+		// Not stopped means the caller's budget ran out; a wait Shutdown ended is a 503.
+		if shutErr := shutdownErr(ctx); shutErr != nil {
+			return nil, shutErr
+		}
+	}
+	return outcome, err
 }
 
 // Run creates, starts, and awaits a flow in one call, returning the new flow's key alongside its outcome
@@ -1579,10 +1607,11 @@ func (e *Engine) Poll(ctx context.Context, flowKey string) (outcome *workflow.Fl
 // with Await, a wait that runs out returns a 408 error that satisfies errors.Is(err,
 // context.DeadlineExceeded).
 func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, opts *workflow.FlowOptions) (flowKey string, outcome *workflow.FlowOutcome, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "run")
+	if err != nil {
 		return "", nil, errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "run", &err)
+	defer release(&err)
 	return e.run(ctx, workflowURL, initialState, opts)
 }
 
@@ -1597,9 +1626,10 @@ func (e *Engine) Run(ctx context.Context, workflowURL string, initialState any, 
 // key or additionalState holding an invalid field name (workflow.IsValidFieldName) or text the database cannot
 // store, and 409 for a flow that is not completed or is scheduled for deletion.
 func (e *Engine) Continue(ctx context.Context, flowKey string, additionalState any) (nextKey string, err error) {
-	if err := e.ensureStarted(); err != nil {
+	ctx, release, err := e.admitIngress(ctx, "continue")
+	if err != nil {
 		return "", errors.Trace(err)
 	}
-	defer e.metricIngressOperation(ctx, "continue", &err)
+	defer release(&err)
 	return e.continueFlow(ctx, flowKey, additionalState)
 }

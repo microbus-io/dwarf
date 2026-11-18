@@ -190,17 +190,54 @@ is real complexity for a need that does not arise in practice.
 
 These are methods on `*engine.Engine`.
 
-**Every public operation is gated on a live engine (`ensureStarted` -> 503).** Not a nicety: without it a
+**Every public operation is admitted by `admitIngress` (503 when the engine is not running), and `Shutdown` ends
+every call it admitted before it drains anything (`ingress.go`).** The 503 is not a nicety: without it a
 stopped engine *lies*. The key-addressed operations all route through `ShardSet.Shard`, which returns
 **"flow not found" (404)** when no shard is open - so a stopped engine tells the caller its flow does not
 exist, and the caller may act on that (stop retrying, recreate the work). The cross-shard operations are
 worse: `ListOpen`/`ListClosed`/`Purge`/`ShardInfo` fan out over an **empty index set** and return **success with an empty
-result** - "you have no flows." Both are indistinguishable from the truth; 503 says the one true thing. The
-state is reachable in production, not just by API misuse: `Shutdown` -> `ShardSet.Close` nils the index set,
-so a host still serving while it tears the engine down (or a request in flight when `Shutdown` lands) hits
-it. `pickShard` keeps its **own** no-open-shards guard, because `started` can flip between the gate and the
-pick - and there, indexing the empty index slice (`rand.IntN(0)`) **panicked the host's process**.
-Pinned by `TestPoolSizing_NoOpenShardsIs503`.
+result** - "you have no flows." Both are indistinguishable from the truth; 503 says the one true thing. A host
+still serving while it tears the engine down reaches it, so it is a production state, not API misuse.
+
+A gate alone does not cover a call **already past it** when `Shutdown` lands. Such a call would run on against
+closing shards (the 404 again), and one held in host code across a restart would read the per-run state the next
+`Startup` assigns in place - `e.metrics`, `e.graphs`, the candidate cache's fields - with nothing ordering the reads
+after the writes. So `closeIngress` runs first in `Shutdown` (and in `unwindRuntime`): it flips `started`, cancels
+every admitted call's context with `errIngressShutdown`, and waits until each has returned.
+- **A call it ended returns 503 (`shutdownErr`), decided by the context's cause, not the error:** what a cancelled
+  statement or wait returns varies. So an error the call produced after the cancellation reads 503 too, even one
+  that was the caller's own - a 404 from a host's `LoadGraph` that ignored its ctx - and the caller's retry learns it.
+  A success is never rewritten, which is why a call that **succeeds while reporting a failure** checks the cause
+  itself: `Poll` (its not-stopped answer tells the caller its budget ran out) and `ShardInfo` (a probe's failure is
+  recorded on its row, so a cancelled probe reads as a shard down). A new operation of that shape does the same.
+- **A call cancelled mid-write may have taken effect:** a Create whose commit lands as its reply is cut reports 503
+  for a flow that exists, as a call whose caller gives up does. `Shutdown`'s godoc says so.
+- **The check of `started` and the count-in share `ingressMu` with `closeIngress`.** Checked outside it, a call
+  passes the check, `closeIngress` finds nothing in flight, and the call runs into the next run.
+- **The record of `dwarf_ingress_operations` is made inside `release`, before the call counts out.** After it, its
+  read of `e.metrics` races the next `Startup`'s write again. `-race` does not catch that order reliably (the drain's
+  own reads of the field crowd the released call's out of the detector's history), so
+  `TestIngress_TheCallIsCountedBeforeItLeaves` holds the call inside the counter's `Add` and asserts it is still
+  counted in. The count-out is `release`'s defer, so a panic in the host's meter cannot strand `Shutdown`.
+- **`closeIngress` calls the cancels outside `ingressMu`.** A cancel detaches the call's context from the caller's,
+  which runs the caller's own context code when the caller's context brings its own `AfterFunc`; code that calls
+  the engine would deadlock on the lock.
+- **Each call's cancel is held in admission's own map, not attached to a shared cancellable context with
+  `context.AfterFunc`.** That would register on the shared context's one mutex per call, beside the admission lock,
+  at up to tens of thousands of calls a second; the map rides the two acquisitions of `ingressMu` admission takes
+  anyway. The call's own queries register on its context (pgx's per-query watch, see "Worker context"), which no
+  other call shares, so the cancellable context adds no shared lock to them.
+- **`Shutdown` waits as long as the slowest admitted call takes to notice its cancellation:** a host's `LoadGraph`
+  that ignores its ctx holds it until it returns, as an overrunning task holds the worker drain. A `Shutdown` called
+  from inside a host call waits for that call - itself - forever, as one inside `ExecuteTask` waits on the worker
+  drain. `Shutdown`'s godoc says both.
+- **`pickShard` keeps its own no-open-shards guard** although no admitted call reaches it on closed shards: indexing
+  the empty index slice (`rand.IntN(0)`) **panicked the host's process**, so the guard does not rest on that order.
+
+Pinned by `TestPoolSizing_NoOpenShardsIs503` (operations called after Shutdown) and `engine/ingress_test.go`: a
+Create held in `LoadGraph` ended by Shutdown, a `LoadGraph` that ignores its ctx keeping Shutdown from its drain, an
+Await, a Poll, a Run's await and a ShardInfo ended with a 503, and the count recorded while the call is still
+counted in. Each restarts the engine after Shutdown, under `-race` in the gate.
 
 **Policy is set once at genesis and inherited by derivation; the operation is the inherit-vs-default selector.**
 A flow's policy (priority, fairness, time budget, baggage) is authored
@@ -2486,12 +2523,14 @@ boundaries: when the budget (rather than the caller's ctx) expires, **`ctx.Err()
 beside a nil outcome. Either way the 408 satisfies `errors.Is(err, context.DeadlineExceeded)`. Pinned by
 `TestAwait_DefaultBudgetIsADeadlineError`.
 
-**Shutdown closes the board**, which wakes every parked caller with `latch.ErrClosed` and `await` turns into a
-503. `drainRuntime` stops the detector *before* closing the board (a `Sweep` in flight is not interrupted by
-`Close`) and closes it before `e.db.Close()`, so no wake path touches a closing database. A caller already
-holding a released status keeps it - the closure travels the same one-slot channel as a status and cannot
-displace one - so a flow that stopped microseconds before shutdown still returns its outcome. Pinned by
-`fixtures/awaitshutdownflow_test.go`.
+**Shutdown ends a parked caller by cancelling its call** (`closeIngress`, before the drain; see "Every public
+operation is admitted"): the park returns on its ctx and the call returns 503, for `Poll` as well. A flow that stops
+as Shutdown lands can lose its outcome to that 503 - the park picks between a delivered status and the cancelled ctx,
+and the read after a release runs on the cancelled ctx - and the caller's retry reads it. `drainRuntime` later closes
+the boards, which nothing is parked on by then: a closed board turns away a park with `latch.ErrClosed`, which `await`
+also returns as a 503. It stops the detector *before* closing the board (a `Sweep` in flight is not interrupted by
+`Close`) and closes it before `e.db.Close()`, so no wake path touches a closing database. Pinned by
+`fixtures/awaitshutdownflow_test.go` and `TestIngress_ShutdownEndsTheWaits`.
 
 **One board and one detector per shard, never one board swept across the shards.** A cross-shard pass is a
 barrier: it releases nothing until its slowest shard answers, so a shard waiting on a saturated turnstile or a
@@ -3364,17 +3403,19 @@ per the Prometheus naming convention.
 **`dwarf_ingress_operations{op, status_code}` counts calls and `dwarf_shard_operation_seconds{op, shard}` times shards;
 keep them two instruments.** The histogram is recorded at each turn's release (`opTurn`), so a call that takes no
 turn - a bad request, a failed graph load - leaves no sample, a call across shards leaves one per shard, and nothing
-records how a call ended. The counter is recorded once per call, by a `metricIngressOperation` deferred over the
-named error result of every exported operation. Folding the outcome into the histogram instead would still miss the
+records how a call ended. The counter is recorded once per call, by the `release` `admitIngress` hands every exported
+operation, deferred over its named error result. Folding the outcome into the histogram instead would still miss the
 calls that take no turn and still count per shard.
 
 - **One count per call holds because no exported operation calls another**, and nothing in the engine calls one:
   internal paths call the lower-case half (`create`, `snapshot`, `awaitStopped`). A new exported operation adds its
   own record.
-- **The record is deferred AFTER `ensureStarted`**, so a call to an engine that is not running is not counted. The
-  gate is what makes the read of `e.metrics` safe: `initRuntime` writes it before storing `started`, so a call that
-  saw `started` sees the instruments, while a refused call may run beside a `Startup` that is writing them. Little
-  is lost: before the first `Startup` there is no meter, and after `Shutdown` the replica is leaving.
+- **Only an admitted call is counted**, so a call to an engine that is not running is not. Admission is what makes
+  the read of `e.metrics` safe: `initRuntime` writes it before storing `started`, so a call that saw `started` sees the
+  instruments, and `release` records before the call counts out, so the next `Startup` writes them only after (see
+  "Every public operation is admitted"). A refused call may run beside a `Startup` that is writing them. Little is
+  lost: before the first `Startup` there is no meter, and after `Shutdown` the replica is leaving. A call `Shutdown`
+  ended counts as the 503 it returns.
 - **`status_code` is read from the caller's context before the error** (`ingressStatus`): cancelled is 499, a passed
   deadline 408, whatever error giving up produced; otherwise `errors.StatusCode`, 500 when the error carries none.
   What a caller's timeout produces varies - a driver's error, the turnstile's, Await's 408 - so classified by the
@@ -3998,10 +4039,11 @@ against a ~1.5M/s ceiling - inside the connection hold, since pgx watches during
 crew a cancelable ctx (per-worker children included) to "let shutdown reach the workers"**: the drain's stop
 signals are the cache, the gate and `drainStop`, and a per-step deadline belongs on a per-step ctx.
 
-### Shutdown ordering: janitors, then workers, then archive/latch, then the pistons, then the Sonars
+### Shutdown ordering: the calls in flight, then janitors, then workers, then archive/latch, then the pistons, then the Sonars
 
 There is no timer goroutine and no wake channel to close (see "A cycle is UNCONDITIONAL"), so no send can
-race a close and panic a worker mid-`processStep`. `drainRuntime`:
+race a close and panic a worker mid-`processStep`. `Shutdown` runs `closeIngress` first - every call to an exported
+operation it admitted is cancelled and returned (see "Every public operation is admitted") - and then `drainRuntime`:
 
 ```
 close(drainStop)                             // a worker asleep in a persist backoff releases its lease and exits
@@ -4018,7 +4060,7 @@ latchCancel();       latchWorker.Wait()    // the detectors stop before the boar
 pistonCancel();      pistonPool.Wait()   // ctx is the pistons' only stop signal
 sonarCancel();       sonarPool.Wait()    // ditto - and they must outlive the pistons
 leaveFleet()                             // only now is the last possible beat behind us
-every latch board Close(); lifetimeCancel()
+every latch board Close(); lifetimeCancel()   // no Await is parked by now: closeIngress ended them
 ```
 
 **The janitors stop BEFORE the workers drain, and that ordering is load-bearing.** A janitor's statement has no

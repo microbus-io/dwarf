@@ -250,7 +250,7 @@ func (e *Engine) initMetrics() error {
 	m.shardOperationSeconds = shardOperationSeconds
 	// One count per call, recorded on the way out of each exported operation, never in opTurn: a call that fails
 	// before its turn - a bad request, a failed graph load - takes none, and a call across shards takes one per shard.
-	m.ingressOperations = ctr("dwarf_ingress_operations", "Counts calls to the engine's API, by operation (op) and by how each ended (status_code): 200 for success, else the status code of the error the caller got - 4xx for the caller's request (malformed, unknown, in conflict with the flow's state), 5xx for the database or the engine, 500 for an error that carries no status, such as a lost connection. A call whose caller cancelled its context counts as 499, and one whose caller's deadline passed as 408, whatever error that produced, so a caller giving up never counts as a server error. A call made while the engine is not running - before Startup, after Shutdown - is not counted. One count per call however many shards it touched, so this is the call rate, where dwarf_shard_operation_seconds is the time spent on each shard. A Create whose flow was committed but whose reply was lost counts as the error the caller saw. Await and Run return a 408 when their wait runs out, which is normal for a long flow, so split by op before alerting on errors.")
+	m.ingressOperations = ctr("dwarf_ingress_operations", "Counts calls to the engine's API, by operation (op) and by how each ended (status_code): 200 for success, else the status code of the error the caller got - 4xx for the caller's request (malformed, unknown, in conflict with the flow's state), 5xx for the database or the engine, 500 for an error that carries no status, such as a lost connection. A call whose caller cancelled its context counts as 499, and one whose caller's deadline passed as 408, whatever error that produced, so a caller giving up never counts as a server error. A call made while the engine is not running - before Startup, after Shutdown - is not counted, and one Shutdown ends counts as 503. One count per call however many shards it touched, so this is the call rate, where dwarf_shard_operation_seconds is the time spent on each shard. A Create whose flow was committed but whose reply was lost counts as the error the caller saw. Await and Run return a 408 when their wait runs out, which is normal for a long flow, so split by op before alerting on errors.")
 	m.turnWait = turnWait
 	m.gateWait = gateWait
 	m.stepsOffered = ctr("dwarf_steps_offered", "Counts steps admitted to this replica's candidate cache by the DOORBELL rather than selected by a refill cycle - a step whose predecessor just completed, taking the slot it vacated. Read against dwarf_refill_candidates_selected it is the share of dispatch that came from step origination instead of from the weighted fairness plan; a high share is normal under load (a partition that drains to empty between cycles admits the next step at once) and is what keeps a sequential chain from paying a cycle per hop.")
@@ -597,9 +597,10 @@ func (e *Engine) metricShardOperation(ctx context.Context, op string, shardNum i
 	e.metrics.shardOperationSeconds.Record(ctx, d.Seconds(), opts.rec...)
 }
 
-// metricIngressOperation counts one call to an exported operation by how it ended (dwarf_ingress_operations). Each
-// exported operation defers it over its named error result once it passes ensureStarted, which orders the read of
-// e.metrics after initMetrics wrote it; no operation calls another, so every call counts once.
+// metricIngressOperation counts one call to an exported operation by how it ended (dwarf_ingress_operations). The release
+// that admitIngress hands each exported operation calls it while the call is still admitted, which orders the read of
+// e.metrics after initMetrics wrote it and before the next Startup writes it; no operation calls another, so every call
+// counts once.
 func (e *Engine) metricIngressOperation(ctx context.Context, op string, err *error) {
 	if e.metrics == nil {
 		return

@@ -30,12 +30,8 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
-// TestAwaitShutdownflow pins closure of the latch board for Await. A waiter blocked on a flow that is still
-// running when the engine shuts down must be released with a shutting-down error, and promptly.
-//
-// A wake that merely means "look again" is NOT enough here, and that is what this pins: the flow is still
-// running, so a re-read finds it running and the waiter parks again - on a board nothing will ever release,
-// against a database that is closing under it. Only a wake that says CLOSED ends the wait. Without it the
+// TestAwaitShutdownflow pins that Shutdown releases an Await blocked on a flow that is still running, with a
+// shutting-down error, and promptly. Shutdown ends every call it admitted before it drains anything; without that the
 // caller escapes solely on its own ctx, which is the hang this test exists to catch.
 // NOT t.Parallel: asserts an upper-bound reaction latency (Await returns < 2s after Shutdown), which CPU oversubscription
 // from co-running parallel tests can inflate past the bound.
@@ -88,11 +84,9 @@ func TestAwaitShutdownflow(t *testing.T) {
 		done <- awaitResult{out, aerr}
 	}()
 
-	// The Await must be ON the board before Shutdown closes it - a waiter registered after the wake loop
-	// would never see the sentinel, so the test would be timing a caller that was never released at all.
-	// Rendezvous, not a sleep: a sleep long enough to make this likely still degrades into its opposite on
-	// a slow machine, and does so silently, because a late-registering Await is turned away by the closed
-	// board with the very ErrClosed the assertions below are looking for.
+	// The Await must be blocked before Shutdown lands, or the test times a caller that was never released at all.
+	// Rendezvous, not a sleep: a sleep long enough to make this likely still degrades into its opposite on a slow
+	// machine.
 	select {
 	case <-parked:
 	case <-time.After(30 * time.Second * enginetest.TimeoutScale()):
@@ -103,19 +97,19 @@ func TestAwaitShutdownflow(t *testing.T) {
 	if !assert.NoError(eng.Shutdown(ctx)) {
 		return
 	}
-	// Time the wait from when Shutdown RETURNS, not from before it. The release travels with the board close
-	// INSIDE drainRuntime, so a healthy waiter is normally already back before Shutdown returns and this reads
-	// ~0. Timing across Shutdown instead folds in Shutdown's own duration - draining workers, pistons and
-	// connections against the database - which is unbounded on a loaded server (measured 3.09s on SQL Server,
-	// tripping a 2s bound) and is not what this test pins. The non-parallel note above addresses CPU
-	// oversubscription; it does not protect against server latency, which is why the start point has to move.
+	// Time the wait from when Shutdown RETURNS, not from before it. Shutdown ends the Await before it drains,
+	// so a healthy waiter is already back before Shutdown returns and this reads ~0. Timing across Shutdown
+	// instead folds in Shutdown's own duration - draining workers, pistons and connections against the
+	// database - which is unbounded on a loaded server (measured 3.09s on SQL Server, tripping a 2s bound) and
+	// is not what this test pins. The non-parallel note above addresses CPU oversubscription; it does not
+	// protect against server latency, which is why the start point has to move.
 	shutDone := time.Now()
 
 	select {
 	case res := <-done:
 		// The waiter must be released with an error (not a nil-error stopped outcome), and specifically the
-		// shutting-down one - the reliable discriminator. A wake carrying only a status would send Await back
-		// to re-read a still-running flow and re-park, surfacing a ctx-timeout or a DB-closed error instead.
+		// shutting-down one - the reliable discriminator: a waiter that escaped some other way surfaces a ctx
+		// timeout or a DB-closed error instead.
 		assert.Nil(res.out)
 		if assert.Error(res.err) {
 			assert.Contains(res.err.Error(), "shutting down")

@@ -120,12 +120,15 @@ func init() {
 	accessors.SetArchiveGrace = func(eng any, d time.Duration) error { return eng.(*Engine).setArchiveGrace(d) }
 	accessors.SetStageRows = func(eng any, n int) error { return eng.(*Engine).setStageRows(n) }
 	accessors.SetStageBytes = func(eng any, n int) error { return eng.(*Engine).setStageBytes(n) }
-	accessors.ListLive = func(eng any, ctx context.Context, query workflow.Query) ([]workflow.FlowSummary, error) {
+	accessors.ListLive = func(eng any, ctx context.Context, query workflow.Query) (summaries []workflow.FlowSummary, err error) {
 		e := eng.(*Engine)
-		if err := e.ensureStarted(); err != nil {
+		ctx, release, err := e.admitIngress(ctx, "")
+		if err != nil {
 			return nil, err
 		}
-		return e.listLive(ctx, query, slices.Concat(openStatuses, database.TerminalStatuses), "list_open")
+		defer release(&err)
+		summaries, err = e.listLive(ctx, query, slices.Concat(openStatuses, database.TerminalStatuses), "list_open")
+		return summaries, err
 	}
 	accessors.ArchiveNow = func(eng any, ctx context.Context) {
 		e := eng.(*Engine)
