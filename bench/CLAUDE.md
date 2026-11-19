@@ -178,6 +178,11 @@ sweep delivered ~100% of command, including one whose p99 was 62 SECONDS) — **
 collapsed arm has been bracketed by working pools on both sides - **never place a stability boundary from a
 collapsed arm**.
 
+**The rig's standard arm is 2 min of warmup and a 6-minute window (user, 2026-11-06)**, shorter than the 10 minutes
+above: on saturated arms with nothing stalling, a 2-minute slice of a 0 B run landed within ~2% of its 6-minute mean,
+while payload arms swung 15-45% per 10 s sample with the checkpoint cycle and a 2-minute slice missed by up to
+10-20%. Read a payload arm over its whole window, and give an arm that looks for a stall the longer one.
+
 **The run-to-run noise floor is ~5-12% and rig-dependent - establish it before reading any curve.** Two
 same-spec 64-vCPU instances measured 25,366 and 28,491 steps/s at one pool; two 16-vCPU rigs 7,296 and 8,342.
 Only within-rig comparisons resolve anything finer.
@@ -276,8 +281,8 @@ and Cloud SQL's private services range.
 - **`real-rig.sh`:** REAL, a day on one database: a draw check, the mix's calibration, then three 90-minute periods
   on two c4a-8 replicas with a rolling restart, verified against the database at the end.
 - **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `vrows-step.sh` and `vbytes-step.sh`
-  are V's two axes, on `x-rig.sh` with a 1 TB and a 2 TB disk. `*-step.sh` are the arms each
-  campaign used, with their pass criteria in the header.
+  are V's two axes, on `x-rig.sh` with a 1 TB and a 2 TB disk. `*-step.sh` are the campaigns, catalogued
+  below, each with its launch line, arms and pass criteria in its header.
 - **Drivers** run a whole campaign on the admin host, each with its own RTT gate, a fresh database per arm and a
   summary: `cell.sh` (one cell of the tier x RTT grid, below), `rttderived.sh` (an RTT ladder at the pool the engine
   derives), `replicaladder.sh` (R in-process replicas sharing a shard at a fixed total concurrency), `taskdelay.sh`
@@ -305,6 +310,42 @@ and Cloud SQL's private services range.
   artifact mode spans the artifact's start to end - warmup, window and drain - padded 60 s each side, and the idle
   edges dilute it: the two 2026-11-06 32 vCPU draws read 0.87 and 0.89 core-ms/step that way and 1.03 and 1.26 over
   their windows, which hid that the slow one was slower on CPU too.
+
+**What each script measures**, and the section of [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/)
+or [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/) that rests on it:
+
+| Script | Measures | Published in |
+|---|---|---|
+| `xp-rig.sh` | one saturated shard at a database size, served by two engine hosts | Database Size |
+| `s2-rig.sh` | 4, 2 and 1 shards, on one engine host and on several | Shards; One Engine for Several Shards |
+| `real-rig.sh` | a day of varied load on one database, with a rolling restart | A Day of Varied Load |
+| `clock-rig.sh` | the database clock stepped under load, against the lease fence | Database Clock Steps |
+| `hs-step.sh` | a build on the standard rig: the 0 B headline, archiving's cost and whether it and fast deletion keep up, wide fan-outs beside a background, and (`DARM=1`) a database failover | Database Failover |
+| `hw-step.sh` | whether the fan-in hold keeps a wide `forEach` of instant tasks from growing the crew, and the live tables' fillfactor | Wide Fan-Outs |
+| `ha-step.sh` | the archived 0 B headline with a stall check, then 8 KB JSON at the WAL settings | Minute by Minute; Payload Size; Checkpoints |
+| `hb-step.sh` | the shipped pool (250) against 500, and at 64 KB `wal_buffers` 64 MB and a 2 TB disk | - |
+| `keepup-step.sh` | whether archiving keeps up with a saturated shard, and what it costs dispatch | - |
+| `va-step.sh` | the archive under load: one day to 100M step rows, short days rolling over and dropping, archived reads beside load, 100% and 95% of the saturated rate, lz4 at 1 MB | Sustained Load; Database Volume |
+| `vrows-step.sh`, `vbytes-step.sh` | a saturated database as `dwarf_steps` grows past 200M rows, and past 500 GB, with nothing deleted | - |
+| `h-step.sh` | the sustainable rate, walking down from the saturated rate (below) | - |
+| `h90-step.sh` | 95% against 90% of the saturated rate on one instance: how much smoother 90% runs | - |
+| `t64-step.sh` | the 64 vCPU tier on one engine host, at the shipped budget and at 500 connections | - |
+| `m-step.sh` | mixed task durations on one crew at a fixed 1,000 flows/s | Long Tasks |
+| `z-step.sh` | the largest state a step carries: `state` up to 250 MB a step, one and four flows at a time | State Size |
+| `burst-step.sh`, `burst.sh` | whether the crew shrinks back when tasks stop being long, and throughput recovers | - |
+| `cell.sh` | one cell of the tier x RTT grid: the peak at the derived pool, a pool sweep at 2/3 of it, a confirming peak | Network Distance; How the Connection Budget Was Chosen |
+| `rttderived.sh` | throughput across RTTs at the pool the engine derives | - |
+| `replicaladder.sh` | R = 1, 2, 4, 8 in-process replicas on one shard: whether the budget split holds and the refiller survives it | - |
+| `taskdelay.sh` | throughput at 0, 1 and 8 s tasks at a commanded rate | - |
+
+Replicas and Failover rest on rigs the kit does not hold. The helpers the orchestrators copy to their hosts: `g-run.sh`
+(one bench run from a start time), `fsync.sh` (the WAL flush floor), `rtt.sh` (the round trip per DSN), the
+monitors that sample beside an arm - `s-mon.sh` (commits, WAL, waits, checkpoints, the oldest snapshot), `v-mon.sh`
+(sizes, dead tuples, autovacuum, cache hits), `age-mon.sh` (the oldest closed root not archived), `slow-mon.sh`
+(statements active over 500 ms), `rss-mon.sh` (each bench process's RSS), `clk-mon.sh` (the database clock's offset)
+- and `ck-check.sh` (a clock arm's end state), `inject.sh` (wide fan-outs from an await-only process), `ff-set.sh` (a
+table's fillfactor once the migrations made it), `pgss-chunk.sh` (the janitor's chunk statements) and
+`pgvm-setup.sh` (PostgreSQL on a VM, for the clock rig).
 
 Operational traps on Cloud SQL + GCE, each of which has cost a run.
 
@@ -365,6 +406,12 @@ creation-limited rather than dispatch-limited.
 instrument — the signal is whether completions keep up and whether the backlog diverges — but only with
 real headroom. At 75% of ceiling an RTT blip pushes the ceiling below the command and the control arm stops
 being a control.
+
+**To find the sustainable rate, walk DOWN from saturation and stop at the first rung that holds (user,
+2026-10-18).** First a saturated calibration on the same instance - "100%" is that instance's own mean, since
+same-spec instances differ by up to ~12% - then commanded rungs at 100, 95, 90 and 85% of it. A rung holds when
+delivered steps/s is at least 99% of the command and the backlog drains (`cell.sh`'s verdict: the outstanding
+floor of the last two minutes at most max(1000, 5x) that of the first two). `h-step.sh` does it.
 
 **Closed-loop hides things open-loop shows.** Closed-loop makes starts ≡ completions by construction, so
 `dwarf_flows_started` cannot distinguish a saturated CALLER from a saturated engine; only a commanded
@@ -442,6 +489,23 @@ the run comes back `valid: false` with 1,425 errors rather than a flattering num
 document instead of passing it along. Storage is identical in both arms, so a byte number that moves with
 this flag means the workload is not carrying what it thinks it is; what it does move is the in-flight
 held-state gauges (`dwarf_state_in_flight_bytes` / `_steps`).
+
+**To compare shapes, fix what the workflow author controls and measure what the engine does with it.** Hold steps
+per flow equal (10: `fanout` at width 8 is Split, 8 branches and Join) and the bytes the tasks produce per flow -
+size payloads by what a task writes, never by what is stored. Measure stored bytes per flow and WAL bytes per
+step; stored over produced is the amplification, itself a result. Compare steps/s, MB/s and amplification across
+shapes, and latency only within one: the critical path is 10 hops for `linear` and 3 for `fanout`.
+
+| `-workload` at `-payload P` | who writes P | task bytes per flow | represents |
+|---|---|---|---|
+| `linear` | each of the 10 tasks, fresh, to `data` | 10P | a document transformed step by step |
+| `fanout`, width 8 | Split, each branch and Join, fresh (`replace`) | 10P | the same per-step write in another shape |
+| `scatter`, width 8, depth 1 | Split writes 8 elements of P; each branch reads its own | 8P | doc -> pages, stored once with item refs |
+| `scatter`, width 4, depth 2 | the same, branches two steps deep | 4P | multi-step branches |
+
+**`scatter` must read about one anchor per replica per cohort, not one per branch** - read
+`dwarf_state_read_bytes{column=state_ref}` per flow, at width 64 as well as 8. About width x the array's bytes per
+flow means the anchor is evicted between sibling dispatches: fix that before quoting a number.
 
 ## Measuring a crew that only shrinks when load falls
 
@@ -605,6 +669,41 @@ soak's opening collection, so a missing reading at either end reads as zero alar
 at a checkpoint. Polled, the count is a full scan of both tables that holds a snapshot for its whole run, and
 at a size where it outlasts its timeout the fill never reaches a checkpoint at all.
 
+## Modes and workloads
+
+**A run is one mode** (`main.go`), and writes one artifact:
+- **The sweep**, the default: a warmup (`-warmup`, discarded) and a window (`-window`) at each `-concurrency` value,
+  closed loop - each submitter awaits its flow before creating the next.
+- **Open loop** (`-open-loop -arrival-rate N -max-outstanding M`): the sweep's creators fire at a commanded rate
+  without awaiting, so the backlog can outgrow the goroutine count; `-arrival-rate 0` is flat out, bounded by
+  `-max-outstanding`.
+- **`-volume N`**: fills to N step rows with nothing deleted, probing the read paths every `-volume-checkpoint` rows
+  (one fifth of N by default) or at `-volume-checkpoints`, then measures one `Purge` on the archive side.
+- **`-soak D`**: Create, Run and Await, Interrupt and Resume, and Continue, under create-purge churn for D, sampling
+  goroutines, heap, row counts and the alarm counters every `-soak-sample` (30 s). It asks whether anything drifts
+  or wedges, not how fast anything runs; the alarm counters must stay at zero.
+- **`-real D`**: a schedule rather than a window (below).
+- **`-print-pool RTT`**: prints the budget the engine derives, and exits.
+
+Beside any of them, `-archived-readers N` runs N goroutines that read archived flows' `History` (keys from
+`ListClosed`) for the whole run: the read load callers put on the archive - on PostgreSQL, lock-manager pressure -
+reported as `archivedReads`.
+
+**The workloads** (`-workload`; `registerWorkloads` in `workloads.go` holds each one's detail):
+
+| Workload | Shape | Steps a flow | What it is for |
+|---|---|---|---|
+| `linear` | a chain of `-linear-steps` (10) | 10 | dispatch and transaction cost: the steps/s floor |
+| `fanout` | Split, a `forEach` of `-fanout-width`, Join | width + 2 | cohort accounting and flow-row contention; a backlog deeper than a closed loop's concurrency |
+| `scatter` | Split writes width elements, each branch reads its own, `-branch-depth` deep | width x depth + 2 | the doc -> pages shape item refs serve |
+| `state` | 5 steps, each rewriting a `-payload` field | 5 | irreducible write volume (MB/s) |
+| `carry` | the payload written once, as initial state, then carried | 10 | what state refs save on a carried field |
+| `carryfanout` | that payload carried across a fan-out's branches | 2 x width + 2 | the carry across width branches |
+| `loop` | each step appends one message to `messages`, an append reducer | 10 | an agent loop whose history grows |
+| `loopreplace` | the same loop with no reducer: each task writes the whole history | 10 | the loop written without reducers |
+| `llm` | one step | 1 | a flow's time is its `-task-delay`: minutes-long tasks, the worker ceiling |
+| `mixed` | `linear`, `fanout` or `state` per flow, 70 / 20 / 10% | - | a fixed blend; `-mix` gives each class its own payload and shape |
+
 ## Flags worth knowing
 
 `-payload P` (fresh incompressible bytes per `linear`/`fanout` task, the element size of `scatter`; 0 = none
@@ -638,7 +737,10 @@ the live probes; `live` runs every flow under a root that interrupts and is neve
 the archive moves a tree only once its root closes), `-volume-checkpoints-mb` (the stored sizes it probes at instead, PostgreSQL only - the
 axis for a bytes fill: two 0 B probes on an empty database wrote ~15M small step rows, twice a 512 GB fill of
 64 KB rows, so a row-keyed ladder for bytes is consumed by the probes before the fill starts),
-`-volume-probe-two-thirds=false` (one saturated probe per checkpoint instead of two windows).
+`-volume-probe-two-thirds=false` (one saturated probe per checkpoint instead of two windows), `-volume-probe-workload`
+(the workload those probes run, `linear` by default, which need not be the fill's: a bytes fill is `state`),
+`-task-jitter D` (a uniform random [0, D) added to every task's sleep, so a cohort's branches do not all complete at
+once), `-weights 1=1,2=0.8` (`ShardSpec.Weight` per shard; an unlisted shard weighs 1).
 
 **`-real D` runs a schedule, not a window.** `-arrival-profile` (levels and ramps in fleet steps/s) and
 `-arrival-bursts` repeat every period, with seeded per-minute `-arrival-noise` and Poisson arrivals, plus a
