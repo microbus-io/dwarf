@@ -16,36 +16,37 @@ limitations under the License.
 
 package database
 
-// SeekPrimaryKey is the seek, for UpdateSQL and DeleteSQL, on the primary key of a table whose key column is column:
-// SeekPrimaryKey("flow_id") for dwarf_flows, an archive day's flows table or the directory, SeekPrimaryKey("step_id")
-// for dwarf_steps or a day's steps table.
-func SeekPrimaryKey(column string) string {
-	return "1(" + column + ")"
+import (
+	"regexp"
+
+	"github.com/microbus-io/errors"
+	"github.com/microbus-io/sequel"
+)
+
+func init() {
+	sequel.RegisterVirtualFunc("SEEK_FROM", seekFrom)
 }
 
-// SeekIndex is the seek, for UpdateSQL and DeleteSQL, on the index of table named idx_<table>_<suffix>, whose leading
-// column is column: SeekIndex("dwarf_steps", "flow_id", "flow_id"), SeekIndex("dwarf_flows", "root", "root_flow_id").
-// A day's archive tables name their indexes the same way.
-func SeekIndex(table, suffix, column string) string {
-	return "idx_" + table + "_" + suffix + "(" + column + ")"
-}
+// seekFromArgs is the shape of SEEK_FROM's arguments: a table, then an index as FORCESEEK names it - an index name, or
+// an index id (1 is the clustered primary key) - with its leading column in parentheses.
+var seekFromArgs = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*|[0-9]+)\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*$`)
 
-// UpdateSQL returns an UPDATE that sets set on the rows of table that where matches. On SQL Server it reaches them by
-// a seek on the index seek names (SeekPrimaryKey, SeekIndex), so where must restrict that index's leading column by =
-// or IN, and set may end with an OUTPUT clause. Elsewhere it is the plain statement, to which a caller appends a
-// RETURNING clause. Either may name the table, as a correlated subquery does.
-func UpdateSQL(driverName, table, seek, set, where string) string {
-	if driverName == "mssql" {
-		return "UPDATE " + table + " SET " + set + " FROM " + table + " " + table + " WITH (FORCESEEK(" + seek + ")) WHERE " + where
+// seekFrom expands the virtual function SEEK_FROM(table, index(column)), which an UPDATE or DELETE places where SQL
+// Server takes a FROM clause: after SET (and OUTPUT), before WHERE, and in a DELETE after DELETE FROM table.
+//
+//	UPDATE dwarf_steps SET status=? SEEK_FROM(dwarf_steps, 1(step_id)) WHERE step_id IN (...)
+//	DELETE FROM dwarf_flows SEEK_FROM(dwarf_flows, idx_dwarf_flows_root(root_flow_id)) WHERE root_flow_id IN (...)
+//
+// On SQL Server it is FROM table WITH (FORCESEEK(index(column))): the statement reaches its rows by a seek on that
+// index, so the WHERE clause must restrict column by = or IN, and table must be the statement's own target. On every
+// other driver it is nothing. Its arguments are checked on every driver, so a malformed call fails wherever it runs.
+func seekFrom(driverName string, args string) (string, error) {
+	m := seekFromArgs.FindStringSubmatch(args)
+	if m == nil {
+		return "", errors.New("SEEK_FROM requires syntax: SEEK_FROM(table, index(column))")
 	}
-	return "UPDATE " + table + " SET " + set + " WHERE " + where
-}
-
-// DeleteSQL returns a DELETE of the rows of table that where matches. On SQL Server it reaches them by a seek on the
-// index seek names, as UpdateSQL does.
-func DeleteSQL(driverName, table, seek, where string) string {
-	if driverName == "mssql" {
-		return "DELETE " + table + " FROM " + table + " " + table + " WITH (FORCESEEK(" + seek + ")) WHERE " + where
+	if driverName != "mssql" {
+		return "", nil
 	}
-	return "DELETE FROM " + table + " WHERE " + where
+	return "FROM " + m[1] + " WITH (FORCESEEK(" + m[2] + "(" + m[3] + ")))", nil
 }

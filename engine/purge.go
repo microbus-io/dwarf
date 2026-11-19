@@ -143,8 +143,8 @@ func (e *Engine) markArchived(ctx context.Context, db *sequel.DB, day int, roots
 		var k int64
 		ph, args := database.IDList(ids[:n])
 		err := db.Transact(ctx, func(tx *sequel.Tx) error {
-			res, err := tx.ExecContext(ctx, database.UpdateSQL(tx.DriverName(), flows, database.SeekPrimaryKey("flow_id"), "delete_after_ms=1",
-				"flow_id IN ("+ph+") AND surgraph_flow_id=0 AND delete_after_ms=0"), args...)
+			res, err := tx.ExecContext(ctx, "UPDATE "+flows+" SET delete_after_ms=1"+
+				" SEEK_FROM("+flows+", 1(flow_id)) WHERE flow_id IN ("+ph+") AND surgraph_flow_id=0 AND delete_after_ms=0", args...)
 			if err != nil {
 				return err
 			}

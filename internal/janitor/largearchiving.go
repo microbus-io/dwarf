@@ -697,8 +697,8 @@ func (c *stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, fi
 		}
 		c.inserted(res)
 		// A replaced attempt moves a flow's directory row from the dropped day to this one.
-		if _, err := tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), archiver.DirectoryTable, database.SeekPrimaryKey("flow_id"),
-			"flow_id IN ("+list+") AND day<>"+strconv.Itoa(c.day)), args...); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+
+			" SEEK_FROM("+archiver.DirectoryTable+", 1(flow_id)) WHERE flow_id IN ("+list+") AND day<>"+strconv.Itoa(c.day), args...); err != nil {
 			return errors.Trace(err)
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO "+archiver.DirectoryTable+" (flow_id, day) SELECT flow_id, "+

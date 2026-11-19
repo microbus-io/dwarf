@@ -1925,7 +1925,7 @@ func (e *Engine) resolveCohort(ctx context.Context, d *dispatch, tx *sequel.Tx, 
 		// Chunked, since a forEach has as many exits as branches; the chunks share the batch.
 		for chunk := range slices.Chunk(exits, inListChunk) {
 			ph, ids := inList(chunk)
-			batch.queue(execOnly, database.UpdateSQL(tx.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), "successor_id="+fanInID, "step_id IN ("+ph+")"),
+			batch.queue(execOnly, "UPDATE dwarf_steps SET successor_id="+fanInID+" SEEK_FROM(dwarf_steps, 1(step_id)) WHERE step_id IN ("+ph+")",
 				append(append([]any{}, fanInArgs...), ids...)...)
 		}
 		return nil

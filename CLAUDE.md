@@ -107,7 +107,7 @@ matching one before working there:**
   lost-reply test. A new transaction or state transition updates it.
 - **`internal/database/CLAUDE.md`** - the sharded SQL connections (`ShardSet`) and the `Shard` handle every actor on
   a shard is given (its database, turns, residue class and server measurements): SQL-dialect guidance, SQL Server's
-  seeking writes (`UpdateSQL`/`DeleteSQL`), shard-count
+  seeking writes (`SEEK_FROM`), shard-count
   sizing + shard-per-server topology, the connection lifecycle, and the sharding *mechanics* (1-indexed routing,
   parallel `OnEach` fan-out, DSN/test-mode resolution). The pool-sizing *formula* and sharding *semantics* stay in
   `engine/CLAUDE.md`.
@@ -211,10 +211,10 @@ matching one before working there:**
   SQL Server / SQLite filtered index (and, for the lists' `ORDER BY ... LIMIT`, the cardinality estimate). A
   caller-supplied status (`Query.Status`) is validated with `workflow.IsValidStatus` then inlined.
   Exception: `SET status=?` assignments stay bound. (`internal/migrations/CLAUDE.md`)
-- **Writes by ids seek on SQL Server:** an `UPDATE` or `DELETE` whose `WHERE` is not one primary-key equality is
-  built with `database.UpdateSQL`/`DeleteSQL`, naming the index it seeks. Otherwise SQL Server scans a small table
-  and waits on every row another transaction holds, even under `READ_COMMITTED_SNAPSHOT`, and two such writes
-  deadlock. (`internal/database/CLAUDE.md`)
+- **Writes by ids seek on SQL Server:** an `UPDATE` or `DELETE` whose `WHERE` is not one primary-key equality
+  carries `SEEK_FROM(table, index(column))` before its `WHERE`, naming the index it seeks. Otherwise SQL Server
+  scans a small table and waits on every row another transaction holds, even under `READ_COMMITTED_SNAPSHOT`, and
+  two such writes deadlock. (`internal/database/CLAUDE.md`)
 
 ### Core Concepts
 

@@ -203,8 +203,8 @@ func (a *Archive) forgetDaysBefore(ctx context.Context, day int) error {
 		// The day bound is repeated: a flow's row can move to a later day between the select and the delete (an
 		// archive attempt replaced after its day dropped), and deleting by flow_id alone would take the new row.
 		ph, args := database.IDList(ids)
-		_, err = a.db.ExecContext(ctx, database.DeleteSQL(a.db.DriverName(), DirectoryTable, database.SeekPrimaryKey("flow_id"),
-			"flow_id IN ("+ph+") AND day<?"), append(args, day)...)
+		_, err = a.db.ExecContext(ctx, "DELETE FROM "+DirectoryTable+
+			" SEEK_FROM("+DirectoryTable+", 1(flow_id)) WHERE flow_id IN ("+ph+") AND day<?", append(args, day)...)
 		if err != nil {
 			return errors.Trace(err)
 		}

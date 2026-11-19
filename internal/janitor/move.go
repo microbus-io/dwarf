@@ -140,8 +140,8 @@ func move(ctx context.Context, h handle, seams *seamster.Seamster, roots []int, 
 				return errors.Trace(err)
 			}
 		}
-		steps := database.DeleteSQL(tx.DriverName(), "dwarf_steps", database.SeekIndex("dwarf_steps", "flow_id", "flow_id"), "flow_id IN ("+trees+")")
-		flows := database.DeleteSQL(tx.DriverName(), "dwarf_flows", database.SeekIndex("dwarf_flows", "root", "root_flow_id"), "root_flow_id IN ("+ids+")")
+		steps := "DELETE FROM dwarf_steps SEEK_FROM(dwarf_steps, idx_dwarf_steps_flow_id(flow_id)) WHERE flow_id IN (" + trees + ")"
+		flows := "DELETE FROM dwarf_flows SEEK_FROM(dwarf_flows, idx_dwarf_flows_root(root_flow_id)) WHERE root_flow_id IN (" + ids + ")"
 		stepsArgs, flowsArgs := idArgs, idArgs
 		if d != nil {
 			// diagnostics.FaultReapContention fails every attempt of an archive move on lock contention.
@@ -281,7 +281,7 @@ func lockRoots(ctx context.Context, tx *sequel.Tx, sfx string, skipHeld bool, wh
 			stmt += " SKIP LOCKED"
 		}
 	case "mssql":
-		stmt = database.UpdateSQL("mssql", "dwarf_flows"+sfx, database.SeekPrimaryKey("flow_id"), "touch=1-touch OUTPUT inserted.flow_id", where)
+		stmt = "UPDATE dwarf_flows" + sfx + " SET touch=1-touch OUTPUT inserted.flow_id SEEK_FROM(dwarf_flows" + sfx + ", 1(flow_id)) WHERE " + where
 	default:
 		stmt = "UPDATE dwarf_flows" + sfx + " SET touch=1-touch WHERE " + where + " RETURNING flow_id"
 	}

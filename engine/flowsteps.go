@@ -68,7 +68,7 @@ func updateFlowStepsByID(ctx context.Context, ex sequel.Executor, set string, se
 	}
 	for chunk := range slices.Chunk(stepIDs, database.MaxListIDs) {
 		sph, sids := database.IDList(chunk)
-		_, err := ex.ExecContext(ctx, database.UpdateSQL(ex.DriverName(), "dwarf_steps", database.SeekPrimaryKey("step_id"), set, "step_id IN ("+sph+") AND "+guard),
+		_, err := ex.ExecContext(ctx, "UPDATE dwarf_steps SET "+set+" SEEK_FROM(dwarf_steps, 1(step_id)) WHERE step_id IN ("+sph+") AND "+guard,
 			append(slices.Clone(setArgs), sids...)...)
 		if err != nil {
 			return errors.Trace(err)

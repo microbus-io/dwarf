@@ -19,6 +19,9 @@ limitations under the License.
 // and closes them. It is DB-lifecycle-complete (open → migrate → size → fan-out → close) and speaks only in
 // resolved connection-pool sizes - the sizing *policy* (how many connections a worker count implies) stays with the
 // caller, which hands ShardSet the computed integers via Config and SetShardPool.
+//
+// Importing it registers sequel's virtual function SEEK_FROM(table, index(column)), with which an UPDATE or DELETE
+// reaches its rows by a seek on SQL Server (seekFrom).
 package database
 
 import (

@@ -106,7 +106,7 @@ func lockRowsSQL(driverName string, flows string, where string) string {
 	case "mysql", "mariadb":
 		return "SELECT 1 FROM " + flows + " WHERE " + where + " FOR UPDATE"
 	}
-	return database.UpdateSQL(driverName, flows, database.SeekPrimaryKey("flow_id"), "touch=1-touch", where)
+	return "UPDATE " + flows + " SET touch=1-touch SEEK_FROM(" + flows + ", 1(flow_id)) WHERE " + where
 }
 
 // locksByReading reports whether lockFlowRowsSQL is a locking read on the driver.

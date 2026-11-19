@@ -166,12 +166,14 @@ UTC, cast to the dialect's column type, and clamped to the year 9999. The engine
 use it; a second copy would split the rounding that keeps an inclusive and an exclusive bound exact. Pinned by
 `sqltime_test.go`, on every dialect and in a PostgreSQL session whose zone is not UTC.
 
-## On SQL Server a write by ids reaches its rows by a seek (`sqlseek.go`)
+## On SQL Server a write by ids reaches its rows by a seek (`SEEK_FROM`, `sqlseek.go`)
 
-Every `UPDATE` or `DELETE` whose `WHERE` clause is not one primary-key equality is built with `UpdateSQL` or
-`DeleteSQL`, naming the index it seeks (`SeekPrimaryKey`, `SeekIndex`). This covers the live tables, a day's
-archive tables and the directory, in the engine, the janitor and the archiver alike. A single primary-key
-equality needs nothing: SQL Server always seeks it.
+Every `UPDATE` or `DELETE` whose `WHERE` clause is not one primary-key equality carries the virtual function
+`SEEK_FROM(table, index(column))` where SQL Server takes a `FROM` clause: after `SET` (and `OUTPUT`), before `WHERE`,
+and after `DELETE FROM table`. On SQL Server it becomes `FROM table WITH (FORCESEEK(index(column)))`; everywhere
+else it is nothing. The package registers it with sequel when it is imported. This covers the live tables, a day's
+archive tables and the directory, in the engine, the janitor and the archiver alike. A single primary-key equality
+needs nothing: SQL Server always seeks it.
 
 - **Why.** On a small table SQL Server plans a clustered-index scan for `flow_id IN (...)`, `step_id IN (?, ?)` or
   `flow_id=?` on `dwarf_steps`. A scanning `UPDATE` or `DELETE` takes an update lock on every row it passes, rows it
@@ -180,19 +182,25 @@ equality needs nothing: SQL Server always seeks it.
   rows, and two transactions that each hold rows and scan past the other's deadlock. A transaction that dies in its
   first statement loses every retry too, since SQL Server kills the one cheapest to roll back. Without the seeks the
   janitor's moves failed `TestDispatcherDrop_TheJanitorsKeepEveryFlow`'s shutdown arm on these deadlocks.
-- **The target is aliased in a `FROM` clause, by its own name**, because SQL Server refuses `FORCESEEK` on an
-  `UPDATE` or `DELETE` target named directly (error 10724). Any other alias breaks a fragment that names the table:
-  Cancel's mark guard correlates on `dwarf_steps.flow_id`, and under `t` it failed with error 4104.
+- **The hint goes on the table in the `FROM` clause, unaliased.** SQL Server refuses `FORCESEEK` on the target
+  itself (`UPDATE dwarf_steps WITH (...)`, error 10724), but takes it on the same table in a `FROM` clause, which
+  binds to the target. Do not give it another name there: Cancel's mark guard names `dwarf_steps.flow_id`, and under
+  the alias `t` it failed with error 4104.
+- **The table is named twice, as the target and in `SEEK_FROM`, and the two must match.** On SQL Server another
+  table in the `FROM` clause joins the statement as a second source rather than failing to parse. When tried, the
+  mismatch failed with error 8622, but nothing guarantees that it fails.
 - **Name the index; a bare `FORCESEEK` may seek another one whose range covers other rows.** The janitor's due
   conditions match the status index, whose range spans every closed root, and `day<?` matches the directory's day
-  index. A day's archive tables name their indexes for the table (`idx_<table>_root`, `idx_<table>_flow_id`), so
-  `SeekIndex` composes the name from the table.
-- **A wrong seek fails loudly, not slowly.** A `WHERE` clause that does not restrict the named index's leading column
-  fails every execution with error 8622, so the SQL Server suite catches it at once.
+  index. A day's archive tables name their indexes for the table (`idx_<table>_root`, `idx_<table>_flow_id`).
+- **A malformed call fails on every driver; a wrong name fails only on SQL Server.** `seekFrom` checks the
+  arguments' shape wherever it runs, so the SQLite suite catches a malformed call. A `WHERE` clause that does not
+  restrict the named index's column fails every execution with error 8622, so the SQL Server suite catches that.
+- **sequel's virtual functions are process-wide.** A host that registers its own `SEEK_FROM` replaces this one.
 
-Pinned by `TestSeek_AWriteReachesOnlyItsOwnFlowsRows` (engine: the cohort bump, Terminate's step pass and the
-flow-row lock by a list, with another flow's rows held) and `TestMove_PassesARootHeldOutsideTheBatch` (janitor).
-Each fails on SQL Server without the seeks.
+Pinned by `TestSeekFrom_ExpandsToAHintedFromOnSQLServerOnly` (the expansion),
+`TestSeek_AWriteReachesOnlyItsOwnFlowsRows` (engine: the cohort bump, Terminate's step pass and the flow-row lock
+by a list, with another flow's rows held) and `TestMove_PassesARootHeldOutsideTheBatch` (janitor). The last two
+fail on SQL Server without the seeks.
 
 ## Sharding mechanics
 

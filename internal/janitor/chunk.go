@@ -211,11 +211,11 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 	dropFlows := func(tx *sequel.Tx, flows ...int) (int, error) {
 		list, args := database.IDList(flows)
 		if archived {
-			if _, err := tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), archiver.DirectoryTable, database.SeekPrimaryKey("flow_id"), "flow_id IN ("+list+")"), args...); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+archiver.DirectoryTable+" SEEK_FROM("+archiver.DirectoryTable+", 1(flow_id)) WHERE flow_id IN ("+list+")", args...); err != nil {
 				return 0, errors.Trace(err)
 			}
 		}
-		res, err := tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), "dwarf_flows"+sfx, database.SeekPrimaryKey("flow_id"), "flow_id IN ("+list+")"), args...)
+		res, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows"+sfx+" SEEK_FROM(dwarf_flows"+sfx+", 1(flow_id)) WHERE flow_id IN ("+list+")", args...)
 		if err != nil {
 			return 0, errors.Trace(err)
 		}
@@ -292,7 +292,7 @@ func deleteChunk(ctx context.Context, h handle, seams *seamster.Seamster, sfx st
 				return errors.Trace(midTree())
 			}
 			list, args := database.IDList(children[:run])
-			if _, err := tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), "dwarf_steps"+sfx, database.SeekIndex("dwarf_steps"+sfx, "flow_id", "flow_id"), "flow_id IN ("+list+")"), args...); err != nil {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" SEEK_FROM(dwarf_steps"+sfx+", idx_dwarf_steps"+sfx+"_flow_id(flow_id)) WHERE flow_id IN ("+list+")", args...); err != nil {
 				return errors.Trace(err)
 			}
 			if err := midTree(); err != nil {
@@ -425,7 +425,7 @@ func deleteStepsFrom(ctx context.Context, tx *sequel.Tx, sfx string, flow, after
 	}
 	for chunk := range slices.Chunk(ids, database.MaxListIDs) {
 		ph, args := database.IDList(chunk)
-		if _, err := tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), "dwarf_steps"+sfx, database.SeekPrimaryKey("step_id"), "step_id IN ("+ph+")"), args...); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_steps"+sfx+" SEEK_FROM(dwarf_steps"+sfx+", 1(step_id)) WHERE step_id IN ("+ph+")", args...); err != nil {
 			return size{}, after, false, errors.Trace(err)
 		}
 	}

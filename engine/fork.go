@@ -987,13 +987,13 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 		current = next
 	}
 	// Every step before any flow, the order the lifecycle deletes take.
-	for _, table := range []struct{ name, seek string }{
-		{"dwarf_steps", database.SeekIndex("dwarf_steps", "flow_id", "flow_id")},
-		{"dwarf_flows", database.SeekPrimaryKey("flow_id")},
+	for _, del := range []string{
+		"DELETE FROM dwarf_steps SEEK_FROM(dwarf_steps, idx_dwarf_steps_flow_id(flow_id))",
+		"DELETE FROM dwarf_flows SEEK_FROM(dwarf_flows, 1(flow_id))",
 	} {
 		for chunk := range slices.Chunk(allIDs, inListChunk) {
 			ph, ids := inList(chunk)
-			tx.ExecContext(ctx, database.DeleteSQL(tx.DriverName(), table.name, table.seek, "flow_id IN ("+ph+")"), ids...)
+			tx.ExecContext(ctx, del+" WHERE flow_id IN ("+ph+")", ids...)
 		}
 	}
 	return nil

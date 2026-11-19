@@ -258,7 +258,7 @@ A batch of trees leaves the live tables in one transaction: moved into a day's a
   removal of one tree serialize. Either side weakening its lock breaks the other; the engine's `lockRows` names this
   one.
 - **On SQL Server every janitor statement that locks, updates or deletes rows by their ids reaches them by a seek**
-  (`database.UpdateSQL`/`DeleteSQL`; why is in `internal/database/CLAUDE.md`), so a transaction locks only its own
+  (`SEEK_FROM`; why is in `internal/database/CLAUDE.md`), so a transaction locks only its own
   trees' rows. Unhinted, two janitors' moves each held their roots and scanned past the other's, and deadlocked.
   `lockRoots` seeks the primary key by name because its due conditions also match the status index, whose range spans
   every closed root. `TestMove_PassesARootHeldOutsideTheBatch` pins it.
