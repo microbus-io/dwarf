@@ -45,7 +45,7 @@ RESTART_A=${RESTART_A:-137} RESTART_B=${RESTART_B:-141} # minutes into the run: 
 MIX=${MIX:-0.459:linear:1K,0.15:linear:0,0.20:fanout:4K:8,0.10:scatter:4K:8:1,0.05:scatter:1K:4:2,0.04:linear:64K,0.001:linear:1M}
 DIST=${DIST:-0.85:2ms,0.12:100ms,0.03:5s}
 PRIO=${PRIO:-1:0.03,2:0.12,3:0.55,4:0.2,5:0.1}
-OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT"
+OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT"
 ADMIN=dwarf-$NAME-m EA=dwarf-$NAME-ea EB=dwarf-$NAME-eb
 VMS=() DB="" IP=""
 HARD=$(( $(date +%s) + 420 * 60 ))

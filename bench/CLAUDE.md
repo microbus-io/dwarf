@@ -257,7 +257,7 @@ not the pool. Size the rig under the regime the experiment will actually run in.
 ## Running the cloud rig
 
 **The kit is `bench/gcp/rig/`.** Each orchestrator creates its rig, sources a step script, pulls the artifacts
-into `bench/results/redo-<name>-<date>/`, and tears everything down on exit, failures included, after a 30 s grace
+into `bench/results/<date>-<time>-<name>/`, and tears everything down on exit, failures included, after a 30 s grace
 (`TEARDOWN_GRACE`) in which `kill -9` of the orchestrator keeps the rig for another arm.
 - **`x-rig.sh <name> <disk-gb> <step>`:** one Cloud SQL instance (`TIER`, default 32 vCPU) and one engine/admin VM
   (`VMTYPE`, default c4a-16).
@@ -686,6 +686,13 @@ script, because no single artifact holds them; the rest read their artifacts und
 **`bench/results/` is gitignored**, so those charts can be redrawn only on the machine that holds the run's
 local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are
 missing, with a note).
+
+**A results folder is named `YYYYMMDD[-HHMM]-<name>` and carries a `CLAUDE.md`.** The orchestrators and the local
+vacuum harness name theirs so, and a run without `-out` lands in `bench/results/<date>-scratch/`. The `CLAUDE.md` is
+the agent's record of the run, written when its results are read: what ran (build, rig, database settings, arms),
+the numbers, what they mean, and what is left unexplained. Unlike the repository's `CLAUDE.md` files it holds the
+numbers, since nothing else keeps the reading beside the data. Commit messages cite some folders by an older name
+(`redo-<name>-<date>`); `bench/results/RENAMES.tsv` maps them.
 
 **Four archive settings come from the environment, for the rig only.** The bench reads them (`archiveOverrides`,
 `overrides.go`) and sets them on every replica before Startup through `internal/accessors`, since the engine reads no

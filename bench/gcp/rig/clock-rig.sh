@@ -38,7 +38,7 @@ D=$(cd "$(dirname "$0")" && pwd)
 R=$(cd "$D/../../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a}
-OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT"
+OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT"
 DBVM=dwarf-$NAME-db ENG=dwarf-$NAME-m
 HARD=$(( $(date +%s) + 240 * 60 ))
 FWRULE=dwarf-bench-pg FWMADE=${FWMADE:-}

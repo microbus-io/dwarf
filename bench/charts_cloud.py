@@ -7,8 +7,8 @@ Run from the repo root with matplotlib available:
 PNGs go to out-dir (default ../cloudflarepages/docs.dwarf.run/content/performance, the docs site's source). Three charts draw from tables in this file, because their numbers come from
 many runs, from Cloud Monitoring and from CPU profiles rather than from one artifact: database size (tiers), shards,
 and engine host size. The rest read run artifacts under bench/results/, which are kept on the machine that ran
-them: replicas (redo-one-20261009, redo-rs-20261009), minute-by-minute and payload size (redo-ha-20261106), failover
-(redo-fo-20261011), headroom and the growing archive (redo-va-20261107, with its monitors), and the day of varied load (redo-real-20261107, with its monitors and Cloud Monitoring's
+them: replicas (20261009-redo-one, 20261009-redo-rs), minute-by-minute and payload size (20261106-redo-ha), failover
+(20261011-redo-fo), headroom and the growing archive (20261107-redo-va, with its monitors), and the day of varied load (20261107-redo-real, with its monitors and Cloud Monitoring's
 database metrics in cloudmon.json). A chart whose artifacts are missing is skipped with a note.
 """
 import collections
@@ -60,9 +60,9 @@ def skip(name, why):
 
 # ---- Database size: throughput (a candle where a tier has several instances), $ per million steps, database CPU ----
 # One shard per tier, saturated 0 B linear, 2 + 6 min, 20 GB max_wal_size + lz4, the archive on, 250 connections
-# unless stated, engine 284b0f4 (T-A, 2026-11-06, redo-ta{4,8,16,64}-20261106: two engine hosts at half the database's
-# vCPU, a 3 min warm-up) and, for 32 vCPU, four instances: redo-ha-20261106 (ha-1b) and redo-hb-20261106 (hb-0-250),
-# one c4a-16 engine each, redo-sa-20261106 (s1-r2: two c4a-8, engine e5dbf59) and redo-va-20261107 (hr-sat: one
+# unless stated, engine 284b0f4 (T-A, 2026-11-06, 20261106-redo-ta{4,8,16,64}: two engine hosts at half the database's
+# vCPU, a 3 min warm-up) and, for 32 vCPU, four instances: 20261106-redo-ha (ha-1b) and 20261106-redo-hb (hb-0-250),
+# one c4a-16 engine each, 20261106-redo-sa (s1-r2: two c4a-8, engine e5dbf59) and 20261107-redo-va (hr-sat: one
 # c4a-16, engine bbc057a). Each run is (steps/s, WAL flush ms under load, database CPU busy %, database core-ms per
 # step); CPU is Cloud Monitoring over the measurement window alone (dbcpu.sh -w, PAD_SECONDS=0), never the artifact
 # span, whose warmup and drain edges dilute it.
@@ -146,7 +146,7 @@ def chart_tiers():
 
 # ---- Shards: grouped bars by fleet shape, a dashed linear mark over each group ----
 # S-A: one session on one set of four 32 vCPU instances, engine e5dbf59, archive on, 20 GB + lz4, 2 + 6 min,
-# 2026-11-06 (redo-sa-20261106): the 4-shard arms first, then the two slowest instances removed for 2 shards, then
+# 2026-11-06 (20261106-redo-sa): the 4-shard arms first, then the two slowest instances removed for 2 shards, then
 # the next for 1. Each bar is the sum of its replicas' artifacts.
 ONE_SHARD = 24108
 SHARD_GROUPS = [  # (shards, [(steps/s, tick label, colour)])
@@ -235,8 +235,8 @@ def chart_engine_hosts():
 
 
 # ---- Replicas and minute by minute: the R and S arms of 2026-10-09 ----
-ONE = os.path.join(RESULTS, "redo-one-20261009/out")
-RS = os.path.join(RESULTS, "redo-rs-20261009")
+ONE = os.path.join(RESULTS, "20261009-redo-one/out")
+RS = os.path.join(RESULTS, "20261009-redo-rs")
 ARMS = {"r1": "1 shard, 1 replica", "r2": "1 shard, 2 replicas", "r4": "1 shard, 4 replicas",
         "s2": "2 shards, 2 replicas", "s4": "4 shards, 4 replicas"}
 ARM_SHARDS = {"r1": 1, "r2": 1, "r4": 1, "s2": 2, "s4": 4}
@@ -291,8 +291,8 @@ def chart_replicas():
     finish(fig, "benchmark-cloud-replicas.png")
 
 
-# ---- Minute by minute: three saturated 0 B runs on one 32 vCPU instance, archive on (redo-ha-20261106) ----
-HA = os.path.join(RESULTS, "redo-ha-20261106/out")
+# ---- Minute by minute: three saturated 0 B runs on one 32 vCPU instance, archive on (20261106-redo-ha) ----
+HA = os.path.join(RESULTS, "20261106-redo-ha/out")
 
 
 def series(path):
@@ -324,7 +324,7 @@ def chart_minutes():
 
 
 # ---- Payload size: steps/s, payload MB/s and the log written per step against a compressible JSON payload ----
-# (redo-ha-20261106). Payloads sit on a doubling scale, so every size from 1 KB to 64 KB has its slot; a size not yet
+# (20261106-redo-ha). Payloads sit on a doubling scale, so every size from 1 KB to 64 KB has its slot; a size not yet
 # measured (None) has no marker, and the line crosses its slot.
 PAYLOAD = [  # (label, KB, linear artifact, fan-out artifact)
     ("none", 0, "ha-1b", "wa-f0"), ("1 KB", 1, "pl-1k", None), ("2 KB", 2, "pl-2k", None), ("4 KB", 4, "pl-4k", "wa-f4k"),
@@ -376,7 +376,7 @@ def chart_payload():
 
 # ---- Headroom: offered 100% and 95% of the instance's saturated rate (va, 2026-11-08, archive on) ----
 # hr-sat measured 21,921 steps/s, so the arms offered 2,192 and 2,082 flows/s of 10-step linear 0 B, 16 min each.
-VA = os.path.join(RESULTS, "redo-va-20261107")
+VA = os.path.join(RESULTS, "20261107-redo-va")
 
 
 def chart_headroom():
@@ -547,7 +547,7 @@ def chart_volume_rows():
 
 
 # ---- Failover: 2 shards x 8 replicas, 1, 2, 3 then 4 dispatchers killed at once ----
-FO = os.path.join(RESULTS, "redo-fo-20261011")
+FO = os.path.join(RESULTS, "20261011-redo-fo")
 FO_WINDOW_START = datetime(2026, 10, 11, 6, 47, 10).timestamp()  # the replicas' window start (local time)
 FO_LABELS = {1: "1 of 4 dispatchers", 2: "2: all of shard 1", 3: "3: shard 1 +\nhalf of shard 2",
              4: "4: every\ndispatcher"}
@@ -615,14 +615,14 @@ def chart_failover():
     finish(fig, "benchmark-cloud-failover.png")
 
 
-# ---- Database failover: a Cloud SQL HA failover under load (redo-hs-20261115, arm hs-d) ----
+# ---- Database failover: a Cloud SQL HA failover under load (20261115-redo-hs, arm hs-d) ----
 # One 32 vCPU Cloud SQL PG16 instance patched to high availability, one c4a-16 engine host with two in-process replicas,
 # `loop` 10 steps at 600 flows/s open loop (6,000 steps/s offered), `-task-delay-dist 0.80:50ms,0.20:2s`, 2 + 12 min,
 # `gcloud sql instances failover` at window minute 6. The series' t counts from the gauge sampler's start, right after
 # the warmup, so the window starts at startedAt + warmupSec (the engines' startup puts it a second or two later; the
 # dispatch gap and the connection errors line up within one 10 s point). The shading runs from the failover request
 # to the engines' last failed connection (their log), i.e. until the new primary accepted connections.
-HS = os.path.join(RESULTS, "redo-hs-20261115")
+HS = os.path.join(RESULTS, "20261115-redo-hs")
 DBFO_REQUEST_UTC = "2026-11-16T00:21:29Z"  # the orchestrator's FAILOVER line, just before the gcloud call
 DBFO_LAST_ERROR_UTC = "2026-11-16T00:23:06Z"  # the engines' last "failed to connect"
 
@@ -655,13 +655,13 @@ def chart_db_failover():
     finish(fig, "benchmark-cloud-db-failover.png")
 
 
-# ---- A day: REAL, three 90-minute day/night cycles over five priority bands (redo-real-20261107) ----
+# ---- A day: REAL, three 90-minute day/night cycles over five priority bands (20261107-redo-real) ----
 # Two engine replicas each generate half the commanded rate. A replica's series t counts from the day's shared epoch,
 # so the restarted process (day2-*) lines up with the first (day1-*). Pending and oldest-pending come from the backlog
 # leader's gauges, refreshed every 30 s, so a minute's reading is the max over the processes. The admin host's
 # monitors (s-mon: WAL every 5 s; v-mon: table sizes every 60 s) and Cloud Monitoring (cloudmon.json, database CPU)
 # are on wall-clock time and are placed on the day's minutes by the epoch in day-args.txt.
-REAL = os.path.join(RESULTS, "redo-real-20261107")
+REAL = os.path.join(RESULTS, "20261107-redo-real")
 BANDS = [f"band:{i}" for i in range(1, 6)]
 BAND_COLOURS = [S1, S2, S3, S4, S5]
 DAY_END = 270

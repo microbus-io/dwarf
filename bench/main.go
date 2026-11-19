@@ -121,7 +121,7 @@ func run() error {
 		window           = flag.Duration("window", 60*time.Second, "measurement window per concurrency step")
 		warmup           = flag.Duration("warmup", 15*time.Second, "warmup before each measurement window (discarded)")
 		label            = flag.String("label", "", "free-form run label recorded in the artifact")
-		out              = flag.String("out", "", "artifact path (default bench/results/run-<timestamp>.json)")
+		out              = flag.String("out", "", "artifact path (default bench/results/<date>-scratch/run-<timestamp>.json)")
 		soak             = flag.Duration("soak", 0, "soak mode: run a mixed create/interrupt/continue workload under create-purge churn for this long, sampling drift, instead of the concurrency sweep (uses the first -concurrency value as the submitter count)")
 		soakSample       = flag.Duration("soak-sample", 30*time.Second, "soak drift sampling interval")
 		// Replicas share the database(s) and coordinate through them - nothing is sent between them, so
@@ -485,7 +485,11 @@ func run() error {
 		}
 		seriesPath := *out
 		if seriesPath == "" {
-			seriesPath = filepath.Join("bench/results", "run-"+art.StartedAt.Format("20060102-150405")+".json")
+			seriesPath = defaultArtifactPath(art.StartedAt)
+			err = os.MkdirAll(filepath.Dir(seriesPath), 0o755)
+			if err != nil {
+				return err
+			}
 		}
 		seriesPath = strings.TrimSuffix(seriesPath, ".json") + ".series.jsonl"
 		interval := *statsEvery
@@ -673,11 +677,11 @@ func run() error {
 
 	path := *out
 	if path == "" {
-		err = os.MkdirAll("bench/results", 0o755)
+		path = defaultArtifactPath(art.StartedAt)
+		err = os.MkdirAll(filepath.Dir(path), 0o755)
 		if err != nil {
 			return err
 		}
-		path = filepath.Join("bench/results", "run-"+art.StartedAt.Format("20060102-150405")+".json")
 	}
 	data, err := json.MarshalIndent(art, "", "  ")
 	if err != nil {
@@ -699,6 +703,13 @@ func run() error {
 }
 
 // benchLogger is the engines' logger for -log-level: text on stderr at that level, or a discard for "off".
+// defaultArtifactPath is where a run without -out writes its artifact: the day's folder of unnamed runs, dated first
+// like every folder of bench/results, so a run nobody named never lands at its top level.
+func defaultArtifactPath(startedAt time.Time) string {
+	return filepath.Join("bench/results", startedAt.Format("20060102")+"-scratch",
+		"run-"+startedAt.Format("20060102-150405")+".json")
+}
+
 func benchLogger(level string) (*slog.Logger, error) {
 	if level == "off" {
 		return slog.New(slog.DiscardHandler), nil

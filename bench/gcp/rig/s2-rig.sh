@@ -31,7 +31,7 @@ done
 RTT_MAX=${RTT_MAX:-0.35}                              # ms, the idle RTT gate per engine host and shard
 DRAW_MAX=${DRAW_MAX:-1.35}                            # DB core-ms per step: ~1.1-1.2 normal, ~1.5 slow
 REDRAWS=${REDRAWS:-2}
-OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT/draw"
+OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT/draw"
 ADMIN=dwarf-$NAME-m BIG=dwarf-$NAME-big
 SMALL=(); for i in 1 2 3 4 5 6 7 8; do SMALL+=("dwarf-$NAME-e$i"); done
 SAT="-workload linear -payload 0 -open-loop -arrival-rate 0"

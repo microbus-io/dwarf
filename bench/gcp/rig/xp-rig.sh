@@ -15,7 +15,7 @@ D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the step scrip
 R=$(cd "$D/../../.." && pwd)                          # the repository; artifacts land in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a}
-OUT=$R/bench/results/redo-$NAME-$(date +%Y%m%d); mkdir -p "$OUT"
+OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT"
 ADMIN=dwarf-$NAME-m DB=dwarf-$NAME-db EA=dwarf-$NAME-ea EB=dwarf-$NAME-eb
 VMS=("$ADMIN" "$EA" "$EB")
 HARD=$(( $(date +%s) + 120 * 60 ))
