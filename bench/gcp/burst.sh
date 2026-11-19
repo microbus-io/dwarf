@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Burst/quiet profile: does the crew come back DOWN when load falls, and does throughput recover? Runs ON
-# the bench VM, next to the deployed dwarf-bench binary.
+# Burst/quiet profile: does the crew come back DOWN when load falls, and does throughput recover? Runs on
+# the admin host, through driver-step.sh.
 #
 # WHY THIS SCRIPT EXISTS. Every other arm in this directory holds the exec term constant for its whole
 # window, so the crew grows to a plateau and the artifact reports the plateau - whatever the engine would

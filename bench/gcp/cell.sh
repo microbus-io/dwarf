@@ -2,7 +2,7 @@
 #
 # One cell of the cloud grid - one workload at one RTT on one shard tier - measured end to end: the peak,
 # the pool sweep at 2/3 of it, and a confirming peak when the sweep's pool differs from the shipped one.
-# Runs ON the bench VM.
+# Runs on the admin host, through driver-step.sh.
 #
 # THE ORDER RESOLVES A CHICKEN AND EGG. Peak depends on the pool and the pool choice depends on the peak, so:
 #   1. PEAK at the derived pool - what ships. Open loop, flat out, the backlog capped by -max-outstanding,

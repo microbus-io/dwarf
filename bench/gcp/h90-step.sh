@@ -1,7 +1,8 @@
-# H90 (x-rig step, BIN=bench-9e5, DBFLAGS as gm/hr4): the headroom chart's third line. On ONE instance: a saturated
-# calibration, then commanded at 95% and at 90% of it, 2 + 16 min each, both run whether or not 95% holds - the
-# question is how much smoother 90% is (backlog spikes, p99), not where the walk-down stops. The once-a-minute dips
-# seen at 95% on hr4 are expected at both; read their size and how fast each clears.
+# H90 (x-rig step, BIN=bench-9e5, DBFLAGS auto_explain at 10 s + log_lock_waits): the headroom chart's third line.
+# On ONE instance: a saturated calibration, then commanded at 95% and at 90% of it, 2 + 16 min each, both run
+# whether or not 95% holds - the question is how much smoother 90% is (backlog spikes, p99), not where the
+# walk-down stops. The once-a-minute dips h-step.sh's 95% rung shows are expected at both; read their size and how
+# fast each clears.
 SAT="-workload linear -payload 0 -open-loop -arrival-rate 0 -concurrency 256 -max-outstanding 2000"
 one_run h-sat $SAT
 CAL=$(vmssh "$ADMIN" "python3 -c \"import json; print(round(json.load(open('out/h-sat.json'))['results'][0]['stepsPerSec']))\"" | tail -1)

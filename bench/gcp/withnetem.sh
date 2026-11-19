@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Runs a command with a netem qdisc held at a FIXED delay for the command's whole duration, then removes
-# it. Runs ON the bench VM.
+# it. Runs on the admin host.
 #
 # WHY A ZERO-DELAY QDISC IS WORTH INSTALLING. netem is not free even at 0ms: it replaces the default
 # queueing discipline on the interface, so a run WITH it and a run WITHOUT it differ in packet scheduling

@@ -27,7 +27,7 @@
 #   STEPS (steps/s for the per-step figure; read from each artifact by default - set it for a multi-host fleet,
 #   whose artifacts each hold one replica's share),
 #   PAD_SECONDS (widen each side of the window, default 60), WRITE (1 = also store the reading in each
-#   artifact as dbCpu {meanPct, peakPct, points}, which bench/charts_redo.py reads)
+#   artifact as dbCpu {meanPct, peakPct, points})
 set -euo pipefail
 
 PROJECT="${PROJECT:-dwarf-bench-mbus}"

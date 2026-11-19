@@ -1,6 +1,6 @@
 # H rungs (x-rig step, BIN=bench-9e5): the sustainable rate on one 32 vCPU database, walking DOWN from the saturated
 # rate and stopping at the first rung that holds (user, 2026-10-18). linear 0 B, 2 + 16 min, fresh database per run.
-#   h-sat:       saturated calibration on THIS instance (cap 2,000, H3's shape). Its 10 s window mean is "100%".
+#   h-sat:       saturated calibration on THIS instance (cap 2,000). Its 10 s window mean is "100%".
 #   h-r100..85:  open loop at that fraction of it, cap 20,000 so a growing backlog shows instead of binding.
 # A rung holds when delivered steps/s >= 99% of the command AND the backlog drains (cell.sh's rule: the outstanding
 # floor of the last two minutes <= max(1000, 5x) that of the first two).

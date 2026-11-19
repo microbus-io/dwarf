@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 #
-# Task-duration ladder: does throughput depend on how long tasks take? Runs ON the bench VM, next to
-# the deployed dwarf-bench binary.
+# Task-duration ladder: does throughput depend on how long tasks take? Runs on the admin
+# host, through driver-step.sh.
 #
-# WHY THIS SCRIPT EXISTS. Throughput should be set by what the DATABASE can serve, not by the task
-# duration - a worker inside ExecuteTask holds no connection, so a slow task should cost workers, not
-# steps/s. Measured against one 16-vCPU shard at a commanded 600 flows/s, with -task-delay the only
-# variable, it was not:
+# WHAT IT MEASURES. Throughput should be set by what the DATABASE can serve, not by the task duration - a
+# worker inside ExecuteTask holds no connection, so a slow task should cost workers, not steps/s. An engine
+# whose workers were tied to its connections did not hold that against one 16-vCPU shard at a commanded
+# 600 flows/s, with -task-delay the only variable:
 #
 #     delay   steps/s   goroutines
 #     0s      6,005     792          <- serves the full commanded rate
 #     1s      1,020     1,157
 #     8s        637     5,298        <- 8x the task time bought 4.6x the crew and LESS throughput
 #
-# Those three arms are the BASELINE table in the report below, so this script compares against
-# recorded numbers rather than remembered ones.
+# Those three arms are the BASELINE table in the report below, so a run is compared against recorded
+# numbers rather than remembered ones.
 #
-# WHAT IT IS FOR NOW. The engine gates DATABASE work per shard and grows workers on idleness rather
-# than on "every worker is in a task", so the crew is free to grow for long tasks while the database
-# sees the concurrency it always saw. The prediction is that the 1s and 8s arms CONVERGE on the 0s arm
-# (all three serving the commanded 6,000 steps/s). If they do not, the gate is not what was binding -
-# that is the falsifier, and it is the reason to run this before anything else.
+# The engine gates DATABASE work per shard and grows workers on idleness rather than on "every worker
+# is in a task", so the crew grows for long tasks while the database sees the concurrency it always
+# saw. The pass is that the 1s and 8s arms CONVERGE on the 0s arm, all three serving the commanded
+# 6,000 steps/s. A 1s or 8s arm short of it means the per-shard gate is not what binds.
 #
-# The 0s arm is NOT predicted to be identical. Admission cannot bind where the candidate cache already
+# The 0s arm need not match the baseline's. Admission cannot bind where the candidate cache already
 # capped concurrency, but the completion path debits the same gate WITHOUT waiting, which throttles
 # admission under a completion storm and can shorten the pool's waiter queue. Read it against
 # dwarf_turnstile_available (printed below): sustained ZERO means admission is the binding constraint,

@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 #
 # Replica ladder: measures throughput at R = 1, 2, 4, 8 engine replicas sharing the SAME shard(s),
-# holding offered load constant. Runs ON the bench VM, next to the deployed dwarf-bench binary.
+# holding offered load constant. Runs on the admin host, through driver-step.sh.
 #
-# WHY THIS SCRIPT EXISTS. Every claim about R is currently derived, not measured. The engine splits
-# each shard's connection budget by the replica count it reads from the dwarf_peers registry
-# (M = min(Y-headroom, ~6*V) / R), and https://docs.dwarf.run/performance/benchmark-cloud/ lists that division as the first known
-# gap. Two questions have never been put to a rig:
+# WHAT IT MEASURES. The engine splits each shard's connection budget by the replica count it reads from
+# the dwarf_peers registry. Two questions:
 #   - Does the split HOLD? R replicas sharing one shard should sum to about what R=1 delivers - the
 #     database's capacity is fixed, so the ladder should read FLAT. A rising ladder means the fleet is
 #     over-connecting the shard; a falling one means the split is costing more than it saves.
 #   - Does the REFILLER survive it? The refiller runs per replica per shard and its cost does NOT
 #     divide by R: R replicas x S shards = R*S scan streams against one backlog, each paying the
-#     per-pass floor, each discarding a fraction of what it selects (measured 21-45% at R=1).
-#     This is the predicted failure mode, and the summary below is built to show it.
+#     per-pass floor, each discarding a fraction of what it selects. A ladder falling with R is that
+#     cost, and the summary below is built to show it.
 #
 # THE CONTROLS, and why each is not optional:
 #   1. FIXED TOTAL CONCURRENCY. -concurrency is the TOTAL submitter count, round-robined across the
@@ -36,7 +34,7 @@
 # right for the pool split, peer discovery and the refiller multiplication - all of which are
 # database-mediated and blind to process boundaries - but it gives no per-replica RSS attribution and
 # no kill -9. The stale-peer hazard in control 2 therefore CANNOT be reproduced here; it needs
-# separate processes and is a follow-up.
+# separate processes.
 #
 # Usage:
 #   DSN1=... [DSN2=...] ./replicaladder.sh
@@ -145,7 +143,7 @@ echo "  spread ${RTT_DELTA} ms absolute, tolerance ${RTT_MAX_DELTA_MS} ms"
 if awk -v d="$RTT_DELTA" -v t="$RTT_MAX_DELTA_MS" 'BEGIN{exit !(d>t)}'; then
   echo >&2
   echo "ABORT: shard RTTs differ by ${RTT_DELTA} ms (tolerance ${RTT_MAX_DELTA_MS} ms)." >&2
-  echo "Put every instance in the same region AND zone as the bench VM, then re-run." >&2
+  echo "Put every instance in the same region AND zone as the admin host, then re-run." >&2
   exit 1
 fi
 

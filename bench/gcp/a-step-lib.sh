@@ -1,6 +1,6 @@
-# Sourced by the L and W steps. one_run <tag> <bench args...>: fresh database on shard 1, the run on the admin host
-# (c4a-16) with the pinned binary, the backend monitor beside it, then the database is dropped. WIN_MIN sets the
-# window in minutes (default 16); RUN_ENV prefixes the run with environment settings (e.g. GOMEMLIMIT=48GiB).
+# Sourced by x-rig.sh before every step. one_run <tag> <bench args...>: fresh database on shard 1, the run on the
+# admin host (c4a-16) with the pinned binary, the backend monitor beside it, then the database is dropped. WIN_MIN
+# sets the window in minutes (default 16); RUN_ENV prefixes the run with environment settings (e.g. GOMEMLIMIT=48GiB).
 gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 && vmssh "$ADMIN" 'chmod +x g-run.sh fsync.sh'
 one_run() {
   local tag=$1; shift; local db="dwarf_${tag//-/_}" start x
@@ -14,7 +14,7 @@ one_run() {
   vmssh "$ADMIN" "setsid nohup ./s-mon.sh $(( 30 + (win + 3) * 60 )) out/mon-$tag.log '$(dsn "${IPS[0]}" "$db")' > /dev/null 2>&1 < /dev/null &"
   vmssh "$ADMIN" "${RUN_ENV:-} WINDOW=${win}m setsid nohup ./g-run.sh $tag $start '$(dsn "${IPS[0]}" "$db")' $* > /dev/null 2>&1 < /dev/null &"
   # Stall watchdog, inside the window only (the bench goes quiet after it while it writes the artifact): no new
-  # 10 s sample for ~4 min means the engine is hung (W's OOM run sat 34 min first), so kill it and move on.
+  # 10 s sample for ~4 min means the engine is hung (one out of memory sat 34 min first), so kill it and move on.
   local last=-1 same=0 n
   while (( $(date +%s) < start + (win + 2) * 60 )); do
     late

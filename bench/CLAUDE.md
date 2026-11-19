@@ -684,9 +684,7 @@ runs at the rig's own RTT without netem (with `RTT_SLACK_MS=0`, every run starts
 together with `SWEEP=""` and `MAX_OUTSTANDING` cover the method pilot: backlog-cap independence, the rate
 ladder, and the k/s fit at a small fixed pool. Every artifact's `environment` carries `vcs.revision` and
 `vcs.modified` when the binary came from `go build` in the work tree - build every run of a campaign from one
-clean commit;
-`bench/charts_redo.py` charts a tree of cells and `-volume` artifacts. Run `dbcpu.sh` with `WRITE=1` first so
-the artifacts carry database CPU.
+clean commit.
 
 `bench/charts_cloud.py` draws the charts of [Cloud Benchmarks](https://docs.dwarf.run/performance/benchmark-cloud/) and [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/), and `bench/charts.py` the local dialect charts in
 [Dialect Benchmarks](https://docs.dwarf.run/performance/benchmark/). A cloud chart drawn from many runs or from CPU profiles keeps its numbers as a table in the
@@ -695,12 +693,11 @@ script, because no single artifact holds them; the rest read their artifacts und
 local results - a clean checkout cannot rebuild them (`charts_cloud.py` skips a chart whose artifacts are
 missing, with a note).
 
-**A results folder is named `YYYYMMDD[-HHMM]-<name>` and carries a `CLAUDE.md`.** The orchestrators and the local
-vacuum harness name theirs so, and a run without `-out` lands in `bench/results/<date>-scratch/`. The `CLAUDE.md` is
+**A results folder is named `YYYYMMDD[-HHMM]-<name>` and carries a `CLAUDE.md`.** The orchestrators name theirs so,
+and a run without `-out` lands in `bench/results/<date>-scratch/`. The `CLAUDE.md` is
 the agent's record of the run, written when its results are read: what ran (build, rig, database settings, arms),
 the numbers, what they mean, and what is left unexplained. Unlike the repository's `CLAUDE.md` files it holds the
-numbers, since nothing else keeps the reading beside the data. Commit messages cite some folders by an older name
-(`redo-<name>-<date>`); `bench/results/RENAMES.tsv` maps them.
+numbers, since nothing else keeps the reading beside the data.
 
 **Four archive settings come from the environment, for the rig only.** The bench reads them (`archiveOverrides`,
 `overrides.go`) and sets them on every replica before Startup through `internal/accessors`, since the engine reads no

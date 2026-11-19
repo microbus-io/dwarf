@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# RTT ladder with the pool DERIVED BY THE ENGINE, not pinned by the harness. Runs ON the bench VM.
+# RTT ladder with the pool DERIVED BY THE ENGINE, not pinned by the harness. Runs on the admin host.
 #
 # WHY THIS SCRIPT EXISTS, AND HOW IT DIFFERS FROM cell.sh. cell.sh pins every arm's pool with
 # -max-connections, so the engine's RTT ramp and server clamp never run. This one tests the SHIPPED PATH: it pins nothing,
