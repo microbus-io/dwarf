@@ -121,6 +121,15 @@ cooperate.
   engines. 120 is there for consistency with the other servers, which is worth having on its own; the runtime
   is open.
 
+**Before shortening a test's waits for runtime, find where the package's time goes** (`go test -json`: a test
+without a `pause` event ran serially). A serial test adds its whole duration to the package's. The parallel phase is
+bound by CPU, not by tests sleeping in their slots, so a shorter wait in a parallel test seldom moves the package.
+On a server most of a test's time is its database, created, migrated and dropped per test - PostgreSQL forces a
+checkpoint at every drop. Reusing databases across tests was weighed and not taken: the reset must drop every table,
+so each test migrates again anyway, and a reused database loses the per-test name that ties a leftover one to its
+test. A ceiling costs only a run that fails; shorten one when a package timeout kills the run before the failure
+reports, as `TestDispatcherDrop`'s 60 s waits once did on MySQL.
+
 **Two DISTINCT opt-outs, for two distinct reasons - do not conflate them:**
 
 - **A test that asserts the real DERIVED pool sizes sets `e.testConnCap = 0` before Startup** (uncaps its pools).
