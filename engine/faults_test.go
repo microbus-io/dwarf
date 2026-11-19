@@ -267,6 +267,7 @@ func TestFault_TransitionCommit(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
+	e.persistBackoff = shortPersistBackoff
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 
@@ -318,6 +319,7 @@ func TestFault_CompleteFlowCommit(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
+	e.persistBackoff = shortPersistBackoff
 	e.SetHost(mux)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
 

@@ -159,7 +159,10 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 		tc := tc
 		t.Run(tc.label, func(t *testing.T) {
 			assert := testarossa.For(t)
-			e, reader, calls := newFaultBatteryEngine(t, "fbat", func(e *Engine) { e.setClaimsTrackerEnabled(false) })
+			e, reader, calls := newFaultBatteryEngine(t, "fbat", func(e *Engine) {
+				e.setClaimsTrackerEnabled(false)
+				e.persistBackoff = shortPersistBackoff
+			})
 			defer e.Shutdown(t.Context())
 
 			// Baseline (no fault): capture the reference final_state and prove a clean world.
@@ -190,7 +193,10 @@ func TestFault_RecoveryLeavesCleanWorld(t *testing.T) {
 	t.Run("leaseStaleWrite", func(t *testing.T) {
 		assert := testarossa.For(t)
 		ctx := context.Background()
-		e, reader, calls := newFaultBatteryEngine(t, "fbatlease", func(e *Engine) { e.setClaimsTrackerEnabled(false) })
+		e, reader, calls := newFaultBatteryEngine(t, "fbatlease", func(e *Engine) {
+			e.setClaimsTrackerEnabled(false)
+			e.persistBackoff = shortPersistBackoff
+		})
 		defer e.Shutdown(ctx)
 
 		baseKey, baseOut := batteryRun(t, e, "fbatlease/g")

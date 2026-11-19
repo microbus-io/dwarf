@@ -95,6 +95,7 @@ func TestFaultComposition_FanOutBranch(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
+	e.persistBackoff = shortPersistBackoff
 	assert.NoError(e.SetWorkers(4))
 	e.SetHost(mux)
 	reader := withManualReader(e)
@@ -156,6 +157,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 
 	e := NewEngineUnderTest(t.Name())
 	defer e.Shutdown(t.Context())
+	e.persistBackoff = shortPersistBackoff
 	e.SetHost(mux)
 	reader := withManualReader(e)
 	assert.Must(assert.NoError(e.Startup(t.Context())))
@@ -180,7 +182,7 @@ func TestFaultComposition_SubgraphChild(t *testing.T) {
 func TestFaultComposition_RepeatedFault(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
-	e, reader, calls := newFaultBatteryEngine(t, "fcrep", nil)
+	e, reader, calls := newFaultBatteryEngine(t, "fcrep", func(e *Engine) { e.persistBackoff = shortPersistBackoff })
 	defer e.Shutdown(t.Context())
 
 	// Baseline (no fault): reference final_state and a clean world.

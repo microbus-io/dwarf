@@ -84,6 +84,7 @@ func newBatchedCohort(t *testing.T, budget time.Duration) *batchedCohort {
 	c.e = NewEngineUnderTest(t.Name())
 	t.Cleanup(func() { c.e.Shutdown(ctx) })
 	c.e.SetHost(mux)
+	c.e.persistBackoff = shortPersistBackoff
 	var opts *workflow.FlowOptions
 	if budget > 0 {
 		c.e.leaseMargin = 200 * time.Millisecond
