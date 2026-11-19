@@ -34,6 +34,7 @@ import (
 	"github.com/microbus-io/dwarf/hosts"
 	"github.com/microbus-io/dwarf/internal/enginetest"
 	"github.com/microbus-io/dwarf/workflow"
+	"github.com/microbus-io/sequel"
 	"github.com/microbus-io/testarossa"
 )
 
@@ -360,12 +361,12 @@ func impairedShard(t *testing.T, mode int32) {
 	} else {
 		assert.Zero(placedBad, "a Create was placed on the shard this replica cannot read")
 	}
-	lctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	lctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	start := time.Now()
 	_, lerr := e.ListOpen(lctx, workflow.Query{Limit: 10})
 	cancel()
 	t.Logf("ListOpen: %v after %s", lerr, time.Since(start).Round(time.Millisecond))
-	sctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	sctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	start = time.Now()
 	info, serr := e.ShardInfo(sctx)
 	cancel()
@@ -377,7 +378,7 @@ func impairedShard(t *testing.T, mode int32) {
 	start = time.Now()
 	go func() { started <- e2.Startup(ctx) }()
 	stop()
-	const watch = 5 * time.Second
+	const watch = time.Second
 	select {
 	case err := <-started:
 		t.Logf("Startup while impaired: %v after %s", err, time.Since(start).Round(time.Millisecond))
@@ -394,6 +395,7 @@ func impairedShard(t *testing.T, mode int32) {
 	}
 
 	proxy.set(proxyPass)
+	healedAt := time.Now()
 	t.Logf("impaired for %s", time.Since(impairedAt).Round(time.Millisecond))
 	select {
 	case took := <-stopped:
@@ -402,7 +404,18 @@ func impairedShard(t *testing.T, mode int32) {
 	case <-time.After(timeout):
 		t.Fatal("Shutdown never returned after the shard healed")
 	}
-	var err error
+	// The stopped replica's Leave and its lease releases may not have reached the impaired shard: its row would then hold
+	// a residue class there until the dispatch window lapsed, and its claimed steps wait out their leases. The test
+	// deletes the row, as that Leave would have, and lapses the leases, as the time would.
+	db, err := sequel.Open("", impaired.String())
+	assert.Must(assert.NoError(err))
+	_, err = db.ExecContext(ctx, "DELETE FROM dwarf_peers WHERE engine_id=?", e.engineID)
+	if err == nil {
+		_, err = db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE status='"+
+			workflow.StatusRunning+"' AND parked=0")
+	}
+	db.Close()
+	assert.Must(assert.NoError(err))
 	select {
 	case err = <-started:
 	case <-time.After(timeout):
@@ -422,4 +435,5 @@ func impairedShard(t *testing.T, mode int32) {
 			assert.Equal(workflow.StatusCompleted, out.Status)
 		}
 	}
+	t.Logf("the impaired shard's flows completed %s after it healed", time.Since(healedAt).Round(time.Millisecond))
 }
