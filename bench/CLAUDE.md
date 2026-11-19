@@ -167,21 +167,22 @@ throughput at identical settings. Autovacuum is the mechanism worth knowing — 
 INSTANCE (3 by default), so an abandoned database full of dead tuples spends workers that the live one
 needs, on top of the disk it holds.
 
-**A 10-minute arm is the shortest one worth trusting, because this system stalls for 30–60s at a time.**
-The same 8-vCPU configuration reports 99.9% of command over 600s and something close to catastrophic over
-a 120s window that happens to land on a stall — both true, same run. Two consequences for arm design:
-**state the window length beside every throughput number**, and never read a single short arm as a
-property of the configuration. The stalls are invisible in throughput anyway (every arm of a six-rate
-sweep delivered ~100% of command, including one whose p99 was 62 SECONDS) — **watch p99/p50**, which ran
-1.2x when clean and 6.5x at the onset. The stall recurs and clears itself with the offered rate unchanged
-(one pool and rate on 64 vCPU: 9,183 steps/s with a 75s p50 in one 120s window, 19,685 in another), and a
-collapsed arm has been bracketed by working pools on both sides - **never place a stability boundary from a
-collapsed arm**.
+**An arm is 2 min of warmup and a 6-minute window, unless its step says otherwise (user, 2026-11-06).** On
+saturated arms, a 2-minute slice of a 0 B run landed within ~2% of its 6-minute mean, while payload arms swung 15-45%
+per 10 s sample with the checkpoint cycle and a 2-minute slice missed by up to 10-20%: read a payload arm over its
+whole window. **State the window length beside every throughput number**, and never read a single short arm as a
+property of the configuration: this system has stalled for 30-60 s at a time, and the same 8-vCPU configuration
+reported 99.9% of command over 600 s and something close to catastrophic over a 120 s window that landed on a stall -
+both true, same run. The stalls are invisible in throughput anyway (every arm of a six-rate sweep delivered ~100% of
+command, including one whose p99 was 62 SECONDS) — **watch p99/p50**, which ran 1.2x when clean and 6.5x at the
+onset. The stall recurs and clears itself with the offered rate unchanged (one pool and rate on 64 vCPU: 9,183 steps/s
+with a 75s p50 in one 120s window, 19,685 in another), and a collapsed arm has been bracketed by working pools on both
+sides - **never place a stability boundary from a collapsed arm**. An arm that looks for a stall sets a longer window.
 
-**The rig's standard arm is 2 min of warmup and a 6-minute window (user, 2026-11-06)**, shorter than the 10 minutes
-above: on saturated arms with nothing stalling, a 2-minute slice of a 0 B run landed within ~2% of its 6-minute mean,
-while payload arms swung 15-45% per 10 s sample with the checkpoint cycle and a 2-minute slice missed by up to
-10-20%. Read a payload arm over its whole window, and give an arm that looks for a stall the longer one.
+**With the archive on, a window starts after the archive does.** A closed flow waits the one-minute grace before it
+is copied, and the first copies landed ~75 s into a run (2026-11-06), so the 2-minute warm-up clears it. A shorter
+warm-up measures a shard not yet paying for its archive: shorten the grace (`DWARF_TESTING_ARCHIVE_GRACE`) and say
+so in the label instead.
 
 **The run-to-run noise floor is ~5-12% and rig-dependent - establish it before reading any curve.** Two
 same-spec 64-vCPU instances measured 25,366 and 28,491 steps/s at one pool; two 16-vCPU rigs 7,296 and 8,342.
