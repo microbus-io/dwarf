@@ -10,6 +10,9 @@ uniform not-found, host-side authz) — see the engine doc.
 
 ### Format
 
+**Frozen from v1.0.0.** Callers store keys, so after v1.0.0 a change to the shape below breaks every key already
+handed out: a MAJOR.
+
 A flow key is **`{shard}-{hour}-{flowID}-{token}`** and a step key **`{shard}-{hour}-{flowID}-{stepID}-{token}`**,
 with a **1-based** shard:
 

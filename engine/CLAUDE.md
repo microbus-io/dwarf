@@ -4581,7 +4581,9 @@ working through - and demoting it is right for only the first. And the harm it w
 holding a bounded caller's slots) exists only for callers with bounded concurrency, which the engine cannot
 see, so no threshold, step or hold time has a derivation. Near saturation a 20% speed gap reads as ~3x
 latency, and one 10-point shift between two shards flips which one reads slow. A slow shard is the
-operator's to weight down; `dwarf_shard_operation_seconds{op,shard}` is what lets them see it. `Cordoned` shards are excluded from
+operator's to weight down; `dwarf_shard_operation_seconds{op,shard}` is what lets them see it. A shard that is down is
+the database tier's to restore - replication, a hot-cold swap - not placement's: its flows are pinned to it and wait
+for it. `Cordoned` shards are excluded from
 placement entirely (everything resident proceeds - execution, subgraph children, `Continue`, `Fork`); all
 shards cordoned is a loud 503 at `Create`. Pinned by `engine/poolsizing_test.go`.
 

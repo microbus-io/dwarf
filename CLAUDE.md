@@ -303,7 +303,9 @@ The user tags and publishes a release; the agent prepares it. Work through these
 
 1. **The version.** A PATCH carries no migration and no change to what replicas write to or expect from the shared
    tables; anything that does is a MINOR at least (`internal/migrations/CLAUDE.md`, "The migration sequence").
-   Before a PATCH, `git diff <its minor's .0 tag> -- internal/migrations` is empty.
+   Before a PATCH, `git diff <its minor's .0 tag> -- internal/migrations` is empty. From v1.0.0 the public API, the
+   carrier wire format (`workflow/CLAUDE.md`) and the key format (`internal/keys/CLAUDE.md`) are frozen: a breaking
+   change to any of them is a MAJOR. Before v1.0.0 a MINOR may break them, and the notes say how.
 2. **The migrations.** No file the previous tag shipped changed, numbers only appended, and a new file ran on a
    database the previous tag made and filled, on every dialect. A change touching a stored meaning or replica
    coordination ran beside the previous release on one database. Before v1.0.0 only the sequence name is held,

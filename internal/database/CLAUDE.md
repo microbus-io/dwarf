@@ -101,6 +101,8 @@ engine makes seek instead (below).
 serialize) but throughput tops out at one transaction at a time. Supported in production for one replica on a file
 with write-ahead logging; used in memory by `NewEngineUnderTest` with an empty DSN. `sequel` injects a `busy_timeout`
 (2,000 ms unless the DSN sets one), which keeps workers from failing at once on `SQLITE_BUSY` during fan-out.
+Outside test mode **the engine does not rewrite a SQLite DSN**: journal mode, synchronous, cache sharing and the rest
+are the caller's choice, and the test suite's in-memory DSNs depend on theirs.
 
 ## Sharding guidance & topology
 

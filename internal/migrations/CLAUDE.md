@@ -26,6 +26,8 @@ and give the statements an existing database needs by hand in the release notes,
   that number, so editing it forks the schema - new installs get the edit, upgraded ones do not, and nothing
   reports the difference. A change is a new `N+1.sql`. A file has shipped when the latest tag carries it:
   `git ls-tree --name-only $(git describe --tags --abbrev=0) internal/migrations/live/ internal/migrations/archive/`.
+  No checksum test guards it: whoever edits a shipped file can edit its checksum, so the rule is held here and by
+  the release step that diffs `internal/migrations` against the previous tag.
 - **Numbers only append.** The watermark is a `MAX`, not a set, so a file numbered at or below an applied number
   (a skipped number filled in later, a `2a.sql` slotted between) is silently never run on an existing database.
 - **A new `N.sql` means a MINOR release at least, never a PATCH** (the published versioning policy in
