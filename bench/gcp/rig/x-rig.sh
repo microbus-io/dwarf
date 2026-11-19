@@ -39,10 +39,12 @@ authok
 
 if [ -n "${REUSE:-}" ]; then
   # The instance and the VM exist and the VM holds the binary. Whatever the orchestrator that left them had running
-  # there (a run, a monitor, an injection waiting out its delay) is stopped, so the step starts clean.
+  # there (a run, a monitor, an injection waiting out its delay) is stopped, so the step starts clean. A driver is
+  # stopped by its process group (driver-step.sh records it), since its process name is bash; it removes its netem.
   log "reusing $DB + $ADMIN; step $STEP"
   [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] || { log "$DB not RUNNABLE"; exit 1; }
-  vmssh "$ADMIN" 'for p in dwarf-bench g-run.sh inject.sh rss-mon.sh slow-mon.sh s-mon.sh v-mon.sh age-mon.sh ff-set.sh; do pkill -x "$p"; done; true' ||
+  vmssh "$ADMIN" 'for f in out/*.pgid; do [ -f "$f" ] && kill -TERM -- -"$(cat "$f")"; rm -f "$f"; done
+    for p in dwarf-bench g-run.sh inject.sh rss-mon.sh slow-mon.sh s-mon.sh v-mon.sh age-mon.sh ff-set.sh; do pkill -x "$p"; done; true' ||
     { log "$ADMIN not reachable"; exit 1; }
 else
   log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"

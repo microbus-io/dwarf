@@ -1,5 +1,5 @@
 # GATE (x-rig step, BIN=bench-9e5 = 9e5d16b, DBFLAGS = auto_explain at 10 s + log_lock_waits). Verifies the due-index
-# usage gate (556c0a4, _WORK.md #32) on BASE's base-k512 shape: saturated linear 0 B, 512 fairness keys, cap 2,000,
+# usage gate (556c0a4) on the base-k512 shape: saturated linear 0 B, 512 fairness keys, cap 2,000,
 # 2 + 16 min, fresh database. Then M runs on the same rig (sourced at the end).
 #   pass:  auto_explain (Cloud Logging) shows no refill fetch over 10 s, and out/mon-gate-k512.log.xmin never names
 #          the fetch as the oldest snapshot holder for more than a few seconds.

@@ -16,8 +16,8 @@
 # trap pulls what is left and tears everything down. `touch $OUT/stop` ends after the current arm.
 set -u
 BIN=${BIN:?set BIN to a pinned binary in \$RIG_HOME}
-D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the VM-side helpers
-R=$(cd "$D/../../.." && pwd)                          # the repository: dbcpu.sh, and artifacts in $R/bench/results
+D=$(cd "$(dirname "$0")" && pwd)                      # this kit: dbcpu.sh and the VM-side helpers
+R=$(cd "$D/../../.." && pwd)                          # the repository; artifacts land in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-s2}
 TIER=${TIER:-db-custom-32-131072} WIN=${WIN:-16m}
@@ -130,7 +130,7 @@ draw() { # draw <slot>...: solo saturated 1 + 6 min on each slot at once from $B
   sleep 150
   for s in "$@"; do tag="draw-${DBN[$s]}" x=""
     for t in 1 2 3 4 5; do
-      x=$(DB_INSTANCE="${DBN[$s]}" VCPUS=32 PAD_SECONDS=0 "$R/bench/gcp/dbcpu.sh" "$OUT/draw/$tag.json" 2>&1 | tail -1)
+      x=$(DB_INSTANCE="${DBN[$s]}" VCPUS=32 PAD_SECONDS=0 "$D/dbcpu.sh" "$OUT/draw/$tag.json" 2>&1 | tail -1)
       n=$(echo "$x" | sed -n 's/.* n= *\([0-9]*\) .*/\1/p')
       [[ "${n:-0}" -ge 4 ]] && echo "$x" | grep -q core-ms && break; sleep 60
     done
@@ -181,7 +181,7 @@ print(round(r['stepsPerSec']), 'valid' if d.get('valid') else 'INVALID:' + str(d
   # Database CPU per shard over this arm's window, once Cloud Monitoring has it; the arm's mean steps/s per shard.
   gc compute scp --zone=$ZONE "${vms[0]}":~/out/$a.json "$OUT/" >/dev/null 2>&1
   for s in "${slots[@]}"; do
-    ( sleep 240; DB_INSTANCE="${DBN[$s]}" VCPUS=32 PAD_SECONDS=0 STEPS=$(( tot / ${#slots[@]} )) "$R/bench/gcp/dbcpu.sh" "$OUT/$a.json" 2>&1 |
+    ( sleep 240; DB_INSTANCE="${DBN[$s]}" VCPUS=32 PAD_SECONDS=0 STEPS=$(( tot / ${#slots[@]} )) "$D/dbcpu.sh" "$OUT/$a.json" 2>&1 |
         tail -1 | sed "s/^/$tag ${DBN[$s]} /" >> "$OUT/dbcpu-arms.txt" ) &
   done
   sleep 30; }

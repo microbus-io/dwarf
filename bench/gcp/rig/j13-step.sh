@@ -1,5 +1,5 @@
-# J13 (x-rig step: `BIN=bench-<sha> x-rig.sh j13 1000 j13-step.sh`, with $RIG_HOME/bench-<sha>-turn beside it;
-# _JANITOR.md step 13). One 32 vCPU instance, fresh databases, saturated linear 0 B, cap 2,000:
+# J13 (x-rig step: `BIN=bench-<sha> x-rig.sh j13 1000 j13-step.sh`, with $RIG_HOME/bench-<sha>-turn beside it).
+# One 32 vCPU instance, fresh databases, saturated linear 0 B, cap 2,000:
 #   j13-warm   build A, 4 min, not read (a fresh instance's first checkpoints read low, bench/CLAUDE.md).
 #   j13-a-on   build A, archiving on: does archiving keep up? out/j13-a-on.json - steps/s, p99, dwarf_flows_closed
 #              against dwarf_flows_archived, dwarf_archive_lag_seconds, dwarf_janitor_batch_seconds by job and part
@@ -11,7 +11,8 @@
 #              each is copied in stages and its live copy deleted in chunks, right after the grace, under the load:
 #              the large_archiving and sweep_deletion batch times, out/pgss-chunk-j13-large.txt (the chunks' step
 #              reads: rows and time a call), and auto_explain's plans over 250 ms in Cloud Logging (DBFLAGS).
-# Every arm: out/slow-<tag>.log, the statements active over 500 ms every 250 ms (_BUGS.md #11). ~60 min of arms.
+# Every arm: out/slow-<tag>.log, the statements active over 500 ms every 250 ms: which statement a slow janitor
+# round runs. ~60 min of arms.
 gc compute scp --zone=$ZONE "$D/age-mon.sh" "$D/slow-mon.sh" "$D/pgss-chunk.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
   gc compute scp --zone=$ZONE "$S/$BIN-turn" "$ADMIN":~/dwarf-bench-b.bin >/dev/null 2>&1 &&
   vmssh "$ADMIN" 'chmod +x age-mon.sh slow-mon.sh pgss-chunk.sh dwarf-bench-b.bin' || { log "J13 DEPLOY FAILED"; exit 1; }

@@ -57,7 +57,7 @@ set -euo pipefail
 # is an ordinary outcome the gate retries). So on a host without psql the gate reads "no measurement" as
 # "RTT too high" and cools down forever, printing nothing that names the cause. Measured: a bare Debian
 # bench VM sat in that loop for 40 minutes on the first arm. Fail here instead, where the message is the
-# actual problem. provision.sh installs it; this is the guard for a host provisioned some other way.
+# actual problem. x-rig.sh installs it; this is the guard for a host set up some other way.
 command -v psql >/dev/null 2>&1 || {
   echo "ABORT: psql not found. Install it (Debian: sudo apt-get install -y postgresql-client)." >&2
   exit 1

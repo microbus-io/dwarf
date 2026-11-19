@@ -1,4 +1,4 @@
-# V-archive, lz4 at 1 MB, sustained load (x-rig step, _REDO_BENCH.md "Next rig session", planned 2026-11-07):
+# V-archive, lz4 at 1 MB, sustained load (x-rig step):
 #   BIN=<pin> DBFLAGS=autovacuum_work_mem=1048576,max_wal_size=20480,checkpoint_timeout=900,wal_compression=lz4,log_checkpoints=on \
 #     x-rig.sh va 1000 va-step.sh
 # One 32 vCPU instance and one c4a-16, a fresh database per arm, the archive on. ~4 h with provisioning.

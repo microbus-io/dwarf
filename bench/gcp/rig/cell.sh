@@ -385,5 +385,5 @@ echo
 echo "== ${CELL} =="
 summarize
 echo "
-Database CPU is not in the artifacts (a managed instance). Pull them and run ./dbcpu.sh <artifact>... from
-the operator machine. Per-run stored and WAL bytes are in each artifact's results[0].db."
+Database CPU is not in the artifacts (a managed instance). Run dbcpu.sh <artifact>... on the pulled artifacts
+from the workstation. Per-run stored and WAL bytes are in each artifact's results[0].db."

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: real-rig.sh   REAL (_REDO_BENCH.md), a realistic day on one database, on the pinned build $BIN: one 32 vCPU
+# Usage: real-rig.sh   REAL, a realistic day on one database, on the pinned build $BIN: one 32 vCPU
 # Cloud SQL Postgres 16 instance (1 TB SSD, Query Insights, $DBFLAGS), two c4a-standard-8 engine replicas that also
 # generate half the load each, and a c4a-standard-2 admin host (psql, s-mon.sh, v-mon.sh).
 #   0  draw check: both replicas, saturated linear 0 B, 1 + 6 min; dbcpu.sh's core-ms per step above $DRAW_MAX is a slow
@@ -150,7 +150,7 @@ for round in $(seq 0 "$REDRAWS"); do
   drop $RUN_DB
   sleep 150 # Cloud Monitoring lands CPU a few minutes late
   x=""; for t in 1 2 3 4 5; do
-    x=$(DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 STEPS=$total "$R/bench/gcp/dbcpu.sh" "$OUT/$tag-$EA.json" 2>&1 | tail -1)
+    x=$(DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 STEPS=$total "$D/dbcpu.sh" "$OUT/$tag-$EA.json" 2>&1 | tail -1)
     echo "$x" | grep -q core-ms && break; sleep 60; done
   cms=$(echo "$x" | sed -n 's/.* \([0-9.]*\) core-ms\/step.*/\1/p'); echo "$DB $total $x" >> "$OUT/draw.txt"
   log "  $DB: $total steps/s, ${cms:-?} core-ms/step"
@@ -214,6 +214,6 @@ log "flows by status: $(adm "$(dsn $RUN_DB)" "SELECT string_agg(status||'='||n, 
 log "steps not terminal: $(adm "$(dsn $RUN_DB)" "SELECT count(*) FROM dwarf_steps WHERE status NOT IN ('completed','failed','terminated','cancelled')")"
 log "peer rows left: $(adm "$(dsn $RUN_DB)" "SELECT count(*) FROM dwarf_peers")"
 adm "$(dsn $RUN_DB)" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-day.txt" 2>&1
-DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 "$R/bench/gcp/dbcpu.sh" -w "$(date -u -r $EPOCH +%FT%TZ)" "$(date -u +%FT%TZ)" > "$OUT/dbcpu-day.txt" 2>&1
+DB_INSTANCE="$DB" VCPUS=32 PAD_SECONDS=0 "$D/dbcpu.sh" -w "$(date -u -r $EPOCH +%FT%TZ)" "$(date -u +%FT%TZ)" > "$OUT/dbcpu-day.txt" 2>&1
 drop $RUN_DB
 log "REAL done"

@@ -33,7 +33,7 @@ WIN_MIN=16 one_run ha-1 $SAT -payload 0
 # within this instance either way; a slow draw only means the headline is not quoted from it.
 sleep 150 # Cloud Monitoring lands CPU a few minutes late
 gc compute scp --zone=$ZONE "$ADMIN":~/out/ha-1.json "$OUT/" >/dev/null 2>&1 &&
-  log "  draw: $(DB_INSTANCE="$DB" VCPUS=32 WRITE=1 "$R/bench/gcp/dbcpu.sh" "$OUT/ha-1.json" 2>&1 | tail -1)"
+  log "  draw: $(DB_INSTANCE="$DB" VCPUS=32 WRITE=1 "$D/dbcpu.sh" "$OUT/ha-1.json" 2>&1 | tail -1)"
 verdict=$(vmssh "$ADMIN" "python3 -c \"
 import json
 r = json.load(open('out/ha-1.json'))['results'][0]

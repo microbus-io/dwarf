@@ -16,7 +16,7 @@
 # After a SIGKILL, check `tc qdisc show` by hand.
 #
 # Usage:
-#   DB_HOST=10.125.0.17 ./withnetem.sh 0 -- ./shardladder.sh
+#   DB_HOST=10.125.0.17 ./withnetem.sh 0 -- ./taskdelay.sh
 #   DB_HOST=10.125.0.17 DELAY_MS=1.5 ./withnetem.sh -- ./replicaladder.sh
 # Args: the first argument is the delay in ms (or set DELAY_MS); everything after `--` is the command.
 set -euo pipefail

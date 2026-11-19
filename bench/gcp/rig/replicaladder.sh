@@ -30,7 +30,7 @@
 #      startup and re-read it every pingInterval (10s), so pool sizes converge on a heartbeat, not
 #      instantly. A warmup shorter than that measures the fleet mid-convergence - which is a real
 #      transient, but not this experiment. Default 30s = 3 beats.
-#   5. AN RTT GATE, as in shardladder.sh: a shard 2x further away is a different experiment.
+#   5. AN RTT GATE: a shard 2x further away is a different experiment.
 #
 # WHAT THIS RIG CANNOT DO. The replicas are goroutine fleets in ONE process (bench/main.go). That is
 # right for the pool split, peer discovery and the refiller multiplication - all of which are
@@ -54,7 +54,7 @@ set -euo pipefail
 # is an ordinary outcome the gate retries). So on a host without psql the gate reads "no measurement" as
 # "RTT too high" and cools down forever, printing nothing that names the cause. Measured: a bare Debian
 # bench VM sat in that loop for 40 minutes on the first arm. Fail here instead, where the message is the
-# actual problem. provision.sh installs it; this is the guard for a host provisioned some other way.
+# actual problem. x-rig.sh installs it; this is the guard for a host set up some other way.
 command -v psql >/dev/null 2>&1 || {
   echo "ABORT: psql not found. Install it (Debian: sudo apt-get install -y postgresql-client)." >&2
   exit 1
@@ -89,7 +89,8 @@ fi
 IFS=',' read -r -a ARMS <<<"$RLADDER"
 
 # RUN_ID namespaces every database this script creates and drops, so its only destructive operation
-# (DROP DATABASE) can only ever match a name this run built. See shardladder.sh for the full argument.
+# (DROP DATABASE) can only ever match a name this run built: a predictable name could be one a concurrent
+# campaign on the same instance also picked, and a rerun would drop its in-flight fill.
 RUN_ID="${RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 RUN_ID="${RUN_ID//[^a-zA-Z0-9]/_}"
 
@@ -113,8 +114,7 @@ psq() { psql "$1" -X -q -At -c "$2"; }
 # --- The RTT gate ---------------------------------------------------------------------------------
 # Round trips inside ONE psql session, MINIMUM taken. The single session is the whole trick: timing a
 # `psql -c "SELECT 1"` per sample measures ~29ms of process startup and buries a sub-millisecond RTT,
-# so the gate would pass the exact experiment it exists to reject. See shardladder.sh for the full
-# argument, including why the gate is on the ABSOLUTE delta rather than the ratio.
+# so the gate would pass the exact experiment it exists to reject.
 probe_rtt_ms() { # $1 = dsn
   local dsn="$1" script i
   script=$'\\timing on\n'
@@ -135,6 +135,13 @@ RTT_MIN=$(printf '%s\n' "${RTTS[@]}" | sort -g | head -1)
 RTT_MAX=$(printf '%s\n' "${RTTS[@]}" | sort -g | tail -1)
 RTT_DELTA=$(awk -v a="$RTT_MAX" -v b="$RTT_MIN" 'BEGIN{printf "%.3f", a-b}')
 echo "  spread ${RTT_DELTA} ms absolute, tolerance ${RTT_MAX_DELTA_MS} ms"
+# The gate is on the ABSOLUTE delta, not the ratio. RTT does not divide throughput, because it is OVERLAPPED:
+# a worker blocked on the wire holds no database CPU, so by Little's law an extra L of per-step wire time costs
+# only (throughput x L) more workers in flight. At 3,520 steps/s per shard, a 0.1 ms delta over ~7 round trips
+# buys ~2.5 extra workers against a pool of ~384, and disappears; a ratio gate on sub-millisecond values reads
+# it as 2.3x and aborts a good campaign. What binds is a delta where (throughput x 7 x delta) approaches the
+# worker pool - cross-region territory - so 1 ms is inert for same-zone jitter and still catches a shard in
+# another region or behind a proxy.
 if awk -v d="$RTT_DELTA" -v t="$RTT_MAX_DELTA_MS" 'BEGIN{exit !(d>t)}'; then
   echo >&2
   echo "ABORT: shard RTTs differ by ${RTT_DELTA} ms (tolerance ${RTT_MAX_DELTA_MS} ms)." >&2

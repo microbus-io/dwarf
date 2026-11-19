@@ -1,5 +1,5 @@
 # J14 (x-rig step: `BIN=bench-<sha> x-rig.sh j14 1000 j14-step.sh`, with $RIG_HOME/bench-<sha>-k3 beside it - the same
-# build with three fast-archiving and three fast-deletion jobs a shard; _JANITOR.md step 13). One 32 vCPU instance,
+# build with three fast-archiving and three fast-deletion jobs a shard). One 32 vCPU instance,
 # fresh databases, saturated linear 0 B, cap 2,000:
 #   j14-warm   4 min, not read (a fresh instance's first checkpoints read low, bench/CLAUDE.md).
 #   j14-on     two jobs of each fast kind, archiving on: does archiving keep up? out/age-j14-on.log is the oldest closed
@@ -11,7 +11,8 @@
 #   j14-large  two jobs, archiving on, plus a few fan-outs of 270,000 branches - past the 256k staging threshold: the
 #              staged copies and chunked deletions under the load, out/pgss-chunk-j14-large.txt (the chunks' step
 #              reads), and auto_explain's plans over 250 ms in Cloud Logging (DBFLAGS).
-# Every arm: out/slow-<tag>.log, the statements active over 500 ms every 250 ms (_BUGS.md #11).
+# Every arm: out/slow-<tag>.log, the statements active over 500 ms every 250 ms: which statement a slow janitor
+# round runs.
 gc compute scp --zone=$ZONE "$D/age-mon.sh" "$D/slow-mon.sh" "$D/pgss-chunk.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
   gc compute scp --zone=$ZONE "$S/$BIN-k3" "$ADMIN":~/dwarf-bench-k3.bin >/dev/null 2>&1 &&
   vmssh "$ADMIN" 'chmod +x age-mon.sh slow-mon.sh pgss-chunk.sh dwarf-bench-k3.bin' || { log "J14 DEPLOY FAILED"; exit 1; }

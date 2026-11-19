@@ -23,16 +23,16 @@
 #   ./dbcpu.sh artifact.json [artifact.json ...]
 #   ./dbcpu.sh -w 2026-07-31T12:00:00Z 2026-07-31T12:05:00Z
 #   STEPS=21900 ./dbcpu.sh -live 3        # the last 3 minutes of a run in progress: the draw check
-# Knobs (env): PROJECT, DB_INSTANCE, VCPUS (for the cores conversion, default 16), STEPS (steps/s for the per-step
-#   figure; read from each artifact by default - set it for a multi-host fleet, whose artifacts each hold one
-#   replica's share),
+# Knobs (env): PROJECT, DB_INSTANCE (required: the rig's instance), VCPUS (required, for the cores conversion),
+#   STEPS (steps/s for the per-step figure; read from each artifact by default - set it for a multi-host fleet,
+#   whose artifacts each hold one replica's share),
 #   PAD_SECONDS (widen each side of the window, default 60), WRITE (1 = also store the reading in each
 #   artifact as dbCpu {meanPct, peakPct, points}, which bench/charts_redo.py reads)
 set -euo pipefail
 
 PROJECT="${PROJECT:-dwarf-bench-mbus}"
-DB_INSTANCE="${DB_INSTANCE:-dwarf-bench-db}"
-VCPUS="${VCPUS:-16}"
+DB_INSTANCE="${DB_INSTANCE:?set DB_INSTANCE to the Cloud SQL instance, e.g. dwarf-<name>-db}"
+VCPUS="${VCPUS:?set VCPUS to the instance vCPU count}"
 PAD_SECONDS="${PAD_SECONDS:-60}"
 
 command -v python3 >/dev/null 2>&1 || { echo "ABORT: python3 required" >&2; exit 1; }

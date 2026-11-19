@@ -25,7 +25,7 @@ hb_show hb-warm
 WIN_MIN=3 one_run hb-warm $SAT -payload 0
 sleep 150 # Cloud Monitoring lands CPU a few minutes late
 gc compute scp --zone=$ZONE "$ADMIN":~/out/hb-warm.json "$OUT/" >/dev/null 2>&1 &&
-  log "  draw: $(DB_INSTANCE="$DB" VCPUS=32 WRITE=1 "$R/bench/gcp/dbcpu.sh" "$OUT/hb-warm.json" 2>&1 | tail -1)"
+  log "  draw: $(DB_INSTANCE="$DB" VCPUS=32 WRITE=1 "$D/dbcpu.sh" "$OUT/hb-warm.json" 2>&1 | tail -1)"
 one_run hb-0-250 $SAT -payload 0
 one_run hb-0-500 $SAT -payload 0 -max-connections 500
 a=$(hb_steps hb-0-250); b=$(hb_steps hb-0-500)
