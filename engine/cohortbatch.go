@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/microbus-io/dwarf/internal/database"
@@ -28,9 +29,9 @@ import (
 	"github.com/microbus-io/sequel"
 )
 
-// arrivalBatchMax bounds the arrivals one transaction lands. Each member is one fenced UPDATE in the transaction, which
-// holds the spawn row's write lock until it commits, so a larger batch holds every other replica's arrivals at that
-// row for longer.
+// arrivalBatchMax bounds the arrivals one transaction lands. The transaction holds the spawn row's write lock until it
+// commits, so a larger batch holds every other replica's arrivals at that row for longer. Its members' clear binds
+// three values a member, padded to the next of database.IDList's lengths (500 at this cap), under SQL Server's 2,100.
 const arrivalBatchMax = 256
 
 // arrivalKey names one cohort. A spawn step's id is unique only within its shard, and stripes are shared across
@@ -227,25 +228,63 @@ func (e *Engine) arrivalBatchTx(ctx context.Context, tx *sequel.Tx, members []*d
 		}
 		return nil
 	}, "UPDATE dwarf_steps SET cohort_arrivals=cohort_arrivals+? WHERE step_id=?", total, spawnID)
+	// Every member's clear is one statement, each row fenced on its own member's generation, so the transaction holds
+	// the spawn row for a few round trips on a driver that does not pipeline, not one per member. The CASE pairs are
+	// padded as the list is, so the text takes the list's few forms. The ELSE gives the CASE its type: PostgreSQL types
+	// a CASE of bound values alone as text, which a BIGINT does not compare to. MySQL counts CHANGED rows, which is
+	// honest here: a match flips the flag from 1 to 0.
+	ids := make([]int, len(members))
 	for i, m := range members {
-		// MySQL counts CHANGED rows, which is honest here: a match flips the flag from 1 to 0.
-		batch.queue(func(res *sequel.BatchResults) error {
-			clear, err := res.Exec()
-			if err != nil {
-				return errors.Trace(err)
-			}
-			if n, _ := clear.RowsAffected(); n == 0 {
-				fenced[i] = true
-			}
-			return nil
-		}, "UPDATE dwarf_steps SET advancing=0 WHERE step_id=? AND lease_seq=? AND advancing=1", m.stepID, m.row.leaseSeq)
+		ids[i] = m.stepID
 	}
+	list, listArgs := database.IDList(ids)
+	args := slices.Clone(listArgs)
+	for k := range listArgs {
+		m := members[min(k, len(members)-1)]
+		args = append(args, m.stepID, m.row.leaseSeq)
+	}
+	var cleared int64
+	batch.queue(func(res *sequel.BatchResults) error {
+		clear, err := res.Exec()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		cleared, _ = clear.RowsAffected()
+		return nil
+	}, "UPDATE dwarf_steps SET advancing=0 SEEK_FROM(dwarf_steps, 1(step_id)) WHERE step_id IN ("+list+") AND advancing=1"+
+		" AND lease_seq=CASE step_id"+strings.Repeat(" WHEN ? THEN ?", len(listArgs))+" ELSE lease_seq-1 END", args...)
 	var c cohortCounts
 	batch.queue(func(res *sequel.BatchResults) error {
 		return errors.Trace(res.QueryRow().Scan(&c.arrivals, &c.size, &c.failures, &c.cancellations, &c.spawnLineageID))
 	}, "SELECT cohort_arrivals, cohort_size, cohort_failures, cohort_cancellations, lineage_id FROM dwarf_steps WHERE step_id=?", spawnID)
 	if err := batch.flush(); err != nil {
 		return err
+	}
+	if int(cleared) < len(members) {
+		// Some member was fenced: its step was taken back while it waited. Which ones is read back in the transaction - a
+		// member the clear matched now reads advancing=0 at its own generation, which only its own dispatch writes.
+		rows, err := tx.QueryContext(ctx, "SELECT step_id, lease_seq FROM dwarf_steps WHERE step_id IN ("+list+") AND advancing=0", listArgs...)
+		if err != nil {
+			return errors.Trace(err)
+		}
+		landed := make(map[int]int, len(members))
+		for rows.Next() {
+			var id, seq int
+			if err := rows.Scan(&id, &seq); err != nil {
+				rows.Close()
+				return errors.Trace(err)
+			}
+			landed[id] = seq
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return errors.Trace(err)
+		}
+		for i, m := range members {
+			if seq, ok := landed[m.stepID]; !ok || seq != m.row.leaseSeq {
+				fenced[i] = true
+			}
+		}
 	}
 	var resolver *dispatch
 	fencedArrivals := 0

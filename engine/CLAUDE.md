@@ -1485,11 +1485,17 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
     gate acquirer by its older claim. Pinned by `TestCohortBatch_ALandedMemberTakesNoTurn` (fails with the
     unconditional re-take).
   - *Each member's arrival still commits with its own row*, which is what makes this sound. The transaction writes
-    the spawn's `+total` first (the lone bump's order), then every member's fenced `advancing=0`, then reads the
-    counters; a member whose fence matched nothing is taken back off the counter before anything reads it, and the
-    last member not fenced resolves the cohort exactly as a lone arrival would (`resolveCohort`). **Do not fold the
-    arrivals into a `+k` held in memory and written apart from the members' rows**: either order of the two writes
-    leaves a crash window that strands the cohort short of `cohort_size` (the count lost) or handles a member twice.
+    the spawn's `+total` first (the lone bump's order), then every member's `advancing=0` in one statement, each row
+    fenced on its own member's generation (a `CASE step_id`), then reads the counters; a member whose fence matched
+    nothing is taken back off the counter before anything reads it, and the last member not fenced resolves the
+    cohort exactly as a lone arrival would (`resolveCohort`). **Do not fold the arrivals into a `+k` held in memory
+    and written apart from the members' rows**: either order of the two writes leaves a crash window that strands the
+    cohort short of `cohort_size` (the count lost) or handles a member twice.
+  - *Do not clear the members with a statement each.* Only PostgreSQL pipelines a batch; on every other driver each
+    statement is a round trip under the spawn row's lock, about 258 at the cap. The cleared count says whether any
+    member was fenced, and only then does the transaction read the members back to find which - a member the clear
+    matched reads `advancing=0` at its own generation, which only its own dispatch writes. Pinned by
+    `TestCohortBatch_FencedMemberIsLeftOut` (fails with the read-back skipped).
   - *A member never abandons the batch*, not even when its lease is taken back, because the leader may be using its
     dispatch; the batch's own fence leaves it out. The leader leads even with its own lease gone. Pinned by
     `TestCohortBatch_FencedMemberIsLeftOut` (the leader fenced; fails with the take-back removed).
