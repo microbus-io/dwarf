@@ -28,7 +28,7 @@ import (
 )
 
 // archiveOverrides sets eng's archive day, archive grace and staging thresholds from the environment, before
-// Startup, and returns what each setter answered. The rig sets them per arm (RUN_ENV in bench/gcp/rig); the engine
+// Startup, and returns what each setter answered. The rig sets them per arm (RUN_ENV in bench/gcp); the engine
 // reads no environment itself. Each one set is logged, since it changes how every closed flow leaves the live tables.
 //
 //	DWARF_TESTING_ARCHIVE_DAY    the archive day's length, a whole number of seconds as a Go duration (600s)

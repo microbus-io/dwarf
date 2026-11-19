@@ -35,7 +35,7 @@
 set -u
 NAME=${1:-ck} BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
 D=$(cd "$(dirname "$0")" && pwd)
-R=$(cd "$D/../../.." && pwd)
+R=$(cd "$D/../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a}
 OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT"

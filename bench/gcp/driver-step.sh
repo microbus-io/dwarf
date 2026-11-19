@@ -5,7 +5,7 @@
 # BENCH=./dwarf-bench and OUT=out/<driver>, then DRIVER_ENV, which sets its own knobs and overrides any of those.
 # NETEM_MS runs it under withnetem.sh at that delay, for a driver that installs no netem of its own (replicaladder.sh,
 # taskdelay.sh). Each driver's header says what it measures, its knobs, and how to read it.
-drv=${DRIVER:?set DRIVER to a driver in bench/gcp/rig (cell.sh, rttderived.sh, replicaladder.sh, taskdelay.sh, burst.sh)}
+drv=${DRIVER:?set DRIVER to a driver in bench/gcp (cell.sh, rttderived.sh, replicaladder.sh, taskdelay.sh, burst.sh)}
 [ -f "$D/$drv" ] || { log "no driver $D/$drv"; exit 1; }
 gc compute scp --zone=$ZONE "$D/$drv" "$D/withnetem.sh" "$ADMIN":~/ >/dev/null 2>&1 &&
   vmssh "$ADMIN" "chmod +x $drv withnetem.sh" || { log "$drv deploy failed"; exit 1; }

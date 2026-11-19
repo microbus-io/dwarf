@@ -11,7 +11,7 @@ NAME=$1 DISK=$2 STEP=$3 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
 #   DBFLAGS='cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on'
 # The recommended settings are added to it unless it sets its own value of one (see below).
 D=$(cd "$(dirname "$0")" && pwd)                      # this kit: the step scripts and the VM-side helpers
-R=$(cd "$D/../../.." && pwd)                          # the repository; artifacts land in $R/bench/results
+R=$(cd "$D/../.." && pwd)                          # the repository; artifacts land in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a}
 OUT=$R/bench/results/$(date +%Y%m%d-%H%M)-$NAME; mkdir -p "$OUT"

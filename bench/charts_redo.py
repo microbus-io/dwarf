@@ -1,4 +1,4 @@
-"""Charts and tables for the cloud benchmark rerun, from bench/gcp/rig/cell.sh cells and -volume artifacts.
+"""Charts and tables for the cloud benchmark rerun, from bench/gcp/cell.sh cells and -volume artifacts.
 
 Each cell directory holds cell.json (written by cell.sh: the cell's coordinates, the derived and optimum
 pools, and one row per run) beside the run artifacts. Run dbcpu.sh with WRITE=1 over the artifacts first,

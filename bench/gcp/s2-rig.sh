@@ -17,7 +17,7 @@
 set -u
 BIN=${BIN:?set BIN to a pinned binary in \$RIG_HOME}
 D=$(cd "$(dirname "$0")" && pwd)                      # this kit: dbcpu.sh and the VM-side helpers
-R=$(cd "$D/../../.." && pwd)                          # the repository; artifacts land in $R/bench/results
+R=$(cd "$D/../.." && pwd)                          # the repository; artifacts land in $R/bench/results
 S=${RIG_HOME:-$R/tmp/rig}                             # never committed: dbpass and the pinned bench binaries
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-s2}
 TIER=${TIER:-db-custom-32-131072} WIN=${WIN:-16m}

@@ -256,7 +256,7 @@ not the pool. Size the rig under the regime the experiment will actually run in.
 
 ## Running the cloud rig
 
-**The kit is `bench/gcp/rig/`.** Each orchestrator creates its rig, sources a step script, pulls the artifacts
+**The kit is `bench/gcp/`.** Each orchestrator creates its rig, sources a step script, pulls the artifacts
 into `bench/results/<date>-<time>-<name>/`, and tears everything down on exit, failures included, after a 30 s grace
 (`TEARDOWN_GRACE`) in which `kill -9` of the orchestrator keeps the rig for another arm. They create their resources in
 the project's network, which `net.sh` makes once and keeps (`net.sh -delete` removes it): the VPC, the SSH firewall rule
@@ -297,7 +297,7 @@ and Cloud SQL's private services range.
   written after a checkpoint is logged whole, and each minute's autovacuum of the live tables - which archiving
   turns over every minute - queued every backend on `WALWrite` and cut commits ~40% for 5-10 s. A run off the
   recommended settings states which it uses and why, beside its numbers.
-- **Gate every quoted rig on its draw:** `bench/gcp/rig/dbcpu.sh -live 3` a few minutes into the first window reads CPU
+- **Gate every quoted rig on its draw:** `bench/gcp/dbcpu.sh -live 3` a few minutes into the first window reads CPU
   per step, `results[].db.flushMs` the flush under load, and `fsync.sh <dsn>` on the idle instance its WAL flush floor
   (one `psql` session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). Record
   all three beside every throughput number.
@@ -460,7 +460,7 @@ shared by every replica so a multi-replica fleet is in the same phase.
 
 Size the window to span **several** cycles, and set `-stats-interval` to a fraction of the burst: the answer
 is a shape over time, and both the window-edge snapshots and the window mean report a burst arm as something
-in between. `bench/gcp/rig/burst.sh` is the runner (`burst-step.sh` on a rig) — three arms (`steady0` the
+in between. `bench/gcp/burst.sh` is the runner (`burst-step.sh` on a rig) — three arms (`steady0` the
 recovery target, `steadyN` the plateau, `burst` the one under test), and it tees the readout per arm because **the
 artifact records a gauge mean and peak but no trough, and the trough is the entire question**.
 
@@ -676,7 +676,7 @@ shorter than 30 s may have no per-band reading at all, and none is fresher than 
 signal is `dwarf_steps_dispatch_lag_seconds`, read from the band scan; the series' backlog depth is the load
 generator's own `outstanding` (flows created, not yet ended; open loop only).
 
-`bench/gcp/rig/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
+`bench/gcp/cell.sh` drives one cell of a tier x RTT grid end to end - peak at the derived pool, a pool sweep
 at 2/3 of it, a confirming peak when the sweep moves the pool - and writes `cell.json` beside the artifacts.
 `RATES` adds a rate ladder (fractions of the measured peak), `STEP_RATES` one in absolute offered steps/s that
 needs no peak, `PIN_POOL` replaces the derived pool and `NEAR=1`

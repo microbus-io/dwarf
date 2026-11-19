@@ -28,7 +28,7 @@
 set -u
 BIN=${BIN:?set BIN to a pinned binary in \$RIG_HOME}
 D=$(cd "$(dirname "$0")" && pwd)
-R=$(cd "$D/../../.." && pwd)
+R=$(cd "$D/../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-real}
 TIER=${TIER:-db-custom-32-131072}
