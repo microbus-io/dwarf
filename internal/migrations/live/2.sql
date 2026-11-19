@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS dwarf_steps (
     PRIMARY KEY (step_id),
     INDEX idx_dwarf_steps_flow_id (flow_id, step_id),
     INDEX idx_dwarf_steps_selection (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight, lineage_id),
-    INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight)
+    INDEX idx_dwarf_steps_due (status, parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight, lineage_id)
 );
 
 -- DRIVER: mysql mariadb
@@ -273,4 +273,4 @@ CREATE INDEX idx_dwarf_steps_flow_id ON dwarf_steps (flow_id, step_id);
 CREATE INDEX idx_dwarf_steps_selection ON dwarf_steps (status, parked, priority, fairness_key, created_at, step_id, not_before, lease_expires, fairness_weight, lineage_id) WHERE status IN ('pending', 'running');
 
 -- DRIVER: sqlite
-CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight) WHERE status = 'pending' AND step_id <> 0;
+CREATE INDEX idx_dwarf_steps_due ON dwarf_steps (parked, priority, not_before, fairness_key, created_at, step_id, lease_expires, fairness_weight, lineage_id) WHERE status = 'pending' AND step_id <> 0;

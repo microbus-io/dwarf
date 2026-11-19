@@ -537,11 +537,13 @@ the supply loop, which is the supply ceiling's path. Each pair is a lateral look
 `IN` on mysql and sqlite.
 
 **It returns each step's `lineage_id` beside its id**, which the engine's cache holds a wide cohort's candidates by
-(`engine/CLAUDE.md`, the fan-in hold), and `idx_dwarf_steps_selection` carries the column for it. **Do not project a
-column the index does not carry.** On pgx and mssql the lateral then stops being index-only and reads the row of every
-entry it walks - each one its predicate rejects included (a sleeper, a leased row, another replica's class), which
-the measurements below take as free; on mysql and sqlite the window reads the row of every due row of the planned
-keys.
+(`engine/CLAUDE.md`, the fan-in hold), and `idx_dwarf_steps_selection` carries the column for it - and so, on mysql
+and sqlite, does `idx_dwarf_steps_due`, which the window states the guard to read. **Do not project a column the index
+does not carry, and on mysql and sqlite that is both indexes.** On pgx and mssql the lateral then stops being
+index-only and reads the row of every entry it walks - each one its predicate rejects included (a sleeper, a leased
+row, another replica's class), which the measurements below take as free; on mysql and sqlite the window reads the
+row of every due row of the planned keys. Pinned by `TestFetchQuery_PostgresPlan` (the lateral) and
+`TestFetchQuery_RankingFetchIsIndexOnlyOnTheDueIndex` (the window, the due index forced).
 
 **One bind per key overruns SQL Server's hard ceiling of 2,100 parameters per statement at ~2,095 keys.**
 The pair count is bounded only by the candidate cache's capacity — twice the worker count — so a

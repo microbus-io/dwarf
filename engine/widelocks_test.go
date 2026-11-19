@@ -221,17 +221,78 @@ func TestCancel_AWideOpenFanOutMarksWithoutEscalating(t *testing.T) {
 	wideKey := seedWideOpenFlow(t, db, false)
 	_, _, wide, _, _ := keys.ParseFlowKey(wideKey)
 
-	escalations := func() (n int) {
-		if db.DriverName() == "mssql" {
-			assert.NoError(db.QueryRowContext(ctx, "SELECT COALESCE(SUM(index_lock_promotion_count), 0)"+
-				" FROM sys.dm_db_index_operational_stats(DB_ID(), OBJECT_ID('dwarf_steps'), NULL, NULL)").Scan(&n))
-		}
-		return n
-	}
-	before := escalations()
+	before := stepEscalations(t, db)
 	assert.Must(assert.NoError(e.Cancel(ctx, wideKey, "wide")))
-	assert.Equal(before, escalations(), "the Cancel's mark escalated its row locks on dwarf_steps to a table lock")
+	assert.Equal(before, stepEscalations(t, db), "the Cancel's mark escalated its row locks on dwarf_steps to a table lock")
 	var unmarked int
 	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND cancelling=0", wide).Scan(&unmarked))
 	assert.Zero(unmarked, "every open step of the flow is marked")
+}
+
+// stepEscalations is how many times a lock on dwarf_steps has escalated to a table lock, on SQL Server; elsewhere 0.
+func stepEscalations(t *testing.T, db *sequel.DB) (n int) {
+	assert := testarossa.For(t)
+	if db.DriverName() == "mssql" {
+		assert.NoError(db.QueryRowContext(t.Context(), "SELECT COALESCE(SUM(index_lock_promotion_count), 0)"+
+			" FROM sys.dm_db_index_operational_stats(DB_ID(), OBJECT_ID('dwarf_steps'), NULL, NULL)").Scan(&n))
+	}
+	return n
+}
+
+// TestOrphanRepair_AWideFlowRewindsWithoutEscalating has the orphan repair take back a flow of 8,192 completed steps
+// still advancing whose leases lapsed, as a replica that dies with that many arrivals queued at a fan-in leaves them.
+// On SQL Server the rewind must not escalate its row locks on dwarf_steps to a table lock; on every dialect, every
+// step is taken back.
+func TestOrphanRepair_AWideFlowRewindsWithoutEscalating(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e, db := wideLocksEngine(t)
+	wideKey := seedWideOpenFlow(t, db, true)
+	_, _, wide, _, _ := keys.ParseFlowKey(wideKey)
+	_, err := db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE flow_id=?", wide)
+	assert.Must(assert.NoError(err))
+
+	before := stepEscalations(t, db)
+	assert.NoError(e.recoverOrphanedFlows(ctx, db, 1))
+	assert.Equal(before, stepEscalations(t, db), "the orphan repair's rewind escalated its row locks on dwarf_steps to a table lock")
+	var kept int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=? AND lease_seq=0", wide).Scan(&kept))
+	assert.Zero(kept, "every step of the flow is taken back")
+}
+
+// TestRetry_AWideChildIsReapedWithoutEscalating reaps the child of a subgraph caller whose flow.Retry rewinds it, the
+// child holding 8,192 steps, as a forEach inside it leaves. On SQL Server the reap must not escalate its row locks on
+// dwarf_steps to a table lock; on every dialect, the child and its steps are gone.
+func TestRetry_AWideChildIsReapedWithoutEscalating(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := t.Context()
+	e, db := wideLocksEngine(t)
+	root := seedTrees(t, db, 1, callShape)[0]
+	var caller, child int
+	assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE flow_id=?", root).Scan(&caller)))
+	assert.Must(assert.NoError(db.QueryRowContext(ctx, "SELECT flow_id FROM dwarf_flows WHERE surgraph_step_id=?", caller).Scan(&child)))
+	for range 13 {
+		_, err := db.ExecContext(ctx,
+			"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms,"+
+				" flow_created_hour) SELECT flow_id, step_depth, step_token, task_name, task_url, status, time_budget_ms,"+
+				" flow_created_hour FROM dwarf_steps WHERE flow_id=?", child)
+		assert.Must(assert.NoError(err))
+	}
+	if db.DriverName() == "mssql" {
+		_, err := db.ExecContext(ctx, "UPDATE STATISTICS dwarf_steps")
+		assert.Must(assert.NoError(err))
+	}
+
+	before := stepEscalations(t, db)
+	assert.NoError(db.Transact(ctx, func(tx *sequel.Tx) error {
+		return e.deleteSubgraphFlowsRootedAt(ctx, tx, caller)
+	}))
+	assert.Equal(before, stepEscalations(t, db), "the reap escalated its row locks on dwarf_steps to a table lock")
+	var steps, flows int
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_steps WHERE flow_id=?", child).Scan(&steps))
+	assert.NoError(db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dwarf_flows WHERE flow_id=?", child).Scan(&flows))
+	assert.Zero(steps, "the child's steps are reaped")
+	assert.Zero(flows, "the child is reaped")
 }

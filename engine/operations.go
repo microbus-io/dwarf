@@ -982,7 +982,7 @@ func (e *Engine) cancel(ctx context.Context, flowKey string, reason string) erro
 		if e.diags.Seams().IsFault(diagnostics.FaultCancelMarkErr) {
 			return errors.New("injected fault: " + diagnostics.FaultCancelMarkErr)
 		}
-		err = updateFlowSteps(ctx, db, "cancelling=1", nil, chunk,
+		_, err = updateFlowSteps(ctx, db, "cancelling=1", nil, chunk,
 			"status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"', '"+workflow.StatusInterrupted+"')"+
 				" AND step_id <= (SELECT f.cancel_watermark FROM dwarf_flows f WHERE f.flow_id=dwarf_steps.flow_id)",
 		)

@@ -146,7 +146,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			}
 			terminateSteps := func() error {
 				for chunk := range slices.Chunk(lockIDs, inListChunk) {
-					err := updateFlowSteps(ctx, tx, "status=?, parked=?, updated_at=NOW_UTC()", []any{workflow.StatusTerminated, parkedNone},
+					_, err := updateFlowSteps(ctx, tx, "status=?, parked=?, updated_at=NOW_UTC()", []any{workflow.StatusTerminated, parkedNone},
 						chunk, "status IN ('"+workflow.StatusCreated+"', '"+workflow.StatusPending+"', '"+workflow.StatusInterrupted+"', '"+workflow.StatusRunning+"')",
 					)
 					if err != nil {
@@ -189,7 +189,7 @@ func (e *Engine) terminateSubtree(ctx context.Context, shardNum, flowID, flowHou
 			// a dead worker leaves too. After the flow-row locks, in an ordinary transition's order; the crossing
 			// with the resolving cohort arrival and failStep is retried by Transact.
 			for chunk := range slices.Chunk(lockIDs, inListChunk) {
-				err := updateFlowSteps(ctx, tx, "lease_seq=lease_seq+1", nil,
+				_, err := updateFlowSteps(ctx, tx, "lease_seq=lease_seq+1", nil,
 					chunk, "status='"+workflow.StatusCompleted+"' AND advancing=1",
 				)
 				if err != nil {

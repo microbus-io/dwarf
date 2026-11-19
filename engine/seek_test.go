@@ -132,8 +132,9 @@ func TestSeek_AWriteReachesOnlyItsOwnFlowsRows(t *testing.T) {
 		return err
 	})
 	attempt("Terminate's step pass over a list of flows", func(ctx context.Context, tx *sequel.Tx) error {
-		return updateFlowSteps(ctx, tx, "status=?, parked=?, updated_at=NOW_UTC()", []any{workflow.StatusTerminated, parkedNone},
+		_, err := updateFlowSteps(ctx, tx, "status=?, parked=?, updated_at=NOW_UTC()", []any{workflow.StatusTerminated, parkedNone},
 			[]any{otherFlow}, "status IN ('"+workflow.StatusPending+"', '"+workflow.StatusRunning+"')")
+		return err
 	})
 	attempt("the flow-row lock by a list", func(ctx context.Context, tx *sequel.Tx) error {
 		ph, ids := database.IDList([]int{otherFlow})

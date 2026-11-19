@@ -228,20 +228,24 @@ func (e *Engine) arrivalBatchTx(ctx context.Context, tx *sequel.Tx, members []*d
 		}
 		return nil
 	}, "UPDATE dwarf_steps SET cohort_arrivals=cohort_arrivals+? WHERE step_id=?", total, spawnID)
-	// Every member's clear is one statement, each row fenced on its own member's generation, so the transaction holds
-	// the spawn row for a few round trips on a driver that does not pipeline, not one per member. The CASE pairs are
-	// padded as the list is, so the text takes the list's few forms. The ELSE gives the CASE its type: PostgreSQL types
-	// a CASE of bound values alone as text, which a BIGINT does not compare to. MySQL counts CHANGED rows, which is
-	// honest here: a match flips the flag from 1 to 0.
+	// Every member's clear is one statement, each row fenced on a generation, so the transaction holds the spawn row for
+	// a few round trips on a driver that does not pipeline, not one per member. A step's arm carries the NEWEST
+	// generation among its members: the orphan repair can take a waiting member's step back and its replay arrive at the
+	// same open batch, and a CASE takes its first matching arm, so an arm per member would fence both. The CASE pairs
+	// are padded as the list is, so the text takes the list's few forms. The ELSE gives the CASE its type: PostgreSQL
+	// types a CASE of bound values alone as text, which a BIGINT does not compare to. MySQL counts CHANGED rows, which
+	// is honest here: a match flips the flag from 1 to 0.
 	ids := make([]int, len(members))
+	newest := make(map[int]int, len(members))
 	for i, m := range members {
 		ids[i] = m.stepID
+		newest[m.stepID] = max(newest[m.stepID], m.row.leaseSeq)
 	}
 	list, listArgs := database.IDList(ids)
 	args := slices.Clone(listArgs)
 	for k := range listArgs {
-		m := members[min(k, len(members)-1)]
-		args = append(args, m.stepID, m.row.leaseSeq)
+		id := ids[min(k, len(ids)-1)]
+		args = append(args, id, newest[id])
 	}
 	var cleared int64
 	batch.queue(func(res *sequel.BatchResults) error {

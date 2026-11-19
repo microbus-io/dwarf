@@ -63,7 +63,9 @@ const dueSteps = dueNow + dueIndexGuard
 // that order, so the caller's scan loop is dialect-blind. One statement serves every band the plan reached, so a plan
 // spanning several bands costs one round trip, not one per band.
 //
-// lineage_id is carried in idx_dwarf_steps_selection for this projection, so every shape stays index-only.
+// lineage_id is carried for this projection in idx_dwarf_steps_selection, which the lateral fetches read, and on
+// MySQL, MariaDB and SQLite in idx_dwarf_steps_due too, which the ranking fetches state the guard to read, so every
+// shape stays index-only.
 //
 // THE PAIRS TRAVEL AS ONE OR TWO BINDS - two arrays on pgx, a JSON array of [band, key] pairs on mssql and sqlite -
 // and that is a correctness bound rather than a tuning one. One bind per key overruns SQL Server's hard ceiling of

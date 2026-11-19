@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -160,6 +161,70 @@ func assertBandScanSeeks(t *testing.T, r *rig, name, stmt string) {
 	}
 	seeks := regexp.MustCompile(`idx_dwarf_steps_due[^\n]*\n?[^\n]*not_before`)
 	assert.True(seeks.MatchString(plan.String()), "the %s statement must seek the due index on not_before:\n%s", name, plan.String())
+}
+
+// TestFetchQuery_RankingFetchIsIndexOnlyOnTheDueIndex pins that the ranking fetch (MySQL, MariaDB, SQLite) stays
+// index-only when it reads idx_dwarf_steps_due, which it states the guard to be able to: every column it reads or
+// projects, lineage_id included, must be in that index, or it reads the row of every due row it ranks. The index is
+// forced, so the assertion holds whatever the statistics would choose.
+func TestFetchQuery_RankingFetchIsIndexOnlyOnTheDueIndex(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	r := newRig(t)
+	driver := r.db.DriverName()
+	var explain, forced string
+	switch driver {
+	case "mysql", "mariadb":
+		explain, forced = "EXPLAIN ", "FROM dwarf_steps FORCE INDEX (idx_dwarf_steps_due)"
+	case "sqlite":
+		explain, forced = "EXPLAIN QUERY PLAN ", "FROM dwarf_steps INDEXED BY idx_dwarf_steps_due"
+	default:
+		t.Skip("the ranking fetch is MySQL's, MariaDB's and SQLite's")
+	}
+	for i := range 8 {
+		r.insertStep(t, 1, 3, []string{"a", "b"}[i%2], 1)
+	}
+	stmt, args, err := fetchQuery(driver, pairsAt(3, "a", "b"), 4, "", nil)
+	if !assert.NoError(err) || !assert.Equal(1, strings.Count(stmt, "FROM dwarf_steps")) {
+		return
+	}
+	rows, err := r.db.QueryContext(ctx, explain+strings.Replace(stmt, "FROM dwarf_steps", forced, 1), args...)
+	if !assert.NoError(err) {
+		return
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	var plan strings.Builder
+	covering := false
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if !assert.NoError(rows.Scan(ptrs...)) {
+			return
+		}
+		row := map[string]string{}
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			row[cols[i]] = fmt.Sprint(v)
+			plan.WriteString(fmt.Sprint(v) + " ")
+		}
+		plan.WriteString("\n")
+		if driver == "sqlite" {
+			covering = covering || strings.Contains(row["detail"], "COVERING INDEX idx_dwarf_steps_due")
+		} else if row["table"] == "dwarf_steps" {
+			// "Using index" alone is a covering read; "Using index condition" is a pushed-down filter, which still
+			// reads the row.
+			covering = row["key"] == "idx_dwarf_steps_due" && slices.Contains(strings.Split(row["Extra"], "; "), "Using index")
+		}
+	}
+	assert.NoError(rows.Err())
+	assert.True(covering, "the ranking fetch must read the due index alone:\n%s", plan.String())
 }
 
 // TestScanBand_AnEmptyBandIsAProbe pins that the counts statement costs an empty band one probe of the due index,

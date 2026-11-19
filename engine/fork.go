@@ -951,10 +951,17 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 	}
 	for rows.Next() {
 		var id int
-		rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return errors.Trace(err)
+		}
 		rootChildren = append(rootChildren, id)
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		return errors.Trace(err)
+	}
 	if len(rootChildren) == 0 {
 		return nil
 	}
@@ -986,14 +993,17 @@ func (e *Engine) deleteSubgraphFlowsRootedAt(ctx context.Context, tx sequel.Exec
 		allIDs = append(allIDs, next...)
 		current = next
 	}
-	// Every step before any flow, the order the lifecycle deletes take.
-	for _, del := range []string{
-		"DELETE FROM dwarf_steps SEEK_FROM(dwarf_steps, idx_dwarf_steps_flow_id(flow_id))",
-		"DELETE FROM dwarf_flows SEEK_FROM(dwarf_flows, 1(flow_id))",
-	} {
-		for chunk := range slices.Chunk(allIDs, inListChunk) {
-			ph, ids := inList(chunk)
-			tx.ExecContext(ctx, del+" WHERE flow_id IN ("+ph+")", ids...)
+	// Every step before any flow, the order the lifecycle deletes take. A child can hold any number of steps, so
+	// they go by deleteFlowSteps; a chunk of flows is inListChunk rows, under SQL Server's escalation threshold.
+	for chunk := range slices.Chunk(allIDs, inListChunk) {
+		if err := deleteFlowSteps(ctx, tx, chunk); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	for chunk := range slices.Chunk(allIDs, inListChunk) {
+		ph, ids := inList(chunk)
+		if _, err := tx.ExecContext(ctx, "DELETE FROM dwarf_flows SEEK_FROM(dwarf_flows, 1(flow_id)) WHERE flow_id IN ("+ph+")", ids...); err != nil {
+			return errors.Trace(err)
 		}
 	}
 	return nil

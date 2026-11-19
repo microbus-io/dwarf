@@ -573,16 +573,15 @@ func (e *Engine) sweepOpenFlows(ctx context.Context, db *sequel.DB, shard int, a
 					o.flowID, -e.orphanFlowThreshold.Milliseconds(),
 				).Scan(&held))
 			}
-			res, err := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()"+
-					" SEEK_FROM(dwarf_steps, idx_dwarf_steps_flow_id(flow_id)) WHERE flow_id=? AND status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()",
-				workflow.StatusPending, o.flowID,
+			// A wide flow can hold any number of flagged steps (a dead replica's queued arrivals), so the rewind is
+			// updateFlowSteps's: by primary key on SQL Server, which a statement over the flow would escalate to a
+			// table lock.
+			rewound, err = updateFlowSteps(ctx, tx,
+				"status=?, lease_seq=lease_seq+1, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC()",
+				[]any{workflow.StatusPending}, []any{o.flowID},
+				"status='"+workflow.StatusCompleted+"' AND advancing=1 AND lease_expires<=NOW_UTC()",
 			)
-			if err != nil {
-				return errors.Trace(err)
-			}
-			rewound, _ = res.RowsAffected()
-			return nil
+			return errors.Trace(err)
 		})
 		// Token-free correlation id: an operator alarm must not carry the flow key, which is a write capability.
 		switch {

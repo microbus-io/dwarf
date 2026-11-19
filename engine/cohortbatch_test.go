@@ -180,6 +180,37 @@ func TestCohortBatch_FencedMemberIsLeftOut(t *testing.T) {
 	c.await(t)
 }
 
+// TestCohortBatch_AReplayBesideItsStaleMemberLands pins a batch holding two members of one step: the orphan repair takes
+// a member's step back while its arrival waits, and the replay arrives at the same open batch. The replay is the step's
+// current generation, so it must land and the stale member be fenced; were both fenced, the cohort would stall until
+// another lease ran out and the repair replayed the step again.
+func TestCohortBatch_AReplayBesideItsStaleMemberLands(t *testing.T) {
+	assert := testarossa.For(t)
+	ctx := context.Background()
+	c := newBatchedCohort(t, 0)
+	c.e.setClaimsTrackerEnabled(false)
+	leader := c.batch().members[0].stepID
+	var stale int
+	assert.Must(assert.NoError(c.db.QueryRowContext(ctx, "SELECT step_id FROM dwarf_steps WHERE lineage_id=? AND task_name='Branch'"+
+		" AND advancing=1 AND step_id<>? ORDER BY step_id LIMIT_OFFSET(1, 0)", c.spawnID, leader).Scan(&stale)))
+	_, err := c.db.ExecContext(ctx, "UPDATE dwarf_steps SET lease_expires=DATE_ADD_MILLIS(NOW_UTC(), -1000) WHERE step_id=?", stale)
+	assert.NoError(err)
+	assert.NoError(c.e.recoverOrphanedFlows(ctx, c.db, c.shard))
+	waitBatched(t, c.stripe, c.shard, c.spawnID, batchedWidth+1) // the replay joined the stale member's batch
+	b := c.batch()
+	c.stripe.unlock()
+	<-b.done
+
+	var outcomes []arrivalOutcome
+	for i, m := range b.members {
+		if m.stepID == stale {
+			outcomes = append(outcomes, b.outcomes[i])
+		}
+	}
+	assert.Equal([]arrivalOutcome{arrivalFenced, arrivalLanded}, outcomes, "the stale member fenced, its replay landed")
+	c.await(t)
+}
+
 // TestCohortBatch_FiredFaultLeavesTheBatch pins that the transition's test seams keep their meaning for a batched
 // arrival: a fault that fires for one member is consulted once, as that member's own transaction would, and the
 // member leaves the batch and meets it in its own transaction - here a failed commit, which the dispatch's recovery

@@ -356,10 +356,11 @@ writes would otherwise flip a straggler on a frozen tree, and the post-commit lo
 it as ended a second time.
 
 **Every UPDATE of the steps of a list of flows goes through `updateFlowSteps` (`flowsteps.go`)** - Terminate's two
-step passes and its lease bump, Cancel's mark. A list of flows bounds nothing: a `forEach` keeps its branches in one
-flow, so one flow can hold any number of open steps, or of completed ones still advancing (queued at a fan-in, or
-left by a crashed worker until the orphan repair), and a statement over it can lock every flow on the shard out
-until the transaction commits:
+step passes and its lease bump, Cancel's mark, the orphan repair's rewind - **and every DELETE of them through
+`deleteFlowSteps`** (the Retry reap of a caller's children). A list of flows, even one flow, bounds nothing: a
+`forEach` keeps its branches in one flow, so one flow can hold any number of open steps, or of completed ones still
+advancing (queued at a fan-in, or left by a crashed worker until the orphan repair), and a statement over it can lock
+every flow on the shard out until the transaction commits:
 - **On SQL Server** a statement taking ~5,000 row locks on a table escalates to a table lock. The ids are read first
   and updated by primary key, 2,000 a statement, which keeps Terminate one transaction: locks of earlier statements
   do not count toward the threshold, and a Terminate of 131,072 steps held ~137,000 row locks without escalating.
@@ -372,9 +373,10 @@ until the transaction commits:
   until Terminate commits, and while the flow is the shard's newest, a new flow's first step waits on it.
 
 Pinned by `TestTerminate_AWideOpenFanOutLeavesTheTablesUnlocked` (8,192 open steps, and 8,192 advancing ones; the
-Terminate held after its rescan while a flow runs beside it, with a newer flow after the wide one) and
-`TestCancel_AWideOpenFanOutMarksWithoutEscalating` (SQL Server's escalation count; the mark runs outside a
-transaction).
+Terminate held after its rescan while a flow runs beside it, with a newer flow after the wide one), and by SQL
+Server's escalation count in `TestCancel_AWideOpenFanOutMarksWithoutEscalating` (the mark runs outside a
+transaction), `TestOrphanRepair_AWideFlowRewindsWithoutEscalating` and `TestRetry_AWideChildIsReapedWithoutEscalating`
+(each of the last two fails with a statement over the flow).
 
 **Cancel** - The graceful counterpart of Terminate: a cancellation is delivered as an error on each covered
 step's ordinary `onError` transition (detectable with `workflow.IsCancelled`), so an author can catch it and
@@ -1496,6 +1498,11 @@ ceiling fix: at width 256 the binding wait is relation extension from the succes
     member was fenced, and only then does the transaction read the members back to find which - a member the clear
     matched reads `advancing=0` at its own generation, which only its own dispatch writes. Pinned by
     `TestCohortBatch_FencedMemberIsLeftOut` (fails with the read-back skipped).
+  - *A batch can hold two members of one step*: the orphan repair takes a waiting member's step back, and the replay
+    arrives at the same open batch. **A step's `CASE` arm carries the newest generation among its members**, never
+    one arm per member: a `CASE` takes its first matching arm, so the stale member's generation would fence the
+    replay too, and the cohort would stall until another lease lapsed. Pinned by
+    `TestCohortBatch_AReplayBesideItsStaleMemberLands` (fails with an arm per member).
   - *A member never abandons the batch*, not even when its lease is taken back, because the leader may be using its
     dispatch; the batch's own fence leaves it out. The leader leads even with its own lease gone. Pinned by
     `TestCohortBatch_FencedMemberIsLeftOut` (the leader fenced; fails with the take-back removed).
