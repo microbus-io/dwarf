@@ -676,15 +676,16 @@ func (c *stageCopy) stepsFrom(ctx context.Context, tx *sequel.Tx, flow, after in
 
 // flowRows copies the flow rows of flows, the first of which is the tree's flow number first in flow_id order (the root
 // being numbered past every descendant group), each stamped with its stamp group's archive time, at + its group in
-// milliseconds; and writes the directory's rows for those a locate would not find by their creation hour. A stamp past
-// the day's end is an error: nothing is clamped, since a clamp would put a large tree's flows on one archive time.
+// milliseconds, held at the day's last millisecond; and writes the directory's rows for those a locate would not find
+// by their creation hour.
 func (c *stageCopy) flowRows(ctx context.Context, tx *sequel.Tx, flows []int, first int) error {
+	last := c.dayEnds.Add(-time.Millisecond)
 	for i := 0; i < len(flows); {
 		g := (first + i) / stageGroup
 		j := min(len(flows), (g+1)*stageGroup-first) // the next group's first flow
 		stamp := c.at.Add(time.Duration(g) * time.Millisecond)
-		if !stamp.Before(c.dayEnds) {
-			return errors.New("the tree's archive times run past the end of day %d", c.day)
+		if stamp.After(last) {
+			stamp = last
 		}
 		expr, arg := database.SQLTime(c.driver, stamp)
 		list, args := database.IDList(flows[i:j])

@@ -712,24 +712,27 @@ func TestStage_ANewAttemptNeedsRoomInItsDay(t *testing.T) {
 	assert.True(ok, "with room, it starts")
 }
 
-// TestStage_NoArchiveTimeIsClamped pins the day-end check: a tree whose archive times would run past its attempt's day
-// is held, not stamped into the day's last millisecond.
-func TestStage_NoArchiveTimeIsClamped(t *testing.T) {
+// TestStage_ArchiveTimesStopAtTheDaysEnd pins the day-end hold: a tree whose attempt began in its day's last millisecond
+// publishes in that day, its root's time held at that millisecond rather than run past it.
+func TestStage_ArchiveTimesStopAtTheDaysEnd(t *testing.T) {
 	t.Parallel()
 	assert := testarossa.For(t)
 	ctx := t.Context()
 	r := stageRig(t)
 	today, err := r.archive.Today(ctx)
 	assert.NoError(err)
+	last := r.archive.DayEnds(today).Add(-time.Millisecond)
 	root := seedWideTree(t, r.db, 3, 10, 3) // the root's time is T + 1 ms
-	setAttempt(t, r, root, r.archive.DayEnds(today).Add(-time.Millisecond))
+	setAttempt(t, r, root, last)
 	r.pass(ctx)
 	if now, _ := r.archive.Today(ctx); now != today {
 		t.Skip("midnight passed during the test")
 	}
-	assert.Zero(visibleInDay(t, r, today, root), "not published")
-	_, _, there := rowsOf(t, r, root)
-	assert.True(there, "held live")
+	assert.True(visibleInDay(t, r, today, root) > 0, "published in its day")
+	var latest time.Time
+	assert.Must(assert.NoError(r.db.QueryRowContext(ctx, "SELECT archived_at FROM "+migrations.FlowsTable(today)+
+		" WHERE root_flow_id=? ORDER BY archived_at DESC LIMIT_OFFSET(1, 0)", root).Scan(&latest)))
+	assert.Equal(last, database.StoredTime(latest), "held at the day's last millisecond")
 }
 
 // TestStage_AStaleDirectoryRowIsMoved pins the directory row of a flow staged into a day after another named it - a
@@ -1124,7 +1127,8 @@ func TestStage_TheCopiedRowsAreCounted(t *testing.T) {
 }
 
 // archivedByStages reports whether root's tree was archived into day by stages rather than in one move: a staged
-// tree's root is stamped a millisecond or more after its descendants, a moved tree's flows all at one time.
+// tree's root is stamped a millisecond or more after its descendants, a moved tree's flows all at one time. A tree
+// staged from the day's last millisecond holds them all there, so it reads as moved.
 func archivedByStages(t *testing.T, r *rig, day, root int) bool {
 	t.Helper()
 	var rootAt, childAt time.Time

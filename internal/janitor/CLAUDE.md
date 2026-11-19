@@ -621,8 +621,13 @@ stamped for deletion with its attempt kept. The protocol:
   one, and its copy would not be settled.
 - **Archive times are stamp groups, never the commit's time:** descendant i (in `flow_id` order) is stamped
   `T + i/4096` ms (`stageGroup`), the root `T + G` with `G = ceil(N/4096)`. A flow's time is a function of the tree
-  alone, and no staged tree puts more than 4,096 flows on one time. A stamp past the day's end is an error that holds
-  the tree: a clamp would put its flows on one time. The lists show a staged tree under its attempt's time.
+  alone. **A stamp that would pass the day's end is held at its last millisecond**, as a move's `archived_at` is, so
+  an attempt begun in the day's last moments still publishes in its day (`TestStage_ArchiveTimesStopAtTheDaysEnd`):
+  refused instead, the tree was held on every round until its day dropped. The groups held there share that
+  millisecond, so a staged tree keeps to 4,096 flows a time only when it starts at least G ms before the day ends -
+  what the quiet margin gives in production (a minute is room for some 245M flows); a short day or a test, with no
+  margin, can put more on it, which only a list paging across the tie would notice. The lists show a staged tree
+  under its attempt's time.
 - **Publication is the last chunk:** the root's last steps, its flow row and directory row, and the live root stamped
   `delete_after_ms=1` with T kept and its `archived_at` copied from the archive root, in one transaction. Stamped with T
   means published, so a lost response is retried as nothing to stage (`TestStage_APublishedTreeIsNotCopiedAgain`).
