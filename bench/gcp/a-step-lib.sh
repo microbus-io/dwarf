@@ -1,7 +1,14 @@
 # Sourced by x-rig.sh before every step. one_run <tag> <bench args...>: fresh database on shard 1, the run on the
 # admin host (c4a-16) with the pinned binary, the backend monitor beside it, then the database is dropped. WIN_MIN
 # sets the window in minutes (default 16); RUN_ENV prefixes the run with environment settings (e.g. GOMEMLIMIT=48GiB).
-gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/fsync.sh" "$ADMIN":~/ >/dev/null 2>&1 && vmssh "$ADMIN" 'chmod +x g-run.sh fsync.sh'
+gc compute scp --zone=$ZONE "$D/g-run.sh" "$D/fsync.sh" "$D/archread.jq" "$ADMIN":~/ >/dev/null 2>&1 &&
+  vmssh "$ADMIN" 'chmod +x g-run.sh fsync.sh; command -v jq >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq >/dev/null 2>&1'
+# archread <tag>: whether the archive kept up over the arm (archread.jq), and dwarf_steps' live rows (n_live_tup, an
+# estimate) once a minute from the arm's first reading of the table - level is keeping up, rising is falling behind.
+archread() {
+  log "  $1 archive: $(vmssh "$ADMIN" "jq -r -f archread.jq out/$1.json")"
+  log "  $1 live dwarf_steps rows by minute: $(vmssh "$ADMIN" "awk 'BEGIN { m0 = -1 } \$12 == \"dwarf_steps\" { if (t0 == \"\") t0 = \$1; m = int((\$1 - t0) / 60); if (m != m0) { printf \"%d \", \$16; m0 = m } }' out/mon-$1.log.tables")"
+}
 one_run() {
   local tag=$1; shift; local db="dwarf_${tag//-/_}" start x
   authok; late

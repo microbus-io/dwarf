@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Usage: x-rig.sh <name> <disk-gb> <step>   One 32 vCPU Cloud SQL instance (Query Insights on, <disk-gb> SSD) and one
-# c4a-standard-16 that is both the engine host (pinned binary $BIN) and the admin host (psql, monitors). Sources
-# $D/<step> (which uses one_run / the helpers below), pulls, tears down. Nothing else is created; the instance and
-# the VM are created together because every step uses both from its first minute.
-# REUSE=1 runs the step on the rig an earlier orchestrator of the same <name> left (kill -9 between arms, or in
+# Usage: x-rig.sh <name> <disk-gb> <step>...   One 32 vCPU Cloud SQL instance (Query Insights on, <disk-gb> SSD) and
+# one c4a-standard-16 that is both the engine host (pinned binary $BIN) and the admin host (psql, monitors). Sources
+# each $D/<step> in turn (they use one_run / the helpers below), pulls, tears down. Nothing else is created; the
+# instance and the VM are created together because every step uses both from its first minute.
+# REUSE=1 runs the steps on the rig an earlier orchestrator of the same <name> left (kill -9 between arms, or in
 # its teardown grace) instead of creating one; this one tears it down at the end.
 set -u
-NAME=$1 DISK=$2 STEP=$3 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}
+NAME=$1 DISK=$2 BIN=${BIN:?set BIN to a pinned binary in $RIG_HOME}; shift 2; STEPS=("$@")
+(( ${#STEPS[@]} > 0 )) || { echo "usage: x-rig.sh <name> <disk-gb> <step>..."; exit 1; }
 # DBFLAGS (optional) passes Cloud SQL database flags, e.g. slow-statement plans and lock waits:
 #   DBFLAGS='cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on'
 # The recommended settings are added to it unless it sets its own value of one (see below).
@@ -41,13 +42,13 @@ if [ -n "${REUSE:-}" ]; then
   # The instance and the VM exist and the VM holds the binary. Whatever the orchestrator that left them had running
   # there (a run, a monitor, an injection waiting out its delay) is stopped, so the step starts clean. A driver is
   # stopped by its process group (driver-step.sh records it), since its process name is bash; it removes its netem.
-  log "reusing $DB + $ADMIN; step $STEP"
+  log "reusing $DB + $ADMIN; steps ${STEPS[*]}"
   [[ "$(gc sql instances describe "$DB" --format='value(state)' 2>/dev/null)" == RUNNABLE ]] || { log "$DB not RUNNABLE"; exit 1; }
   vmssh "$ADMIN" 'for f in out/*.pgid; do [ -f "$f" ] && kill -TERM -- -"$(cat "$f")"; rm -f "$f"; done
     for p in dwarf-bench g-run.sh inject.sh rss-mon.sh slow-mon.sh s-mon.sh v-mon.sh age-mon.sh ff-set.sh; do pkill -x "$p"; done; true' ||
     { log "$ADMIN not reachable"; exit 1; }
 else
-  log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); step $STEP"
+  log "creating $DB (${TIER:-db-custom-32-131072}, ${DISK} GB SSD, Query Insights) + $ADMIN (c4a-16); steps ${STEPS[*]}"
   DBFLAGS=${DBFLAGS:-}
   # The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
   # unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
@@ -89,6 +90,8 @@ log "ready: $DB $(adm "$(admdsn "${IPS[0]}")" 'SHOW max_connections') max_connec
 # The draw's disk, which a CPU reading cannot see (bench/CLAUDE.md): the idle WAL flush floor, logged and kept.
 log "flush floor: $(vmssh "$ADMIN" "./fsync.sh '$(admdsn "${IPS[0]}")'" | tail -1 | tee -a "$OUT/fsync.txt")"
 source "$D/a-step-lib.sh"
-log "step $STEP"
-source "$D/$STEP"
-log "step $STEP done"
+for STEP in "${STEPS[@]}"; do
+  log "step $STEP"
+  source "$D/$STEP"
+  log "step $STEP done"
+done

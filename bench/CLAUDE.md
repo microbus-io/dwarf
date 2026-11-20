@@ -267,8 +267,8 @@ into `bench/results/<date>-<time>-<name>/`, and tears everything down on exit, f
 (`TEARDOWN_GRACE`) in which `kill -9` of the orchestrator keeps the rig for another arm. They create their resources in
 the project's network, which `net.sh` makes once and keeps (`net.sh -delete` removes it): the VPC, the SSH firewall rule
 and Cloud SQL's private services range.
-- **`x-rig.sh <name> <disk-gb> <step>`:** one Cloud SQL instance (`TIER`, default 32 vCPU) and one engine/admin VM
-  (`VMTYPE`, default c4a-16).
+- **`x-rig.sh <name> <disk-gb> <step>...`:** one Cloud SQL instance (`TIER`, default 32 vCPU) and one engine/admin VM
+  (`VMTYPE`, default c4a-16), running each step in turn.
 - **`xp-rig.sh <name> <tier> <vm-type> <tag>`:** the tier table's pairing, two engine hosts sharing one database,
   plus an admin VM.
 - **`s2-rig.sh`:** the shard ladder on one set of four instances: a parallel solo draw check (redraws a slow one),
@@ -281,7 +281,8 @@ and Cloud SQL's private services range.
   (`TestRig_Invariants`).
 - **`real-rig.sh`:** REAL, a day on one database: a draw check, the mix's calibration, then three 90-minute periods
   on two c4a-8 replicas with a rolling restart, verified against the database at the end.
-- **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database. `vrows-step.sh` and `vbytes-step.sh`
+- **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database, and `archread` logs whether the archive
+  kept up over it (`archread.jq`: the lag, flows archived against closed, the jobs' batches, the live rows by minute). `vrows-step.sh` and `vbytes-step.sh`
   are V's two axes, on `x-rig.sh` with a 1 TB and a 2 TB disk. `*-step.sh` are the campaigns, catalogued
   below, each with its launch line, arms and pass criteria in its header.
 - **Drivers** run a whole campaign on the admin host, each with its own RTT gate, a fresh database per arm and a
@@ -326,6 +327,8 @@ or [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/) tha
 | `ha-step.sh` | the archived 0 B headline with a stall check, then 8 KB JSON at the WAL settings | Minute by Minute; Payload Size; Checkpoints |
 | `hb-step.sh` | the shipped pool (250) against 500, and at 64 KB `wal_buffers` 64 MB and a 2 TB disk | - |
 | `keepup-step.sh` | whether archiving keeps up with a saturated shard, and what it costs dispatch | - |
+| `archrate-step.sh` | the rate at which archiving stops keeping up with a shard at 64 KB, bracketed below saturation | - |
+| `archjobs-step.sh` | `archrate-step.sh`'s saturated and 85% arms again with a build running more archiving jobs, against those arms | - |
 | `va-step.sh` | the archive under load: one day to 100M step rows, short days rolling over and dropping, archived reads beside load, 100% and 95% of the saturated rate, lz4 at 1 MB | Sustained Load; Database Volume |
 | `vrows-step.sh`, `vbytes-step.sh` | a saturated database as `dwarf_steps` grows past 200M rows, and past 500 GB, with nothing deleted | - |
 | `h-step.sh` | the sustainable rate, walking down from the saturated rate (below) | - |
@@ -809,8 +812,8 @@ duration of whole seconds, `300s`; a bare `300` is refused and the run exits at 
 `DWARF_TESTING_ARCHIVE_GRACE` sets how long a closed flow waits before it is archived (a Go duration, `0s` and up), so
 an archived run's warmup can be short or a run can hold closed flows live longer. `DWARF_TESTING_STAGE_ROWS` sets the
 size, in rows, above which a closed tree is archived in stages (whole rows, `0` off), and `DWARF_TESTING_STAGE_BYTES`
-a size in payload bytes beside it (whole bytes, `0` none), since staged archival is off until its thresholds are
-qualified. The bench logs a warning for each one set; a rig arm sets them in `RUN_ENV`. `-archive-retention N` sets `SetRetention` on every replica: a
+a size in payload bytes beside it (whole bytes, `0` none); unset, the engine's own stand (256k rows, 128 MiB), so a
+`state` flow of 32 MB a step or more is staged. The bench logs a warning for each one set; a rig arm sets them in `RUN_ENV`. `-archive-retention N` sets `SetRetention` on every replica: a
 day of minutes under the default retention of 30 days drops nothing within a run, so pair a short day with a small
 `N` to see drops under load.
 
