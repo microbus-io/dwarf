@@ -49,12 +49,12 @@ import (
 )
 
 // How TestDispatcherDrop_TheJanitorsKeepEveryFlow works. Two engines dispatch shard 1, each running its janitor's jobs
-// in the background with the graces, the sweeps' window and the recovery interval cut short, while both create a stream
-// of flows: linear, a small fan-out, a failing one, a subgraph caller, and some with DeleteOnCompletion. A batch is four
-// rows and every tree over four rows is staged, so the linear and failing shapes move whole and the fan-out and the
-// subgraph caller take two transactions to copy. Keep the batch at the staging threshold: SQL Server, MySQL and
-// MariaDB stage every tree over a batch, so a smaller batch stages every shape there, and the dropped engine, its
-// large-tree archiving held, archives nothing before it drops. The survivor's large-tree
+// in the background with the graces, the sweeps' window, the recovery interval and the wedge threshold cut short, while
+// both create a stream of flows: linear, a small fan-out, a failing one, a subgraph caller, and some with
+// DeleteOnCompletion. A batch is four rows and every tree over four rows is staged, so the linear and failing shapes
+// move whole and the fan-out and the subgraph caller take two transactions to copy. Keep the batch at the staging
+// threshold: SQL Server, MySQL and MariaDB stage every tree over a batch, so a smaller batch stages every shape there,
+// and the dropped engine, its large-tree archiving held, archives nothing before it drops. The survivor's large-tree
 // archiving is held before its first batch and the other engine's after a chunk that leaves a copy part written, so
 // when that engine drops out a staged copy only it wrote is part written. It shuts down ("shutdown", every engine in
 // test mode, on any dialect), or it is a child process killed with SIGKILL while it holds a task ("killed", on a
@@ -196,7 +196,8 @@ func assertDropOutcome(t *testing.T, i int, key string, out *workflow.FlowOutcom
 
 // dropEngine is an engine for TestDispatcherDrop: in test mode under name when dsn is empty, or on dsn outside test
 // mode, where another process reaches the database too. Its janitors run in the background, with the graces, the
-// sweeps' window and the recovery interval cut short, and every tree over four rows staged four rows a chunk.
+// sweeps' window, the recovery interval and the wedge threshold cut short, and every tree over four rows staged four
+// rows a chunk.
 func dropEngine(t *testing.T, name, dsn string) (*Engine, *sdkmetric.ManualReader) {
 	t.Helper()
 	var e *Engine
@@ -223,6 +224,9 @@ func dropEngine(t *testing.T, name, dsn string) (*Engine, *sdkmetric.ManualReade
 	e.archiveGrace, e.deletionGrace, e.sweepOverdue = 200*time.Millisecond, 200*time.Millisecond, 100*time.Millisecond
 	e.recoveryInterval = 500 * time.Millisecond
 	e.leaseMargin = 500 * time.Millisecond
+	// A kill between a child flow's completion and its caller's revive leaves the caller to the wedge sweep, which
+	// waits out this threshold: at its default the caller is still parked when the test's waits run out.
+	e.parkWedgeThreshold = time.Second
 	e.reapBatchRows, e.reapStageRows = 4, 4
 	return e, reader
 }
