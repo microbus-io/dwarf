@@ -313,6 +313,12 @@ and Cloud SQL's private services range.
   per step, `results[].db.flushMs` the flush under load, and `fsync.sh <dsn>` on the idle instance its WAL flush floor
   (one `psql` session: a commit's time less a `SELECT 1`'s - on Cloud SQL the round trip to its remote disk). Record
   all three beside every throughput number.
+- **Record every fresh instance's draw, whatever the run measures (user):** before its first step (`warm-step.sh`
+  included), one saturated 0 B `linear` arm of 30 s warmup and a 2-minute window, with `rtt.sh`, `fsync.sh`, the
+  window's CPU per step and flush time, the build and the zone, in the run's results `CLAUDE.md`. About 3 minutes an
+  instance. Same-size instances have run 21% apart, and these reads build the spread across runs. The read is cold,
+  so it runs ~8-9% low until the instance's second checkpoint and is good to about +-3%: compare draws by it, on one
+  build or normalized by flush time, and never quote it as a rate.
 - **Read CPU per step over the measurement window alone** (`dbcpu.sh -w <start> <end>` with `PAD_SECONDS=0`). The
   artifact mode spans the artifact's start to end - warmup, window and drain - padded 60 s each side, and the idle
   edges dilute it: the two 2026-11-06 32 vCPU draws read 0.87 and 0.89 core-ms/step that way and 1.03 and 1.26 over
