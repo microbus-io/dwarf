@@ -4285,6 +4285,14 @@ sized in the claim CAS - see "Time Budgets") lapses, and `recoverExpiredLeases` 
    (~14% for 10 s, ~4,000 flows queued, ~20 s to clear) is a checkpoint's burst of page images, and small ones (~4%)
    follow some `dwarf_steps` autovacuum ends. With vacuum behind, the same pass grew to seconds and lined up with the
    dips: look for a vacuum backlog before blaming the scan.
+
+   **Do not put the recovery jobs on signals with a slow backstop tick** (user, 2026-11-20). Built once and measured
+   twice: a signal - startup, a promotion, a peer leaving, a step left for recovery, a task outliving its lease, a
+   shutdown - only returns the shard to this 1-minute cadence for a while, so a signalled loss recovers no sooner and
+   one no signal announces waits for the backstop, to save passes that cost ~150 ms a minute. Before the archive a
+   5-minute pass grew to seconds and dipped the shard; on the archive build it cost no more than a 1-minute pass, but
+   its arm ran a p50 of 177 ms against 114-116 for the 1-minute arms around it, which nothing measured explained.
+   What bounds recovery after a crash is the lease (`budget + leaseMargin`); the interval adds at most one pass.
 2. **Closed flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
