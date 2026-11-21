@@ -4277,6 +4277,14 @@ sized in the claim CAS - see "Time Budgets") lapses, and `recoverExpiredLeases` 
    of the expired ids per shard, then a by-id UPDATE that repeats the predicate. It rings no doorbell: a reset step is due and `pending`, so its shard's next piston cycle selects it
    like any other. It is the janitor's `lease_recovery` job, a pass every `recoveryInterval`, with no trigger and no
    early wake.
+
+   **Its pass is cheap while vacuum keeps up, and is not what dips a shard near saturation.** The SELECT walks the
+   selection index's `running` range, visiting every dead entry steps left there since vacuum last removed them, so
+   its cost is that backlog. On the archive build vacuum keeps up: at 95% of a saturated 0 B 32 vCPU PG16 shard a pass
+   ran ~150 ms, flat, and ~126 ms at a 5-minute interval. The dips such a shard shows are PostgreSQL's: the deepest
+   (~14% for 10 s, ~4,000 flows queued, ~20 s to clear) is a checkpoint's burst of page images, and small ones (~4%)
+   follow some `dwarf_steps` autovacuum ends. With vacuum behind, the same pass grew to seconds and lined up with the
+   dips: look for a vacuum backlog before blaming the scan.
 2. **Closed flow check** in `processStep` - after loading flow data, if the flow is `terminated`/`cancelled`/`failed`/
    `completed`, sets the step to that status and returns. Catches races where the flow went terminal before the step
    was updated.
