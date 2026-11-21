@@ -125,7 +125,9 @@ fresh Cloud SQL instance (or after raising `max_wal_size`), every 16 MB segment 
 WAL write lock until checkpoints start recycling them: the 2026-11-06 headline arm, first on its instance, ran ~22.5k
 for minutes 1-3 and ~24.5k after, stepping up as its second checkpoint completed, with `IO/WALInitSync` sampled
 behind ~249 `WALWrite` waiters; later arms on the same instance started at full rate. Warm up past two checkpoints
-(`max_wal_size / 1.9` of WAL each) before a fresh instance's first window, or do not quote its first minutes.
+(`max_wal_size / 1.9` of WAL each) before a fresh instance's first window, or do not quote its first minutes. At the
+rigs' 64 GB that is ~68 GB of WAL: ~6 minutes saturated at 64 KB (~190 MB/s), but ~14 at 0 B (~83 MB/s), so warm a
+fresh instance with a payload arm before a 0 B window - the files it creates are recycled for every arm after it.
 
 **A DATABASE-FLAG PATCH RESTARTS THE INSTANCE, and the arm right after it reads low.** After the restart every page's
 next change is logged whole and the buffer cache is cold: an arm started a minute after a `wal_buffers` patch logged
@@ -294,8 +296,10 @@ and Cloud SQL's private services range.
   `withnetem.sh` when it installs no netem of its own. `burst-step.sh` is its preset for `burst.sh`.
 - **What stays out of git** lives in `$RIG_HOME` (default `tmp/rig/`, ignored): `dbpass` and the pinned
   `bench-<sha>` binaries (`CGO_ENABLED=0 GOOS=linux GOARCH=arm64`, built from a clean clone).
-- **Every rig runs the recommended database settings unless the run says otherwise (user):** `max_wal_size` 20 GB and
-  `checkpoint_timeout` 15 min - the deployment guidance on docs.dwarf.run. **Not `wal_compression`:** the docs
+- **Every rig runs the recommended database settings unless the run says otherwise (user):** `max_wal_size` 64 GB and
+  `checkpoint_timeout` 15 min - the deployment guidance on docs.dwarf.run for a 1 TB disk (96 GB with a 2 TB one).
+  Runs before 2026-11-20 used 20 GB, under which a payload arm's checkpoints came every 35-65 s and most of its WAL was
+  page images: compare across that date with the setting in mind. **Not `wal_compression`:** the docs
   recommend leaving it off, since it compresses only full-page images, which here hold TOAST data already compressed
   (lz4 measured +3% at 8 KB, +1% at 1 MB), and a rig measures what operators are told to set. The published cloud
   numbers from 2026-11-06 to 2026-11-15 ran with `wal_compression=lz4`; their sections say so. **The orchestrators add

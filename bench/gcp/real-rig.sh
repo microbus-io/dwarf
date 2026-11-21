@@ -4,7 +4,7 @@
 # generate half the load each, and a c4a-standard-2 admin host (psql, s-mon.sh, v-mon.sh).
 #   0  draw check: both replicas, saturated linear 0 B, 1 + 6 min; dbcpu.sh's core-ms per step above $DRAW_MAX is a slow
 #      draw, redrawn at most $REDRAWS times.
-# $DBFLAGS defaults to https://docs.dwarf.run/operating/deployment/'s settings: max_wal_size 20 GB, checkpoint_timeout 15 min,
+# $DBFLAGS defaults to https://docs.dwarf.run/operating/deployment/'s settings: max_wal_size 64 GB, checkpoint_timeout 15 min,
 # autovacuum_work_mem 1 GB. Every payload in the calibration and the day is a -payload-json document, which
 # compresses as real JSON does.
 #   1  calibration: the mix, saturated, 2 + 16 min, fresh database. C_mix is the replicas' summed rate over the last 5
@@ -32,11 +32,11 @@ R=$(cd "$D/../.." && pwd)
 S=${RIG_HOME:-$R/tmp/rig}
 PROJECT=${PROJECT:-dwarf-bench-mbus} ZONE=${ZONE:-us-east4-a} NAME=${NAME:-real}
 TIER=${TIER:-db-custom-32-131072}
-DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576,max_wal_size=20480,checkpoint_timeout=900,log_checkpoints=on}
+DBFLAGS=${DBFLAGS-cloudsql.enable_auto_explain=on,auto_explain.log_min_duration=10000,log_lock_waits=on,autovacuum_work_mem=1048576,max_wal_size=65536,checkpoint_timeout=900,log_checkpoints=on}
 # The recommended settings (bench/CLAUDE.md, "Running the cloud rig"; docs.dwarf.run's deployment page), each added
 # unless DBFLAGS sets its own value: 1 GB of dead-row memory per autovacuum worker (at Cloud SQL's 64 MB a vacuum pass
 # rescans every index once per ~11M dead rows), and checkpoints sized for the write load.
-for f in autovacuum_work_mem=1048576 max_wal_size=20480 checkpoint_timeout=900; do
+for f in autovacuum_work_mem=1048576 max_wal_size=65536 checkpoint_timeout=900; do
   [[ ,$DBFLAGS, == *,${f%%=*}=* ]] || DBFLAGS=${DBFLAGS:+$DBFLAGS,}$f
 done
 RTT_MAX=${RTT_MAX:-0.35} DRAW_MAX=${DRAW_MAX:-1.35} REDRAWS=${REDRAWS:-2}

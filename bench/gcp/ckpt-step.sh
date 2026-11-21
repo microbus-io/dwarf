@@ -1,6 +1,6 @@
 # CKPT (x-rig step: `BIN=bench-<sha> DBFLAGS=max_wal_size=65536 x-rig.sh <name> 1000 ckpt-step.sh`). Whether
 # checkpoints spaced well past the archive's one-minute grace cut the WAL an archived step costs, and with it keep the
-# archive up at 64 KB. At the recommended 20 GB a checkpoint came every 35-65 s under archrate-step.sh's arms, no longer
+# archive up at 64 KB. At 20 GB a checkpoint came every 35-65 s under archrate-step.sh's arms, no longer
 # than the grace, so nearly every archived step's pages crossed a checkpoint between their write and the archive's
 # delete, and ~77 of the 113 KB ar-r85 logged a step were full-page images (2026-11-19). This step reruns ar-r85 on an
 # instance created with max_wal_size 64 GB: checkpoints ~3x further apart at the same WAL rate. One draw, n=1, against
