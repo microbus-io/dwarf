@@ -1518,7 +1518,7 @@ func (e *Engine) ListRecentlyClosed(ctx context.Context, query workflow.Query) (
 // still report its outcome until it is removed, and calling Delete on it again is success. The same holds for
 // a flow archived so recently that its copy in the live tables is still being removed. Returns 404 for an unknown key,
 // including a flow already deleted from the archive; 400 for a subgraph-child key (address the root instead); and 409
-// for an open flow: Terminate it first.
+// for an open flow: Terminate it first. Deleting many flows this way costs the database what Purge does: see Purge.
 func (e *Engine) Delete(ctx context.Context, flowKey string) (err error) {
 	ctx, release, err := e.admitIngress(ctx, "delete")
 	if err != nil {
@@ -1547,7 +1547,8 @@ func (e *Engine) Delete(ctx context.Context, flowKey string) (err error) {
 // again, or Delete them by key. Archival failures can keep closed flows live beyond the usual minute.
 //
 // Deleting rows writes in proportion to them and leaves dead rows for the database to vacuum; Purge is for removing
-// specific records, and bulk removal is the retention's (SetRetention) and PurgeBefore's, which drop whole days.
+// specific records, and bulk removal is the retention's (SetRetention) and PurgeBefore's, which drop whole days. That
+// vacuum competes with the work in flight, so run a large purge in off-peak hours.
 func (e *Engine) Purge(ctx context.Context, query workflow.Query) (removed int, done bool, err error) {
 	ctx, release, err := e.admitIngress(ctx, "purge")
 	if err != nil {
