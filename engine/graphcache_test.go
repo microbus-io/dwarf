@@ -75,7 +75,7 @@ func TestCreate_SeedsGraphCache(t *testing.T) {
 	cachedBefore := e.graphs.Flows()
 	tctx, doneTurn := e.dbTurn(ctx, shard)
 	_, err = e.createWithGraph(tctx, shard, "seedcache/g", graph, state, "", e.resolveFlowOptions(nil), 0, 0, 0, 0,
-		func(tx *sequel.Tx) error { return errors.New("rolled back") })
+		func(*sequel.Tx, *flowSeed) error { return errors.New("rolled back") })
 	doneTurn()
 	assert.Error(err)
 	assert.Equal(cachedBefore, e.graphs.Flows(), "a rolled-back create caches nothing")

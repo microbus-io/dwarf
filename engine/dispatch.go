@@ -942,16 +942,52 @@ func (e *Engine) parkSubgraph(ctx context.Context, d *dispatch, subgraphURL stri
 	//
 	// The park is guarded on status=running and the lease, so a terminated or re-claimed caller rolls the
 	// spawn back too, and this worker returns quietly.
-	parkCaller := func(tx *sequel.Tx) error {
-		res, err := tx.ExecContext(ctx,
+	parkCaller := func(tx *sequel.Tx, seed *flowSeed) error {
+		var watermark int
+		var reason string
+		batch := newTxBatch(ctx, tx)
+		batch.queue(func(res *sequel.BatchResults) error {
+			result, err := res.Exec()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			if n, _ := result.RowsAffected(); n == 0 {
+				return errCallerGone
+			}
+			return nil
+		},
 			"UPDATE dwarf_steps SET changes=?, changes_bytes=?, parked=?, updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
 			d.changesJSON, len(d.changesJSON), parkedSubgraph, d.stepID, parkedNone, d.row.leaseSeq,
 		)
-		if err != nil {
-			return errors.Trace(err)
+		// The parent's watermark rides the park's batch, so PostgreSQL pays no round trip for it; elsewhere it is a
+		// read of its own, and a park that matched nothing never runs it. A plain SELECT, not a subquery inside the
+		// park or an INSERT: on MySQL a subquery inside DML share-locks the flow row after this transaction holds the
+		// caller's step, against failFlowTx's flow-then-steps order. On SQL Server without READ_COMMITTED_SNAPSHOT
+		// the read waits behind a transaction holding the flow row, as a sibling's transition does.
+		batch.queue(func(res *sequel.BatchResults) error {
+			return errors.Trace(res.QueryRow().Scan(&watermark, &reason))
+		}, "SELECT cancel_watermark, cancel_reason FROM dwarf_flows WHERE flow_id=?", d.row.flowID)
+		if err := batch.flush(); err != nil {
+			return err
 		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return errCallerGone
+		// A caller a Cancel covered - it existed when the Cancel ran, so its id is at or under its flow's watermark -
+		// spawns its child already cancelled: the child is the cancelled work going on, which the Cancel would
+		// otherwise reach only after the child had run to completion, and no repeat Cancel reaches at all.
+		//
+		// Read after the park, so the transaction writes first, as SQLite needs. The watermark, not the caller's
+		// mark: Cancel writes the watermarks before its mark pass, and a spawn between the two finds the caller
+		// unmarked. So the caller is marked here too, on the row the park holds: otherwise a child cancelled at once
+		// revives a caller the mark pass has yet to reach, which handles the child's error, completes uncovered and
+		// lets the flow complete. That write's RowsAffected is not read - a caller marked already changes nothing,
+		// which MySQL counts as no row; the park above is the fenced write. A spawn that reads the watermark before
+		// Cancel writes it and commits after Cancel listed the tree's flows is missed by both, as without this:
+		// closing that needs the spawn to lock the parent's flow row before the caller's step, the reverse of
+		// Terminate's order, and Cancel to scan again under its locks.
+		if watermark > 0 && d.stepID <= watermark {
+			if _, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET cancelling=1 WHERE step_id=?", d.stepID); err != nil {
+				return errors.Trace(err)
+			}
+			seed.cancelled, seed.cancelReason = true, reason
 		}
 		return nil
 	}

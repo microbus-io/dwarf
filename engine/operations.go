@@ -164,6 +164,13 @@ type flowSeed struct {
 	fairnessKey        string
 	fairnessWeight     int
 	engineID           int64 // creator stamp: the inserting engine's random id (provenance, unindexed)
+
+	// cancelled makes the flow a subgraph child born cancelled: its caller was covered by a Cancel, so the child
+	// takes cancelReason, its entry step is inserted marked, and its cancel_watermark is that step - it counts as
+	// cancelled once, and every step after it sits above the watermark, so a handler of the child can recover.
+	// Its own flag, since a Cancel's reason may be empty.
+	cancelled    bool
+	cancelReason string
 }
 
 // insertFlowTx inserts the flow row (already `running`) and its entry step (`pending`, immediately
@@ -179,6 +186,9 @@ func (e *Engine) insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (n
 	columns := "flow_token, workflow_url, workflow_name, graph, graph_bytes, graph_hash, baggage, baggage_bytes, trace_parent, status, surgraph_flow_id, surgraph_step_id, delete_on_completion, priority, fairness_key, fairness_weight, time_budget_ms, engine_id, payload_ver, started_at"
 	values := "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC()"
 	args := []any{s.flowToken, s.workflowURL, s.workflowName, s.graphJSON, len(s.graphJSON), s.graphHash, s.baggageJSON, len(s.baggageJSON), s.traceParent, workflow.StatusRunning, s.surgraphFlowID, s.surgraphStepID, s.deleteOnCompletion, s.priority, s.fairnessKey, s.fairnessWeight, s.timeBudgetMs, s.engineID, payloadVer}
+	if s.cancelled {
+		columns, values, args = columns+", cancel_reason", values+", ?", append(args, s.cancelReason)
+	}
 	var self []string
 	if s.rootFlowID == 0 {
 		self = append(self, "root_flow_id")
@@ -202,15 +212,32 @@ func (e *Engine) insertFlowTx(ctx context.Context, tx *sequel.Tx, s flowSeed) (n
 		flowHour, flowHourArgs = "?", []any{newFlowHour}
 	}
 
+	cancelling := 0
+	if s.cancelled {
+		cancelling = 1
+	}
 	// Entry step is pending and immediately claimable (not_before=NOW, lease_expires=NOW). Its depth
 	// continues from the caller: callerStepDepth+1 (1 for a top-level flow, where callerStepDepth is 0).
 	// A flow that should wait before running uses an entry gate task with flow.Sleep, not a creation-time
 	// delay.
 	queueInsertID(batch, "step_id", func(id int64) { newStepID = id },
-		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id, flow_created_hour)"+
-			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?, "+flowHour+")",
-		append(append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, len(s.stateJSON), workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID), flowHourArgs...)...,
+		"INSERT INTO dwarf_steps (flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, status, time_budget_ms, not_before, lease_expires, priority, fairness_key, fairness_weight, engine_id, cancelling, flow_created_hour)"+
+			" VALUES ("+flowID+", ?, ?, ?, ?, ?, ?, ?, ?, NOW_UTC(), NOW_UTC(), ?, ?, ?, ?, ?, "+flowHour+")",
+		append(append(append([]any{}, flowArgs...), s.callerStepDepth+1, s.stepToken, s.entryPoint, s.entryURL, s.stateJSON, len(s.stateJSON), workflow.StatusPending, s.timeBudgetMs, s.priority, s.fairnessKey, s.fairnessWeight, s.engineID, cancelling), flowHourArgs...)...,
 	)
+	if s.cancelled {
+		// The watermark is the entry step, whose id the step's INSERT generated: currval on PostgreSQL, read back
+		// elsewhere. Not the flow's own id, which is the one selfFlowInsertSQL supplies.
+		stepID, stepArgs, err := batch.insertedID(lastStepIDSQL, func() any { return newStepID })
+		if err != nil {
+			return 0, 0, 0, err
+		}
+		where, whereArgs := "flow_id=(SELECT "+lastFlowIDSQL+")", []any(nil)
+		if tx.DriverName() != "pgx" {
+			where, whereArgs = "flow_id=?", []any{newFlowID}
+		}
+		batch.queue(execOnly, "UPDATE dwarf_flows SET cancel_watermark="+stepID+" WHERE "+where, append(stepArgs, whereArgs...)...)
+	}
 	if fixup != "" {
 		// Only where the INSERT could not name its own id, which insertedID has therefore already read.
 		batch.queue(execOnly, fixup, selfFlowFixupArgs(newFlowID, len(self))...)
@@ -283,7 +310,7 @@ func selfFlowFixupArgs(flowID int64, selfColumns int) []any {
 // that ordering.) callerStepDepth is the caller step's step_depth (0 for a top-level flow): the entry step
 // is created at callerStepDepth+1, so a subgraph's depths continue from the caller (informational only).
 // beforeInsert, when not nil, runs first in the insert's transaction; an error from it rolls the insert back.
-func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int, beforeInsert func(tx *sequel.Tx) error) (flowKey string, err error) {
+func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL string, graph *workflow.Graph, initialState workflow.State, parentTraceParent string, opts *workflow.FlowOptions, surgraphFlowID, callerStepDepth, surgraphStepID, rootFlowID int, beforeInsert func(tx *sequel.Tx, seed *flowSeed) error) (flowKey string, err error) {
 	entryPoint := graph.EntryPoint()
 	if entryPoint == "" {
 		return "", errors.New("workflow has no entry point", http.StatusBadRequest)
@@ -366,14 +393,16 @@ func (e *Engine) createWithGraph(ctx context.Context, shardNum int, workflowURL 
 	var newFlowID, newStepID int64
 	var newFlowHour int
 	err = db.Transact(ctx, func(tx *sequel.Tx) error {
+		// The hook adjusts a copy, so a retried transaction starts from the seed as built.
+		attempt := seed
 		if beforeInsert != nil {
-			if err := beforeInsert(tx); err != nil {
+			if err := beforeInsert(tx, &attempt); err != nil {
 				return err
 			}
 			e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointSubgraphSpawnParked)
 		}
 		var err error
-		newFlowID, newStepID, newFlowHour, err = e.insertFlowTx(ctx, tx, seed)
+		newFlowID, newStepID, newFlowHour, err = e.insertFlowTx(ctx, tx, attempt)
 		return err
 	})
 	if err == nil && e.diags.Seams().Enabled() && e.diags.Seams().IsFault(diagnostics.Join(diagnostics.FaultCreateCommitLost, workflowURL)) {

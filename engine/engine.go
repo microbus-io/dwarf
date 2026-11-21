@@ -1355,7 +1355,11 @@ func (e *Engine) Terminate(ctx context.Context, flowKey string, reason string) (
 // Cancel requests graceful cancellation of a flow, addressed by its root flow key. Every step in progress
 // when it is called - pending, running, parked on a subgraph, or interrupted - is covered, as is a step that
 // finished just before and is handing over to its next one: a step not yet started is skipped, and a step
-// already running finishes before the cancellation takes effect - a subgraph it arms still runs. A covered step receives the cancellation as
+// already running finishes before the cancellation takes effect. A subgraph a covered step arms is born
+// cancelled: its first task does not run, and the child delivers the cancellation as any covered step does - to
+// that task's onError transition, which can carry the child on, or as the child's cancelled outcome, which reaches
+// the caller as its subgraph's error. A subgraph armed while Cancel is still recording the request, before it
+// returns, can still start as an ordinary child, which Terminate stops. A covered step receives the cancellation as
 // an error on its task's onError transition, where workflow.IsCancelled reports true and the task's own
 // changes are preserved. An error the task itself returns wins over the cancellation: it takes the ordinary
 // error path instead. If a covered step has no onError transition, the flow ends cancelled when every

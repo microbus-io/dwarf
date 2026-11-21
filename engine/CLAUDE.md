@@ -434,15 +434,38 @@ the ordinary error path; with `onError` its handler receives that error, is inse
 covered) and the flow carries on under the author's control. Preempting the handler instead would hide the real
 error.
 
-*A subgraph, retry or interrupt request made by a covered step is honored, not intercepted.* The mark stays on
-the row, so the next claim catches it: a rewound retry is preempted a backoff later, an interrupted step is
-preempted when resumed. Do not intercept each request kind at its own write (a CASE on the park, on the rewind,
-a rollback on the interrupt chain): built, it multiplied dialect branches at four sites, and its conditional
-writes are the class that breaks the MySQL fence (see "Lease fencing"). The cost of honoring is
-latency - a rare `Cancel` landing mid-task on a step that then arms a subgraph lets that child run to completion
-before its caller is redirected - and a `Terminate` covers the rare long child. (Not a second `Cancel`: a
-flow is cancelled once, and a repeat call only re-applies the first call's watermark-bounded mark - see "one
-cancel per flow" on `cancel`.)
+*A retry or interrupt request made by a covered step is honored, not intercepted.* The mark stays on the row, so
+the next claim catches it: a rewound retry is preempted a backoff later, an interrupted step is preempted when
+resumed. Do not intercept each request kind at its own write (a CASE on the park, on the rewind, a rollback on the
+interrupt chain): built, it multiplied dialect branches at four sites, and its conditional writes are the class
+that breaks the MySQL fence (see "Lease fencing").
+
+*A subgraph a covered step requests is spawned too, but born cancelled* (`parkCaller` in `parkSubgraph`): a caller
+whose id is at or under its flow's watermark gets a child whose entry step is inserted marked, whose
+`cancel_watermark` is that step and whose `cancel_reason` is the parent's, so the child is preempted at its first
+claim and delivers the cancellation like any covered step. **Do not spawn it as a running child:** it then runs
+to completion before its caller is redirected - a child that interrupts holds the cancelled flow `interrupted` on
+a prompt - and no repeat `Cancel` reaches it, since a flow is cancelled once and a repeat only re-applies the
+watermark-bounded mark ("one cancel per flow" on `cancel`). The reasons for honoring a retry or an interrupt do not apply: no request
+kind's own write changes, and the one write added to an existing row - the caller's mark, below - has its
+`RowsAffected` unread, so it is not the class that misreads as fenced on MySQL. The watermark is a plain `SELECT`
+batched with the park: no round trip on PostgreSQL, one read per spawn elsewhere (the exception to "an uncancelled
+flow pays no extra round trip"). Never a subquery inside the park or an INSERT: on MySQL that share-locks the flow
+row after the caller's step, against `failFlowTx`'s flow-then-steps order. On SQL Server without
+READ_COMMITTED_SNAPSHOT the read waits behind a transaction holding the parent's flow row.
+- **The spawn reads the WATERMARK, not the caller's mark,** and marks the caller itself, on the row the park
+  holds. Cancel writes the watermarks before its mark pass, so a spawn between the two finds the caller unmarked;
+  a child cancelled at once then revives a caller the pass has yet to reach, which handles the child's error,
+  completes uncovered and lets the flow complete. That write's `RowsAffected` is not read (an already-marked
+  caller changes nothing, which MySQL counts as no row). Pinned by `fixtures/cancelspawnflow_test.go`'s
+  `the_caller_is_marked_before_the_cancels_mark_pass` (fails with the caller's mark removed).
+- **Recovery is untouched.** A handler that caught the cancellation is inserted above the watermark, so a
+  subgraph it spawns is born ordinary; the born-cancelled child's own `onError` on its first task can carry the
+  child on, since everything after its entry step sits above its watermark. Pinned by the fixture's other cases.
+- **One race is accepted:** a spawn that reads the watermark before Cancel writes it, and commits after Cancel
+  listed the tree's flows, is missed by both, as without this. Closing it needs the spawn to lock the parent's
+  flow row before the caller's step - the reverse of Terminate's steps-then-flows order - and Cancel to scan
+  again under its locks, as `terminateSubtree` does. A `Terminate` covers that child.
 
 *Two rules at the claim are load-bearing:*
 

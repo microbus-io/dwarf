@@ -62,11 +62,13 @@ import (
 //   - A step the engine has claimed runs whatever happens next; a pending step that is awake is claimed before any
 //     operation lands, and a sleeping one is not. Cancel sets each open flow's watermark at its newest step and
 //     marks every pending, running and interrupted step at or under it. A tree is cancelled once: a repeat Cancel
-//     sets no watermark and only marks again, so it never reaches a flow created since the first. A marked step not
-//     yet claimed is preempted at its claim: it never runs and is cancelled. A marked step that runs finishes: its
-//     completion is covered (its changes stand, it is cancelled), its error wins over the cancellation, and a
-//     retry, interrupt or subgraph it asks for is honored - a child spawned then runs unmarked. A successor of a
-//     step at or under its flow's watermark that was not itself covered is inserted marked.
+//     sets no watermark and only marks again. A marked step not yet claimed is preempted at its claim: it never runs
+//     and is cancelled. A marked step that runs finishes: its completion is covered (its changes stand, it is
+//     cancelled), its error wins over the cancellation, and a retry or interrupt it asks for is honored. A
+//     subgraph asked for by a step at or under its flow's watermark is born cancelled: the caller is marked, the
+//     child's watermark is its entry step and that step is marked, so it is preempted - its child's handler, if it
+//     has one, carries the child on. A successor of a step at or under its flow's watermark that was not itself
+//     covered is inserted marked.
 //   - Terminate closes every open step and flow of the tree; a running step's later writes are fenced.
 //   - Interrupted steps are addressed in the order they interrupted. Resume re-pends the first with the resume
 //     data, which its next execution receives; a flow runs again once none of its steps is interrupted. Resume of a
@@ -672,6 +674,14 @@ func (m *hModel) finish(s *mStep, b hBehavior, tok string, rewindOp hOp) (comple
 	case hSpawn:
 		s.changes = append(s.changes, tok)
 		s.child = m.newFlow(s.flow.g.calls[s.task], s)
+		if s.flow.watermark >= s.idx {
+			// The Cancel covered the caller: its child is born cancelled, and the caller is marked with it.
+			s.cancelling = true
+			entry := s.child.steps[0]
+			s.child.watermark = entry.idx
+			entry.cancelling = true
+			m.preempt(entry)
+		}
 	case hOK, hSleep:
 		s.changes = append(s.changes, tok)
 		if s.cancelling {
@@ -1074,7 +1084,7 @@ func (m *hModel) choices(postClose int, mustClose bool) []hChoice {
 					}
 					cancel, terminate := b.weight, (b.weight+1)/2
 					if b.ev.Behavior == hSpawn {
-						cancel, terminate = 2*b.weight, 2*b.weight // the spawn honored under a mark; the rescan for a child
+						cancel, terminate = 2*b.weight, 2*b.weight // the child born cancelled; the rescan for a child
 					}
 					out = append(out,
 						hChoice{hEvent{Task: s.task, Behavior: b.ev.Behavior, At: at, Op: hCancel}, cancel},

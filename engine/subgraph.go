@@ -39,7 +39,7 @@ import (
 // caller step's step_depth, so the child's entry step (and thus its whole subtree) is numbered as a
 // continuation of the caller (callerStepDepth+1). parkCaller runs first in the child's insert transaction, so
 // the caller is parked and its child created atomically; see processStep for why.
-func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string, parkCaller func(tx *sequel.Tx) error) (string, error) {
+func (e *Engine) createSubgraphFlow(ctx context.Context, shardNum int, surgraphFlowID int, callerStepDepth int, surgraphStepID int, subgraphWorkflowURL string, subgraphGraph *workflow.Graph, childState workflow.State, baggageJSON []byte, callerTraceParent string, parkCaller func(tx *sequel.Tx, seed *flowSeed) error) (string, error) {
 	// diagnostics.FaultSubgraphSpawnErr simulates the spawn failing before its transaction: the caller is not
 	// parked and no child is inserted, so the caller must be failed cleanly (failAndReturn). Scoped by the
 	// child workflow URL.

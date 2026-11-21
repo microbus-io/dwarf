@@ -363,10 +363,10 @@ func TestGracefulCancelFlow(t *testing.T) {
 		assert.True(outcome.State.GetBool("gWorked"), "the retry carries the first attempt's changes to the handler")
 	})
 
-	// subgraph, Cancel during the caller's first run: E arms a subgraph after Cancel landed. The child is
-	// spawned and runs, and when it returns E runs once more - seeing the child's result - before its own
-	// cancellation redirects it to its handler, which receives what E made of that result.
-	t.Run("subgraph_caller_sees_child_result", func(t *testing.T) {
+	// subgraph, Cancel during the caller's first run: E arms a subgraph after Cancel landed. The child is born
+	// cancelled, so its task never runs; E runs once more, receives the child's cancellation from flow.Subgraph and
+	// returns it, and its handler receives a cancellation.
+	t.Run("subgraph_armed_after_cancel_is_born_cancelled", func(t *testing.T) {
 		assert := testarossa.For(t)
 		graph := workflow.NewGraph("SubgraphCallerSeesChildResult")
 		graph.SetURL("E", "gracefulcancelflow.verify:428/scr-e")
@@ -384,7 +384,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 		running := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
-		var eRuns atomic.Int32
+		var eRuns, kRuns atomic.Int32
 		var fRan atomic.Bool
 		mux.HandleTask("gracefulcancelflow.verify:428/scr-e", func(ctx context.Context, f *workflow.Flow) error {
 			if eRuns.Add(1) == 1 {
@@ -400,6 +400,7 @@ func TestGracefulCancelFlow(t *testing.T) {
 			return nil
 		})
 		mux.HandleTask("gracefulcancelflow.verify:428/scr-k", func(ctx context.Context, f *workflow.Flow) error {
+			kRuns.Add(1)
 			f.SetInt("childOut", 7)
 			return nil
 		})
@@ -427,11 +428,12 @@ func TestGracefulCancelFlow(t *testing.T) {
 		if !assert.NoError(err) {
 			return
 		}
-		assert.Equal(workflow.StatusCompleted, outcome.Status)
+		assert.Equal(workflow.StatusCompleted, outcome.Status, "E's handler recovers the flow")
+		assert.Equal(int32(0), kRuns.Load(), "the child is born cancelled: its task never runs")
 		assert.Equal(int32(2), eRuns.Load(), "the caller runs once more when its child returns")
 		assert.False(fRan.Load(), "E's transition must be redirected to its handler")
-		assert.True(outcome.State.GetBool("recovered"))
-		assert.Equal(7, outcome.State.GetInt("fromChild"), "the handler receives what E made of the child's result")
+		assert.True(outcome.State.GetBool("recovered"), "the handler receives a cancellation")
+		assert.False(outcome.State.Has("fromChild"), "the child returned no result")
 	})
 
 	// subgraph, Cancel while the child is running: the parked caller and the child's running step are both
