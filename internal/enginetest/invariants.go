@@ -196,9 +196,11 @@ func AssertInvariantsIn(t *testing.T, shards map[int]*sequel.DB) {
 // final state, error and cancel reason, and each terminal step's status, changes and error - taken by CaptureOutcomes
 // and compared against a later moment by AssertOutcomesKept.
 type Outcomes struct {
-	flows map[string]flowOutcome // by flow key
-	steps map[string]stepOutcome // by shard and step id
-	live  map[string]bool        // every flow key in the live tables, closed or not
+	flows   map[string]flowOutcome // by flow key
+	steps   map[string]stepOutcome // by shard and step id
+	present map[string]bool        // every step in the live tables, terminal or not, by shard and step id
+	live    map[string]bool        // every flow key in the live tables, closed or not
+	doomed  map[string]bool        // every flow key in the live tables whose root is stamped for deletion
 }
 
 type flowOutcome struct {
@@ -235,22 +237,29 @@ func CaptureOutcomesIn(t *testing.T, shards map[int]*sequel.DB) Outcomes {
 	t.Helper()
 	assert := testarossa.For(t)
 	ctx := context.Background()
-	out := Outcomes{flows: map[string]flowOutcome{}, steps: map[string]stepOutcome{}, live: map[string]bool{}}
+	out := Outcomes{flows: map[string]flowOutcome{}, steps: map[string]stepOutcome{}, present: map[string]bool{},
+		live: map[string]bool{}, doomed: map[string]bool{}}
 	for shard, db := range shards {
+		// The steps are read before the flows, in a statement of their own: a tree that leaves the live tables
+		// between the two reads must read as gone or stamped, never as live with its steps missing.
 		rows, err := db.QueryContext(ctx,
-			"SELECT flow_id, created_hour, flow_token, status, error, cancel_reason, final_state FROM dwarf_flows")
+			"SELECT s.step_id, f.flow_id, f.created_hour, f.flow_token, s.status, s.error, s.changes,"+
+				" CASE WHEN s.status IN "+terminalSQL+" AND (f.status IN "+terminalSQL+
+				" OR (s.status='"+workflow.StatusCompleted+"' AND s.advancing=0)) THEN 1 ELSE 0 END"+
+				" FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id=f.flow_id")
 		if !assert.NoError(err) {
 			continue
 		}
 		for rows.Next() {
-			var flowID, hour int
+			var stepID, flowID, hour, recorded int
 			var token string
-			var o flowOutcome
-			if assert.NoError(rows.Scan(&flowID, &hour, &token, &o.status, &o.err, &o.cancelReason, &o.finalState)) {
-				flowKey := keys.NewFlowKey(shard, hour, flowID, token)
-				out.live[flowKey] = true
-				if workflow.IsTerminalStatus(o.status) {
-					out.flows[flowKey] = o
+			var o stepOutcome
+			if assert.NoError(rows.Scan(&stepID, &flowID, &hour, &token, &o.status, &o.err, &o.changes, &recorded)) {
+				stepRef := strconv.Itoa(shard) + ":" + strconv.Itoa(stepID)
+				out.present[stepRef] = true
+				if recorded == 1 {
+					o.flowKey = keys.NewFlowKey(shard, hour, flowID, token)
+					out.steps[stepRef] = o
 				}
 			}
 		}
@@ -258,19 +267,23 @@ func CaptureOutcomesIn(t *testing.T, shards map[int]*sequel.DB) Outcomes {
 		rows.Close()
 
 		rows, err = db.QueryContext(ctx,
-			"SELECT s.step_id, f.flow_id, f.created_hour, f.flow_token, s.status, s.error, s.changes"+
-				" FROM dwarf_steps s JOIN dwarf_flows f ON s.flow_id=f.flow_id WHERE s.status IN "+terminalSQL+
-				" AND (f.status IN "+terminalSQL+" OR (s.status='"+workflow.StatusCompleted+"' AND s.advancing=0))")
+			"SELECT f.flow_id, f.created_hour, f.flow_token, f.status, f.error, f.cancel_reason, f.final_state,"+
+				" CASE WHEN r.delete_after_ms>0 THEN 1 ELSE 0 END"+
+				" FROM dwarf_flows f LEFT JOIN dwarf_flows r ON r.flow_id=f.root_flow_id")
 		if !assert.NoError(err) {
 			continue
 		}
 		for rows.Next() {
-			var stepID, flowID, hour int
+			var flowID, hour, doomed int
 			var token string
-			var o stepOutcome
-			if assert.NoError(rows.Scan(&stepID, &flowID, &hour, &token, &o.status, &o.err, &o.changes)) {
-				o.flowKey = keys.NewFlowKey(shard, hour, flowID, token)
-				out.steps[strconv.Itoa(shard)+":"+strconv.Itoa(stepID)] = o
+			var o flowOutcome
+			if assert.NoError(rows.Scan(&flowID, &hour, &token, &o.status, &o.err, &o.cancelReason, &o.finalState, &doomed)) {
+				flowKey := keys.NewFlowKey(shard, hour, flowID, token)
+				out.live[flowKey] = true
+				out.doomed[flowKey] = doomed == 1
+				if workflow.IsTerminalStatus(o.status) {
+					out.flows[flowKey] = o
+				}
 			}
 		}
 		assert.NoError(rows.Err())
@@ -283,7 +296,8 @@ func CaptureOutcomesIn(t *testing.T, shards map[int]*sequel.DB) Outcomes {
 // closed flow whose status, final state, error or cancel reason changed, or a terminal step whose status, changes or
 // error did, or that is gone while its flow is not. JSON is compared by value, not by its bytes. A flow no longer in
 // the live tables is not compared; its key is returned, for the test to account for - a Delete, a Purge, or a move
-// to the archive that a read by key should still answer.
+// to the archive that a read by key should still answer. A tree stamped for deletion may be losing its steps a chunk
+// at a time, so a step deleted from it is not failed; every step it still holds is compared, its status included.
 func AssertOutcomesKept(t *testing.T, e Engine, before Outcomes) (removed []string) {
 	t.Helper()
 	assert := testarossa.For(t)
@@ -307,6 +321,9 @@ func AssertOutcomesKept(t *testing.T, e Engine, before Outcomes) (removed []stri
 			continue // removed with its flow
 		}
 		is, ok := now.steps[stepRef]
+		if !ok && !now.present[stepRef] && now.doomed[was.flowKey] {
+			continue // deleted with its stamped tree
+		}
 		if !assert.True(ok, "terminal step %s of flow %s is gone or no longer terminal", stepRef, was.flowKey) {
 			continue
 		}

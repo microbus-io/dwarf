@@ -60,9 +60,10 @@ import (
 // test mode, on any dialect), or it is a child process killed with SIGKILL while it holds a task ("killed", on a
 // database the test makes, SQLite or PostgreSQL), so its lease lapses and its dispatch evidence goes stale until the
 // survivor takes its residue class. A fresh engine then starts under the dropped engine's id and joins, and both stream
-// again. Once every flow has closed and the janitors have emptied the live tables, every flow is where its shape puts
-// it - archived once with the outcome its shape computes, or deleted - no archive day holds a flow twice, and no
-// janitor job failed on any engine.
+// again. No closed outcome the live tables hold at the drop or at the rejoin moves while the janitors run. Once every
+// flow has closed and the janitors have emptied the live tables, every flow is where its shape puts it - archived once
+// with the outcome its shape computes, or deleted - no archive day holds a flow twice, and no janitor job failed on any
+// engine.
 //
 // It does not catch the move's root lock removed on PostgreSQL: the second of two moves of one root waits on the
 // first's row locks in its DELETE ... RETURNING, then matches nothing, and nothing here races the move's recheck. On
@@ -483,6 +484,8 @@ func dropAndRejoin(t *testing.T, a *Engine, aReader *sdkmetric.ManualReader, rel
 	ctx := context.Background()
 
 	assert.True(halfCopied(t, a) > 0, "a staged copy the dropped engine part wrote")
+	// The trees the janitors remove meanwhile are held to their shapes at the end, by key and in the archive.
+	atDrop := enginetest.CaptureOutcomes(t, a)
 	release()
 	awaitDividing(t, a, false)
 
@@ -497,6 +500,8 @@ func dropAndRejoin(t *testing.T, a *Engine, aReader *sdkmetric.ManualReader, rel
 	assert.True(ok, "the engines created %d and %d flows after the rejoin", streamA.count.Load()-since, streamRejoined.count.Load())
 	assert.NoError(streamA.halt())
 	assert.NoError(streamRejoined.halt())
+	enginetest.AssertOutcomesKept(t, a, atDrop)
+	atRejoin := enginetest.CaptureOutcomes(t, a)
 
 	// Every flow stops - one the killed process created and never reported among them - and the live tables are then
 	// at rest.
@@ -518,6 +523,8 @@ func dropAndRejoin(t *testing.T, a *Engine, aReader *sdkmetric.ManualReader, rel
 	})
 	assert.Must(assert.True(ok, "flows still open"))
 	enginetest.AssertInvariants(t, a)
+	enginetest.AssertOutcomesKept(t, a, atDrop)
+	enginetest.AssertOutcomesKept(t, a, atRejoin)
 
 	// The janitors archive or delete every tree.
 	ok = enginetest.WaitUntil(t, dropCeiling, func() bool {

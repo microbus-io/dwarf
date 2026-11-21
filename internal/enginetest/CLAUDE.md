@@ -28,6 +28,26 @@ completed with `advancing=0`, then compare a later moment by value (stored JSON 
 One kind of terminal step is deliberately not recorded, because a repair legitimately rewinds it: a completed step
 still `advancing` on an open flow, which the orphan sweep replays. A flow gone from the live
 tables is returned rather than failed, for the test to account for: a Delete, a Purge, or a move to the archive.
+
+**The janitor may be running while they read**, so a tree leaving the live tables must never read as live with its
+steps missing:
+- **A capture reads the steps first, then the flows.** A tree leaves in one transaction (a move, or a deletion that
+  fits one), or over several with its root stamped first and its root row deleted last (chunked deletion,
+  `internal/janitor/CLAUDE.md`). So a step missing from the first read has its flow gone or its root stamped by the
+  second, at read committed on every dialect. In the other order, a tree moved between the reads reads as live with
+  its steps gone. **Do not fold the two reads into one statement** either: that is one snapshot only where reads
+  are, and SQL Server's locking reads are not.
+- **A tree whose root is stamped may be missing recorded steps**, which chunked deletion takes a chunk at a time,
+  each flow's steps before its flow row. Only a step whose row is gone is excused: the steps read records every step
+  that exists, terminal or not, so one still there and no longer terminal fails as it would in any tree. A stamp is
+  never cleared, so a tree read stamped is on its way out.
+
+Pinned by `TestOutcomesKept_AStampedTreeLosesStepsAChunkAtATime` (fails without the stamp's exemption). Measured in
+`TestDispatcherDrop_TheJanitorsKeepEveryFlow`, whose staged trees leave the live tables in chunks: without the
+exemption its shutdown arm failed 1 of 10 runs on SQLite and 2 of 10 on PostgreSQL, a recorded step reported gone each
+time; with the exemption alone, 10 of 10 passed on each. The read order guards a move landing between the two reads,
+which those runs did not catch, and nothing pins it.
+
 `CaptureOutcomesIn` records the same from shard databases a test opened itself, for a moment when no engine runs
 there: after a process was killed and before its replacement starts, whose startup would begin recovering at once.
 `AssertInvariantsIn` runs the checks the same way; the bench's `TestRig_Invariants` uses it on the database a rig run
@@ -44,7 +64,7 @@ left behind.
 | One durable advancement per obligation | `completed step still advancing on an open flow`, `successor inserted twice by one transition`, `cohort converged more than once` | `lostcommit_test.go` |
 | Cohort accounting | `cohort counter overshoot`, `cohort converged before it resolved, or with a loss` | `cohortbatch_test.go`, `cohortlock_test.go` |
 | A park is settled by the child that owns it | `waiting caller without an open child owning its park`, `open child whose caller does not hold its park`, `step neither waiting nor terminal still naming a park owner` | `subgraphspawn_test.go`, `ownershipfence_test.go` |
-| A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go`, `histories_test.go` |
+| A closed outcome never moves | `AssertOutcomesKept` | `lostcommit_test.go`, `histories_test.go`, `dispatcherdrop_test.go` (with the janitors running) |
 | A closed outcome stays reachable while its tree moves to the archive | `AssertOutcomesKept`'s removed flows, each read again by key | `archivereach_test.go` |
 | A process's death strands no obligation: a replacement finishes each with its own recovery, waiting steps keep their deadlines, an interrupted step waits for Resume | the checker and `CaptureOutcomesIn` at the kill, read by the test's own connection before the replacement starts | `processkill_test.go` |
 | An operation, a recovery or a lost reply leaves what the reference model says at each point a history lands it - inside a task, before a transition, a rewind or an interrupt, across an operation's midpoint, between executions: which executions run, what each is handed and contributes, the outcome, its reason and prompt | the model, after every event of a generated history | `histories_test.go` |
