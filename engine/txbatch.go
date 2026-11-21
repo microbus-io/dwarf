@@ -45,7 +45,8 @@ func newTxBatch(ctx context.Context, tx *sequel.Tx) *txBatch {
 	return &txBatch{ctx: ctx, tx: tx, batch: tx.Batch()}
 }
 
-// queue adds a statement and the function that reads its result.
+// queue adds a statement and the function that reads its result. The batch holds args until flush sends it, so a
+// caller must not reuse an args slice, or bytes one points to, for a later statement.
 func (b *txBatch) queue(read func(res *sequel.BatchResults) error, query string, args ...any) {
 	b.batch.Queue(query, args...)
 	b.reads = append(b.reads, read)
