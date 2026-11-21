@@ -69,7 +69,7 @@ backpressure.
 So resource-accurate control must live in the layer that holds the resource identity. That is the **task itself**
 (it sees its downstream's 429/503, knows the account, and arms `flow.Retry` with an appropriate horizon), or the
 **host adapter** for the one case only it can see - *no responder for the dispatch* (the task's hosting microservice
-is absent), which the host detects and rides out by arming `flow.Retry` on the carrier. The engine just executes,
+is absent), which the host detects and rides out by arming `flow.Defer` on the carrier. The engine just executes,
 routes `onError`, and honors the backoff primitives.
 
 A consequence of having no breaker is no probe *election*: each parked step is its own probe and discovers recovery
@@ -448,7 +448,9 @@ cancel per flow" on `cancel`.)
 
 - **A subgraph caller resuming after its child (`subgraph_done=1`) is NOT preempted.** It runs once more so the
   child's result reaches its code, and its own mark is applied at its completion write. Preempting it would
-  deliver the cancellation without the caller ever seeing what its child did.
+  deliver the cancellation without the caller ever seeing what its child did. It runs holding the cancellation,
+  which `flow.Retry` and `flow.Defer` return, so it cannot back off past the Cancel (under "A Defer re-pends the
+  step as it stands").
 - **An interrupted step resumed after Cancel IS preempted.** Its resume data is new input arriving after the
   cancellation; running on it would keep a cancelled flow acting on a human response.
 
@@ -980,8 +982,8 @@ the engine's `TimeBudget`, sized for one surviving sweeper, no crash-detection t
 ### `processStep` and `dispatch` (`dispatch.go`)
 
 `processStep` is a sequence of stages - `claim`, `load`, `startTask`, `execute`, `outcome`, then one of
-`parkInterrupt`/`parkSubgraph`/`retry`, or `complete` then `transition` - each an `Engine` method taking the run's
-`*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a closed flow, a deferral, a failed step).
+`parkInterrupt`/`parkSubgraph`/`retry`/`deferStep`, or `complete` then `transition` - each an `Engine` method taking the run's
+`*dispatch`. A stage returning `done` ends the dispatch (a lost claim, a closed flow, a payload-version deferral, a failed step).
 
 - **`dispatch` is data only: no methods.** Its fields are grouped by the stage that sets them; a later stage reads a
   group and does not rewrite it, except where a field's comment says so and where the payload is let go (below). The claimed columns are the named field
@@ -1402,7 +1404,34 @@ onError-handled error or an externally terminated sibling.
 
 **Retry rejoins its cohort naturally.** `flow.Retry` rewinds the failed step in place - same `step_id`, `lineage_id`,
 `fan_out_ordinal`, just `status='pending'` and the prior error/park slot cleared. The merge query sees one row per
-branch regardless of attempts, so retry can't double-count.
+branch regardless of attempts, so retry can't double-count. A `flow.Defer` re-pends the same row too.
+
+**A Defer re-pends the step as it stands (`deferStep`).** One statement, fenced and guarded as the Retry rewind
+is (`status='running' AND lease_seq=?`, a zero-row match a no-op), writing the run's `changes`, `deferrals+1` and
+the backoff's `not_before`, and nothing else: `attempt`, the park slots and the subgraph children stay, which is
+the whole difference from a Retry. That is what a host waiting for an absent worker needs - a Retry there asks a
+resumed step's human again and re-runs a returned caller's child - so the host guidance names `Defer`, never
+`Retry`. Its bound counts `deferrals`, which the Retry rewind resets, and so does every write that resolves a park:
+Resume's leaf flip, the subgraph revive (`completeSurgraphFlow`), `deliverSubgraphError` and `resolveFailedSpawn`.
+So a step's own retries, and waits from before it got its answer, spend none of a host's horizon; a Fork's re-parked
+caller starts over at its revive. Three consequences to hold:
+- **A new park-resolving write sets `deferrals=0` too**, or a wait before the park spends the horizon after it.
+  Pinned by `deferflow_test.go`'s `a_resolved_park_starts_the_count_over` (Resume) and
+  `a_returned_subgraph_starts_the_count_over` (the revive, a failed child, a failed spawn), each failing with its
+  own write's reset removed.
+- **Defer keeps a resolved subgraph's ERROR too.** A spawn that failed (`resolveFailedSpawn`) or a failed child is
+  delivered on the same slot, so a task that wants the child spawned again must `Retry`, not `Defer`.
+- **The exempt subgraph caller runs holding its flow's cancellation** (`execute` sets it on the carrier), which
+  `Retry` and `Defer` return instead of arming. Without it the claim's `subgraph_done` exemption, which a Defer keeps,
+  lets a caller that defers run past the Cancel at every claim. **Do not narrow the exemption instead** to "the task
+  saw the result": a host's Defer for an unreachable worker comes from a run the task never saw, and the row cannot
+  tell the two apart. A Cancel landing mid-run still costs one more run: that run's Defer arms, and the next claim
+  carries the cancellation. **The carrier's refusal is not the enforcement:** a remote host's reply may arm a Retry
+  or Defer anyway, so `execute` takes one from a run that held the cancellation as the cancellation itself. Pinned
+  by `deferflow_test.go`'s `a_cancelled_caller_stops_deferring` and `a_reply_that_defers_past_the_cancellation`
+  (a host forging the Defer; it loops until the test's ceiling without the check).
+Pinned by `fixtures/deferflow_test.go`, `TestDeferRewindVsTerminate_Deterministic` and `hosts`'
+`TestRemote_AWaitKeepsAResumedStepsAnswer` (fails with the host waiting on `Retry`).
 
 **Do NOT replace the shared `cohort_arrivals` counter with per-member arrival state.** Every sibling bumps the
 same spawn row and holds its write lock until COMMIT, so siblings serialize, and the idea of marking each
@@ -1601,8 +1630,8 @@ than over-suppressing.
   blocks on an empty cache, so no busy-spin), and skips are self-limiting. Do **not** ask for an extra scan
   on the skip path - measured at a 0ms interval, it fed an already-spinning refiller (throughput 1,632 -> 941).
 - **EVERY path that re-offers a step to THIS replica must `RelinquishClaim` first**, since the window outlives
-  the step's previous dispatch. Four paths do: the recovery-defer reset and the `flow.Retry` rewind (both
-  `dispatch.go`), `deferNewerPayload` (`payloadver.go`), and **`enqueueStep`** (`operations.go`), which covers
+  the step's previous dispatch. Five paths do: the recovery-defer reset, the `flow.Retry` rewind and the
+  `flow.Defer` rewind (all `dispatch.go`), `deferNewerPayload` (`payloadver.go`), and **`enqueueStep`** (`operations.go`), which covers
   every cold re-offer site (surgraph revive, a lost child re-arming its caller, `deliverSubgraphError`, the
   resume leaf, Fork's leaf). `enqueueStep`'s is the easy one to miss, because only the empty-partition `Offer`
   exposes it: a revived caller is popped at once and skipped until the window ages out (189 of 500 flows in
@@ -1801,7 +1830,9 @@ format" is decided once, at the claim, and holds for everything the dispatch rea
 - **Deferrals are not attempts.** `attempt` reaches the task as `flow.Attempt()`; counting deferrals there would
   show a task attempts that never ran and trip its own give-up policy. Hence `dwarf_steps.payload_deferrals`,
   which Fork does not copy. It counts over the step's whole life, never reset: a step that runs between two
-  rollouts (a `flow.Retry`, a resumed interrupt) has less of the hour left in the second.
+  rollouts (a `flow.Retry`, a resumed interrupt) has less of the hour left in the second. Nor is it the task's
+  `deferrals` (`flow.Defer`'s count), which the task sees and the Retry rewind resets: an hour of rollout counted
+  there would spend a host's whole horizon for an absent worker.
 - **Do not filter on `payload_ver` in the claim predicate.** An unclaimable step never reaches the deferral, so
   the bound never fires and the step strands silently. Claim-then-defer costs one claim per backoff, during a
   rollout only.
@@ -1879,7 +1910,7 @@ is *recorded*, not *reconstructed*. Every edge lands on at least one endpoint:
   key** (ids collected from `queueCohortRead`'s cohort-member read), not by the
   `(flow_id, lineage_id, task_name)` predicate - which is unindexed and deadlocked concurrent fan-ins on SQL Server
   (the deadlock story is at that write in `dispatch.go`).
-- **flow.Retry**: rewinds the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
+- **flow.Retry** and **flow.Defer**: re-pend the step in place (same row), so `predecessor_id` is preserved. (A `Fork` copies the
   step into a new row and remaps `predecessor_id` to the cloned predecessor.)
 - **Entry / subgraph-entry steps**: `predecessor_id` defaults to 0.
 
@@ -1969,7 +2000,7 @@ The rule is: **retry the WRITE, never the task.** Re-dispatching is the one reco
 and it must not be used for failures the task had nothing to do with. So **every post-execution write of a
 step's outcome runs through `persist`** (`persistStepYielding`, or `persistYielding` + `settlePersist` where the
 caller acts only on a landed write): the completion write, the Cancel-covered reroute's follow-up write, the
-transition, `fireFanInDirect`, flow completion, the `flow.Retry` rewind, the subgraph spawn and `handleInterrupt`. `failStep` is the exception by design: it is
+transition, `fireFanInDirect`, flow completion, the `flow.Retry` and `flow.Defer` rewinds, the subgraph spawn and `handleInterrupt`. `failStep` is the exception by design: it is
 the classifier's own clean, payload-free write (below), so it must not route back through the classifier. A new
 outcome write added outside `persist` reopens the loop above. A test fails the rewind
 through it with `FaultRetryRewindErr` and the reroute write with `FaultRerouteWriteErr`, as `FaultPersistErr` does
@@ -3096,7 +3127,7 @@ The worker count is split into two numbers, because they answer different questi
 The worker count is deliberately **not** a backpressure knob: a global cap cannot express "64 concurrent
 LLM calls, 1000 concurrent DB lookups, 200 Jira writes", and a per-task-URL cap is the rate valve's
 wrong axis all over again (see "Backpressure is the task's or host's job"). Per-downstream concurrency
-belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/account) with `flow.Retry`
+belongs in the host's `ExecuteTask` (a semaphore keyed on the real provider/account) with `flow.Defer`
 when the downstream says no. The engine sizes workers for throughput, bounded only by what it can see:
 the lease margin.
 
@@ -3277,7 +3308,7 @@ backlog and age are aggregate-only gauges.
 
 **8 counters, incremented inline** at their logical event sites: `dwarf_flows_started`
 (start path), `dwarf_flows_closed` (completeFlow), `dwarf_steps_executed` (every terminal step
-disposition - completed/failed/interrupted/subgraph/retried/error_routed), `dwarf_steps_recovered`
+disposition - completed/failed/interrupted/subgraph/retried/deferred/error_routed), `dwarf_steps_recovered`
 (recoverExpiredLeases lease recovery, and the orphan sweep's rewinds), `dwarf_steps_unwedged{park_type}` (the parked-step wedge sweep; a
 nonzero value flags a latent bug), `dwarf_flows_orphaned` (a stranded flow the orphan sweep could NOT repair
 because no step carries the `advancing` flag - the flow-level sibling of `dwarf_steps_unwedged`, counted at the

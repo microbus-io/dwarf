@@ -497,8 +497,10 @@ func TestOrphanSweep_RecoversLostTransitionBesideLiveSibling(t *testing.T) {
 					if yield, err := f.Interrupt(nil, nil); yield || err != nil {
 						return err
 					}
-				} else if f.Attempt() == 0 && f.Retry(24*time.Hour, 1, 24*time.Hour, 0) {
-					return nil
+				} else if f.Attempt() == 0 {
+					if yield, err := f.Retry(24*time.Hour, 1, 24*time.Hour, 0); yield || err != nil {
+						return err
+					}
 				}
 				return f.Set("b", 1)
 			})

@@ -242,6 +242,9 @@ func (e *Engine) processStep(ctx context.Context, shardNum int, stepID int, retu
 	if _, _, _, retryRequested := d.result.RetryRequested(); retryRequested {
 		return e.retry(ctx, d)
 	}
+	if _, _, _, deferRequested := d.result.DeferRequested(); deferRequested {
+		return e.deferStep(ctx, d)
+	}
 	if done, err := e.complete(ctx, d); done || err != nil {
 		return err
 	}
@@ -581,6 +584,7 @@ func (e *Engine) load(ctx context.Context, d *dispatch) (done bool, err error) {
 	flow.SetReducers(d.reducers)
 	flow.SetInBranch(d.row.lineageID != 0)
 	flow.SetAttempt(d.row.attempt)
+	flow.SetDeferrals(d.row.deferrals)
 	flow.SetCreatedAt(d.row.flowCreatedAt)
 	flow.SetUpdatedAt(d.row.flowUpdatedAt)
 	flow.SetStepCreatedAt(d.row.stepCreatedAt)
@@ -695,14 +699,15 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 	// A step marked by Cancel before it started is preempted: the task is not run, and the cancellation
 	// takes the path a task error would. The one exemption is a subgraph caller resuming after its child
 	// returned - it runs once more so the child's result reaches its code, and its own mark is then applied
-	// at the completion write. An interrupted step resumed after Cancel is NOT exempt: its resume
+	// at the completion write. It runs holding the cancellation, which flow.Retry and flow.Defer return instead
+	// of arming: a Defer keeps the child's result, and so the exemption, so a caller that could defer would run
+	// on past the Cancel at every claim. An interrupted step resumed after Cancel is NOT exempt: its resume
 	// data is new input arriving after the cancellation, and acting on it would keep a cancelled flow alive.
 	//
 	// A replay runs neither the task nor the preempt: the task already ran to completion, so a mark that landed
 	// since is applied at the completion write, as for a step that was running when Cancel landed.
-	if d.row.replaying {
-		// No host call.
-	} else if d.row.stepCancelling && !d.row.subgraphDone {
+	preempted, held := false, false
+	if !d.row.replaying && d.row.stepCancelling {
 		// Re-read the reason rather than trust the claim's: on PostgreSQL the claim returns the flow row as of
 		// the claim statement's snapshot, which can predate a Cancel whose reason commits before its mark
 		// reaches this step - the claim's re-check then sees the mark, but the reason it returned is empty.
@@ -719,7 +724,16 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 			e.inFlightStateSteps.Add(-1)
 			return nil, 0, errors.Trace(rerr)
 		}
-		execErr = cancelmarker.New(d.row.flowCancelReason)
+		if d.row.subgraphDone {
+			d.flow.SetCancellation(cancelmarker.New(d.row.flowCancelReason))
+			held = true
+		} else {
+			execErr = cancelmarker.New(d.row.flowCancelReason)
+			preempted = true
+		}
+	}
+	if d.row.replaying || preempted {
+		// No host call.
 	} else {
 		// A panic in the in-process host is caught here so it flows through the normal error disposition
 		// rather than wedging this leased step until lease expiry.
@@ -731,6 +745,16 @@ func (e *Engine) execute(ctx context.Context, d *dispatch) (execErr error, hostC
 			}
 			return e.host.ExecuteTask(d.taskCtx, dispatchURL, &d.flow.Flow)
 		})
+		// The carrier refuses to back off when it holds the cancellation, but a remote host's reply is not bound by
+		// that: a Retry or Defer it returns anyway is taken as the cancellation it ignored, or a deferring caller
+		// would run on past the Cancel at every claim.
+		if held && execErr == nil {
+			_, _, _, retried := d.flow.RetryRequested()
+			_, _, _, deferred := d.flow.DeferRequested()
+			if retried || deferred {
+				execErr = cancelmarker.New(d.row.flowCancelReason)
+			}
+		}
 	}
 	e.inFlightStateBytes.Add(-heldBytes)
 	e.inFlightStateSteps.Add(-1)
@@ -822,6 +846,9 @@ func (e *Engine) outcome(ctx context.Context, d *dispatch, execErr error) (done 
 		signalCount++
 	}
 	if _, _, _, retryRequested := d.result.RetryRequested(); retryRequested {
+		signalCount++
+	}
+	if _, _, _, deferRequested := d.result.DeferRequested(); deferRequested {
 		signalCount++
 	}
 	if d.result.GotoRequested() != "" {
@@ -988,7 +1015,7 @@ func (e *Engine) resolveFailedSpawn(ctx context.Context, d *dispatch, subgraphUR
 				return errors.New("database is locked (injected fault: " + diagnostics.FaultSpawnResolveContention + " " + taskName + ")")
 			}
 			res, err := d.db.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
+				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, deferrals=0, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=? AND lease_seq=?",
 				workflow.StatusPending, d.changesJSON, len(d.changesJSON), emptyJSON, len(emptyJSON), encoded, d.stepID, parkedNone, d.row.leaseSeq,
 			)
 			if err != nil {
@@ -1051,7 +1078,7 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 		return d.db.Transact(ctx, func(tx *sequel.Tx) error {
 			rewound = false
 			res, execErr := tx.ExecContext(ctx,
-				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, attempt=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, resume_data_bytes=?, subgraph_done=0, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, parked_child_flow_id=0 WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, attempt=?, deferrals=0, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC(), interrupt_done=0, resume_data=?, resume_data_bytes=?, subgraph_done=0, subgraph_result=?, subgraph_result_bytes=?, subgraph_error=?, parked_child_flow_id=0 WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
 				workflow.StatusPending, d.changesJSON, len(d.changesJSON), d.row.attempt+1, retrySleepMs, emptyJSON, len(emptyJSON), emptyJSON, len(emptyJSON), emptyJSON, d.stepID, d.row.leaseSeq,
 			)
 			if execErr != nil {
@@ -1078,6 +1105,49 @@ func (e *Engine) retry(ctx context.Context, d *dispatch) error {
 		e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.lineageID, d.row.flowPriority)
 	}
 	e.metricStepExecuted(ctx, taskName, "retried", d.shard)
+	return nil
+}
+
+// deferStep re-pends the step for the later run the task deferred to, as it stands: its changes, its attempt, its
+// resolved park and its subgraph children stay, and only its deferral count rises. Like the retry rewind it is guarded
+// to status='running' and fenced on the lease, so a Terminate that landed mid-task, or a peer's re-claim, leaves it a
+// no-op.
+func (e *Engine) deferStep(ctx context.Context, d *dispatch) error {
+	taskName := d.row.taskName
+	// As for a retry: Sleep is the floor and the backoff adds on top.
+	deferSleepMs := d.sleep.Milliseconds() + d.result.DeferDelay(d.row.deferrals).Milliseconds()
+	if deferSleepMs < 0 {
+		err := errors.New("task '%s' requested a deferral with a negative delay", stripProto(taskName))
+		return errors.Trace(e.failAndReturn(ctx, d, err))
+	}
+	e.diags.Logger().DebugContext(ctx, "Task deferred", "task", taskName, "workflow", d.row.workflowURL, "step", d.stepID, "deferrals", d.row.deferrals)
+	e.diags.Seams().Checkpoint(ctx, diagnostics.CheckpointBeforeDeferRewind)
+	var deferred bool
+	landed, err := e.settlePersist(ctx, d, e.persistYielding(ctx, d, func() error {
+		// Not a transaction, so it retries its own contention, as resolveFailedSpawn does.
+		return retryContention(ctx, func() error {
+			deferred = false
+			res, err := d.db.ExecContext(ctx,
+				"UPDATE dwarf_steps SET status=?, changes=?, changes_bytes=?, deferrals=?, not_before=DATE_ADD_MILLIS(NOW_UTC(), ?), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND lease_seq=?",
+				workflow.StatusPending, d.changesJSON, len(d.changesJSON), d.row.deferrals+1, deferSleepMs, d.stepID, d.row.leaseSeq,
+			)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			n, _ := res.RowsAffected()
+			deferred = n > 0
+			return nil
+		})
+	}), heldRunning)
+	if !landed || !deferred {
+		return err
+	}
+	e.claims.RelinquishClaim(d.shard, d.stepID)
+	e.metricStateWriteBytes(ctx, d.row.workflowURL, "changes", len(d.changesJSON))
+	if deferSleepMs == 0 {
+		e.enqueueStepDue(ctx, d.shard, d.stepID, d.row.lineageID, d.row.flowPriority)
+	}
+	e.metricStepExecuted(ctx, taskName, "deferred", d.shard)
 	return nil
 }
 

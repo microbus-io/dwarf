@@ -70,6 +70,10 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 	fanOut.AddTransitionForEach("Spread", "Each", "items", "item")
 	fanOut.AddTransitionChain("Each", "Join", workflow.End)
 	mux.HandleGraph("bytes/fanout", fanOut)
+	waits := workflow.NewGraph("Waits")
+	waits.SetURL("Wait", "bytes/wait")
+	waits.AddTransition("Wait", workflow.End)
+	mux.HandleGraph("bytes/waits", waits)
 	for _, task := range []string{"bytes/spread", "bytes/each", "bytes/join"} {
 		mux.HandleTask(task, func(ctx context.Context, f *workflow.Flow) error {
 			f.Set("visited", task)
@@ -79,8 +83,10 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 
 	mux.HandleTask("bytes/start", func(ctx context.Context, f *workflow.Flow) error {
 		f.Set("attempt", f.Attempt())
-		if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, 0) {
-			return nil
+		if f.Attempt() == 0 {
+			if yield, err := f.Retry(time.Millisecond, 1, time.Millisecond, 0); yield || err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -91,6 +97,11 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 			return err
 		}
 		f.Set("answer", answer["reply"])
+		if f.Deferrals() == 0 {
+			if yield, err := f.Defer(time.Millisecond, 1, 0, 0); yield || err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	mux.HandleTask("bytes/call", func(ctx context.Context, f *workflow.Flow) error {
@@ -104,6 +115,16 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 	})
 	mux.HandleTask("bytes/work", func(ctx context.Context, f *workflow.Flow) error {
 		f.SetBool("done", true)
+		return nil
+	})
+	// Rests after the rewind's write, so the check below reads the count that write left.
+	mux.HandleTask("bytes/wait", func(ctx context.Context, f *workflow.Flow) error {
+		f.Set("waited", f.GetString("how"))
+		if f.GetString("how") == "retry" {
+			f.Retry(time.Hour, 1, 0, 0)
+		} else {
+			f.Defer(time.Hour, 1, 0, 0)
+		}
 		return nil
 	})
 	mux.HandleTask("bytes/fail", func(ctx context.Context, f *workflow.Flow) error {
@@ -157,6 +178,16 @@ func TestPayloadBytes_EveryWriterCountsWhatItWrites(t *testing.T) {
 	forked, err := e.Fork(ctx, workKey, map[string]any{"n": 2})
 	assert.Must(assert.NoError(err))
 	enginetest.AwaitFlowStatus(t, e, forked, workflow.StatusCompleted, timeout)
+
+	// A Retry and a Defer, each resting pending behind an hour's backoff after its write.
+	for _, how := range []string{"retry", "defer"} {
+		_, err := e.Create(ctx, "bytes/waits", map[string]any{"how": how}, nil)
+		assert.Must(assert.NoError(err))
+	}
+	assert.Must(assert.True(enginetest.WaitUntil(t, timeout, func() bool {
+		return enginetest.CountRows(t, e, 1, "SELECT COUNT(*) FROM dwarf_steps WHERE task_name='Wait' AND status='"+
+			workflow.StatusPending+"' AND (attempt=1 OR deferrals=1)") == 2
+	}), "the retry and the defer rested"))
 
 	sh, err := e.db.Shard(1)
 	assert.Must(assert.NoError(err))

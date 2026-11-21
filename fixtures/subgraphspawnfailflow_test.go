@@ -239,8 +239,10 @@ func TestSubgraphSpawnFailFlow(t *testing.T) {
 			}
 			if err != nil {
 				attempts.Add(1)
-				if errors.StatusCode(err) == http.StatusServiceUnavailable && f.Retry(10*time.Millisecond, 1, 10*time.Millisecond, time.Minute) {
-					return nil
+				if errors.StatusCode(err) == http.StatusServiceUnavailable {
+					if yield, err := f.Retry(10*time.Millisecond, 1, 10*time.Millisecond, time.Minute); yield || err != nil {
+						return err
+					}
 				}
 				return err
 			}

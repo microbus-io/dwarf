@@ -117,6 +117,17 @@ func TestCarrierGolden(t *testing.T) {
 			f.Retry(250*time.Millisecond, 2.0, 5*time.Second, 0)
 			return nil
 		}},
+		{"defer", func(f *RawFlow) error {
+			f.SetDeferrals(2) // the engine's count of the step's earlier deferrals
+			f.Defer(250*time.Millisecond, 2.0, 5*time.Second, 0)
+			return nil
+		}},
+		{"cancelled", func(f *RawFlow) error {
+			// The engine runs the step after its flow was cancelled: a Defer returns the cancellation and arms nothing.
+			f.SetCancellation(errors.New("flow cancelled: maintenance", "dwarf_type", "cancelled"))
+			_, err := f.Defer(250*time.Millisecond, 2.0, 5*time.Second, 0)
+			return f.Set("stopping", IsCancelled(err))
+		}},
 		{"sleep", func(f *RawFlow) error {
 			f.Sleep(1500*time.Millisecond + 700*time.Microsecond) // whole milliseconds on the wire: 1500
 			return nil
@@ -337,6 +348,8 @@ func TestCarriers_EachDirectionAppliesOnlyItsFields(t *testing.T) {
 	sent := dispatchedFlow(t)
 	assert.NoError(sent.Set("greeting", "hello"))
 	sent.Goto("Review")
+	sent.Defer(time.Second, 1, 0, 0)
+	sent.SetDeferrals(3)
 	body, err := json.Marshal(&sent.Flow)
 	if !assert.NoError(err) {
 		return
@@ -349,18 +362,23 @@ func TestCarriers_EachDirectionAppliesOnlyItsFields(t *testing.T) {
 		assert.Equal("Ada", task.GetString("name"))
 		assert.Equal("hello", task.GetString("greeting"), "the earlier run's changes are in the view")
 		assert.Equal("", task.gotoNext, "a request carries no control signals")
+		assert.False(task.deferred, "a request carries no control signals")
+		assert.Equal(3, task.Deferrals())
 		assert.Equal(1, task.carrierVersion)
 	}
 
 	// The host reading a reply whose state is not the host's: only the changes and signals land.
 	host := dispatchedFlow(t)
-	reply := []byte(`{"v":1,"state":{"name":"Mallory"},"reducers":{"name":"add"},"attempt":99,"flowKey":"forged",` +
-		`"changes":{"greeting":"hi"},"goto":"Review","sleepMillis":1500}`)
+	reply := []byte(`{"v":1,"state":{"name":"Mallory"},"reducers":{"name":"add"},"attempt":99,"deferrals":99,` +
+		`"flowKey":"forged","changes":{"greeting":"hi"},"goto":"Review","sleepMillis":1500,"defer":true}`)
 	if assert.NoError(json.Unmarshal(reply, ResultCarrier(&host.Flow))) {
 		assert.Equal("Ada", host.GetString("name"), "the state is the host's own")
 		assert.Equal(ReducerAppend, host.reducers["log"], "the reducers are the host's own")
 		assert.Equal(1, host.attempt)
+		assert.Equal(0, host.deferrals)
 		assert.Equal("1-480000-7-AbCdEfGh", host.flowKey)
+		_, _, _, deferred := host.DeferRequested()
+		assert.True(deferred)
 		assert.Equal("Review", host.GotoRequested())
 		assert.Equal(1500*time.Millisecond, host.SleepRequested())
 		assert.True(host.RawChanges().Mentions("greeting"))
@@ -372,6 +390,8 @@ func TestCarriers_EachDirectionAppliesOnlyItsFields(t *testing.T) {
 	if assert.NoError(json.Unmarshal(reply, &all)) {
 		assert.Equal("Mallory", all.GetString("name"))
 		assert.Equal(99, all.attempt)
+		assert.Equal(99, all.deferrals)
+		assert.True(all.deferred)
 		assert.Equal("Review", all.gotoNext)
 	}
 }

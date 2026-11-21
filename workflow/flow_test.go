@@ -319,7 +319,7 @@ func TestFlow_Retry(t *testing.T) {
 	rf := NewRawFlow()
 	f := &rf.Flow
 	f.stepCreatedAt = time.Now()
-	ok := f.Retry(time.Second, 2.0, 10*time.Second, time.Hour)
+	ok := yieldOf(f.Retry(time.Second, 2.0, 10*time.Second, time.Hour))
 	assert.True(ok)
 	assert.True(f.retry)
 	initialDelay, multiplier, maxDelay, requested := rf.RetryRequested()
@@ -331,7 +331,7 @@ func TestFlow_Retry(t *testing.T) {
 	// giveUpAfter <= 0 means unlimited: retries regardless of how old the step is.
 	f2 := NewFlow()
 	f2.stepCreatedAt = time.Now().Add(-72 * time.Hour)
-	ok = f2.Retry(time.Second, 2.0, 10*time.Second, 0)
+	ok = yieldOf(f2.Retry(time.Second, 2.0, 10*time.Second, 0))
 	assert.True(ok)
 	assert.True(f2.retry)
 
@@ -341,32 +341,32 @@ func TestFlow_Retry(t *testing.T) {
 	f3 := NewFlow()
 	f3.stepCreatedAt = time.Now().Add(-2 * time.Hour)
 	f3.attempt = 0
-	assert.True(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour), "the clock does not count")
+	assert.True(yieldOf(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)), "the clock does not count")
 	f3.attempt = 361
-	assert.True(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour))
+	assert.True(yieldOf(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)))
 	f3.attempt = 362
-	assert.False(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour))
+	assert.False(yieldOf(f3.Retry(time.Second, 2.0, 10*time.Second, time.Hour)))
 	assert.False(f3.retry)
 
 	// The next delay alone overshoots the bound: give up now rather than park a doomed wait.
 	f4 := NewFlow()
-	ok = f4.Retry(time.Hour, 1.0, 0, time.Minute)
+	ok = yieldOf(f4.Retry(time.Hour, 1.0, 0, time.Minute))
 	assert.False(ok)
 	assert.False(f4.retry)
 
 	// A zero initialDelay never adds to the total, so it never reaches the bound.
 	f4b := NewFlow()
 	f4b.attempt = 1_000_000
-	assert.True(f4b.Retry(0, 2.0, 0, time.Minute))
+	assert.True(yieldOf(f4b.Retry(0, 2.0, 0, time.Minute)))
 
 	// A delay that saturates still gives up: added to the running total, it would overflow to a negative.
 	f5 := NewFlow()
 	f5.attempt = 1
-	ok = f5.Retry(time.Second, 1e10, 0, time.Hour)
+	ok = yieldOf(f5.Retry(time.Second, 1e10, 0, time.Hour))
 	assert.False(ok)
 	assert.False(f5.retry)
 
-	// Arguments outside the allowed values arm nothing.
+	// Arguments outside the allowed values arm nothing and return a 400.
 	for _, args := range []struct {
 		initialDelay time.Duration
 		multiplier   float64
@@ -379,9 +379,84 @@ func TestFlow_Retry(t *testing.T) {
 		{time.Second, math.Inf(1), 0},
 	} {
 		f6 := NewFlow()
-		ok = f6.Retry(args.initialDelay, args.multiplier, args.maxDelay, 0)
-		assert.False(ok, args)
+		yield, err := f6.Retry(args.initialDelay, args.multiplier, args.maxDelay, 0)
+		assert.False(yield, args)
+		assert.Equal(http.StatusBadRequest, errors.StatusCode(err), args)
+		assert.Contains(err.Error(), "Retry: ", args)
 		assert.False(f6.retry, args)
+	}
+}
+
+// TestFlow_Defer pins that Defer arms its own signal, with Retry's backoff and arguments, and that its bound counts
+// Deferrals and never Attempt.
+func TestFlow_Defer(t *testing.T) {
+	assert := testarossa.For(t)
+
+	rf := NewRawFlow()
+	assert.True(yieldOf(rf.Defer(time.Second, 2.0, 10*time.Second, time.Hour)))
+	initialDelay, multiplier, maxDelay, requested := rf.DeferRequested()
+	assert.True(requested)
+	assert.Equal(time.Second, initialDelay)
+	assert.Equal(2.0, multiplier)
+	assert.Equal(10*time.Second, maxDelay)
+	_, _, _, retried := rf.RetryRequested()
+	assert.False(retried, "a Defer is not a Retry")
+
+	// The bound counts Deferrals: delays of 1s, 2s, 4s, 8s, then 10s each sum to 15s + (n-3) x 10s through deferral n,
+	// 3595s at 361 and 3605s at 362. A step on its thousandth attempt starts with the whole bound.
+	f := NewFlow()
+	f.attempt = 1000
+	assert.True(yieldOf(f.Defer(time.Second, 2.0, 10*time.Second, time.Hour)), "the task's retries spend none of it")
+	f.deferrals = 361
+	assert.True(yieldOf(f.Defer(time.Second, 2.0, 10*time.Second, time.Hour)))
+	f.deferrals = 362
+	assert.False(yieldOf(f.Defer(time.Second, 2.0, 10*time.Second, time.Hour)))
+	assert.False(f.deferred)
+
+	// And Retry's bound never counts Deferrals.
+	f = NewFlow()
+	f.deferrals = 1000
+	assert.True(yieldOf(f.Retry(time.Second, 2.0, 10*time.Second, time.Minute)))
+
+	// Arguments outside the allowed values arm nothing, as for Retry, and leave an armed Retry's backoff alone.
+	f = NewFlow()
+	assert.True(yieldOf(f.Retry(time.Second, 2, 0, 0)))
+	yield, err := f.Defer(-time.Second, 2, 0, 0)
+	assert.False(yield)
+	assert.Equal(http.StatusBadRequest, errors.StatusCode(err))
+	assert.Contains(err.Error(), "Defer: initialDelay")
+	assert.False(f.deferred)
+	assert.Equal(time.Second, f.backoffInitialDelay)
+	yield, err = f.Defer(time.Second, math.NaN(), 0, 0)
+	assert.False(yield)
+	assert.Contains(err.Error(), "delayMultiplier NaN")
+	assert.False(f.deferred)
+}
+
+// TestFlow_RetryAndDeferReturnTheCancellation pins that a step run after its flow was cancelled cannot back off:
+// Retry and Defer arm nothing and return a copy of the cancellation, which IsCancelled recognizes.
+func TestFlow_RetryAndDeferReturnTheCancellation(t *testing.T) {
+	assert := testarossa.For(t)
+	cancellation := errors.New("flow cancelled: maintenance", "dwarf_type", "cancelled")
+	for _, signal := range []string{"Retry", "Defer"} {
+		rf := NewRawFlow()
+		rf.SetCancellation(cancellation)
+		var yield bool
+		var err error
+		if signal == "Retry" {
+			yield, err = rf.Retry(time.Second, 2, 0, time.Hour)
+		} else {
+			yield, err = rf.Defer(time.Second, 2, 0, time.Hour)
+		}
+		assert.False(yield, signal)
+		assert.True(IsCancelled(err), signal)
+		assert.Equal("flow cancelled: maintenance", err.Error(), signal)
+		_, _, _, retried := rf.RetryRequested()
+		_, _, _, deferred := rf.DeferRequested()
+		assert.False(retried || deferred, "%s armed nothing", signal)
+		// A copy: a task that annotates the returned error leaves the carrier's as it was.
+		err.(*errors.TracedError).StatusCode = http.StatusTeapot
+		assert.NotEqual(http.StatusTeapot, rf.cancelledErr.StatusCode, signal)
 	}
 }
 
@@ -690,11 +765,11 @@ func TestFlow_RetryHorizonIgnoresSleep(t *testing.T) {
 
 	before := NewRawFlow()
 	before.Sleep(time.Hour)
-	assert.True(before.Retry(time.Millisecond, 1, 0, time.Minute))
+	assert.True(yieldOf(before.Retry(time.Millisecond, 1, 0, time.Minute)))
 	assert.Equal(time.Hour, before.SleepRequested())
 
 	after := NewRawFlow()
-	assert.True(after.Retry(time.Millisecond, 1, 0, time.Minute))
+	assert.True(yieldOf(after.Retry(time.Millisecond, 1, 0, time.Minute)))
 	after.Sleep(time.Hour)
 	_, _, _, requested := after.RetryRequested()
 	assert.True(requested, "a Sleep after Retry does not withdraw the retry")
@@ -722,10 +797,10 @@ func TestFlow_RetryBudgetBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := NewRawFlow()
 			f.SetAttempt(tc.attempt)
-			if !f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total) {
+			if !yieldOf(f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total)) {
 				t.Fatal("retry refused at the exact cumulative budget")
 			}
-			if f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total-time.Nanosecond) {
+			if yieldOf(f.Retry(tc.initial, tc.multiplier, tc.cap, tc.total-time.Nanosecond)) {
 				t.Fatal("retry accepted one nanosecond beyond the cumulative budget")
 			}
 		})
@@ -733,14 +808,14 @@ func TestFlow_RetryBudgetBoundaries(t *testing.T) {
 
 	f := NewRawFlow()
 	f.SetAttempt(math.MaxInt)
-	if !f.Retry(0, 2, 0, time.Nanosecond) {
+	if !yieldOf(f.Retry(0, 2, 0, time.Nanosecond)) {
 		t.Fatal("zero delay spent a positive budget")
 	}
-	if f.Retry(time.Nanosecond, 1, 0, time.Duration(math.MaxInt)) {
+	if yieldOf(f.Retry(time.Nanosecond, 1, 0, time.Duration(math.MaxInt))) {
 		t.Fatal("attempt count overflow admitted a retry beyond the budget")
 	}
 	f.SetAttempt(1)
-	if f.Retry(time.Second, 1e300, 0, time.Duration(math.MaxInt64)) {
+	if yieldOf(f.Retry(time.Second, 1e300, 0, time.Duration(math.MaxInt64))) {
 		t.Fatal("saturated delay overflow admitted a retry beyond the budget")
 	}
 }

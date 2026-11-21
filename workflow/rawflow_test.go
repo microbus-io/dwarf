@@ -24,6 +24,31 @@ import (
 	"github.com/microbus-io/testarossa"
 )
 
+// yieldOf is the yield of a Retry or a Defer that must not return an error.
+func yieldOf(yield bool, err error) bool {
+	if err != nil {
+		panic(err)
+	}
+	return yield
+}
+
+// TestRawFlow_DeferDelay pins the backoff the engine applies after a Defer: Retry's, in the number of deferrals,
+// and zero when Defer was not called - a Retry included.
+func TestRawFlow_DeferDelay(t *testing.T) {
+	assert := testarossa.For(t)
+
+	rf := NewRawFlow()
+	assert.True(yieldOf(rf.Retry(time.Second, 2, 5*time.Second, 0)))
+	assert.Equal(time.Duration(0), rf.DeferDelay(3))
+
+	rf = NewRawFlow()
+	assert.True(yieldOf(rf.Defer(time.Second, 2, 5*time.Second, 0)))
+	assert.Equal(time.Duration(0), rf.RetryDelay(0))
+	assert.Equal(time.Second, rf.DeferDelay(0))
+	assert.Equal(4*time.Second, rf.DeferDelay(2))
+	assert.Equal(5*time.Second, rf.DeferDelay(3))
+}
+
 // TestRawFlow_RetryDelay pins the backoff the engine applies after a Retry: exponential in the attempt, capped,
 // and zero when Retry was not called.
 func TestRawFlow_RetryDelay(t *testing.T) {
@@ -31,7 +56,7 @@ func TestRawFlow_RetryDelay(t *testing.T) {
 
 	rf := NewRawFlow()
 	assert.Equal(time.Duration(0), rf.RetryDelay(3))
-	assert.True(rf.Retry(time.Second, 2, 5*time.Second, 0))
+	assert.True(yieldOf(rf.Retry(time.Second, 2, 5*time.Second, 0)))
 	assert.Equal(time.Second, rf.RetryDelay(0))
 	assert.Equal(4*time.Second, rf.RetryDelay(2))
 	assert.Equal(5*time.Second, rf.RetryDelay(3))
@@ -40,7 +65,7 @@ func TestRawFlow_RetryDelay(t *testing.T) {
 	// A multiplier below 1 decays a delay that starts above the cap: min(10s x 0.1^N, 1s). Stopping at the cap returned
 	// 1s at every attempt.
 	rf = NewRawFlow()
-	assert.True(rf.Retry(10*time.Second, 0.1, time.Second, 0))
+	assert.True(yieldOf(rf.Retry(10*time.Second, 0.1, time.Second, 0)))
 	assert.Equal(time.Second, rf.RetryDelay(0))
 	assert.Equal(time.Second, rf.RetryDelay(1))
 	assert.Equal(100*time.Millisecond, rf.RetryDelay(2))

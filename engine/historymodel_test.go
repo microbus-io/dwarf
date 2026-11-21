@@ -50,7 +50,9 @@ import (
 //     resolves once every branch arrived: into the fan-in with no loss, else the flow closes cancelled when every
 //     loss was a cancellation and failed otherwise. A flow with an interrupted step and no close rests interrupted.
 //   - A child that closes completed, failed or cancelled revives its parked caller, whose next execution receives
-//     the child's final state or its error. A caller revived after its child is never preempted. A retry of a
+//     the child's final state or its error. A caller revived after its child is never preempted; one revived after
+//     a Cancel marked it runs holding the cancellation, so its retry returns it instead of rewinding, and the task
+//     returns it: it routes to its handler or is cancelled, as a run that failed with a cancellation. A retry of a
 //     caller deletes the child it spawned. An interrupt in a child interrupts its caller and every flow above it,
 //     and Resume of the root re-parks them.
 //   - A step with an error handler that fails, or whose completion is covered, or that is preempted, completes and
@@ -222,6 +224,7 @@ type mStep struct {
 	status        string
 	cancelling    bool
 	claimed       bool // it runs, marked or not: claimed before a Cancel marked it, or a caller revived by its child
+	heldCancel    bool // a caller revived after a Cancel marked it: its run holds the cancellation, which Retry returns
 	sleeping      bool // pending, its not_before ahead
 	slept         bool // completed with a sleep, which its successors take
 	interruptDone bool
@@ -366,6 +369,7 @@ func (m *hModel) close(f *mFlow, status, by string) {
 	c.status = workflow.StatusPending
 	c.subgraphDone = true
 	c.claimed = true // a caller resuming after its child is not preempted
+	c.heldCancel = c.cancelling
 	switch status {
 	case workflow.StatusCompleted:
 		c.childOutcome = strings.Join(f.final, ".")
@@ -613,6 +617,8 @@ func (m *hModel) finish(s *mStep, b hBehavior, tok string, rewindOp hOp) (comple
 		return false, false // every write the task makes now is fenced
 	}
 	handler := s.flow.g.onError[s.task]
+	held := s.heldCancel
+	s.heldCancel = false
 	switch b {
 	case hFail:
 		if handler != "" {
@@ -624,6 +630,18 @@ func (m *hModel) finish(s *mStep, b hBehavior, tok string, rewindOp hOp) (comple
 		s.flow.failed = append(s.flow.failed, fmt.Sprintf("%s%d", s.task, s.execs))
 		m.lose(s, false)
 	case hRetry:
+		if held {
+			// Retry returned the cancellation, and the task returned it: the error path, which keeps none of this run's
+			// writes.
+			if handler != "" {
+				s.status, s.routeTo, s.covered, s.routedBy = workflow.StatusCompleted, handler, true, workflow.StatusCancelled
+				m.routes = append(m.routes, "a returned cancellation")
+				return true, refused
+			}
+			s.status = workflow.StatusCancelled
+			m.lose(s, true)
+			return false, refused
+		}
 		if rewindOp != "" {
 			refused = m.op(rewindOp)
 			if s.status == workflow.StatusTerminated {
@@ -763,9 +781,9 @@ func reaches(s *mStep, b hBehavior, p hPoint) bool {
 	case hMidTask:
 		return true
 	case hBeforeTransition:
-		return (b == hOK || b == hSleep) && (!s.cancelling || handler) || b == hFail && handler
+		return (b == hOK || b == hSleep) && (!s.cancelling || handler) || (b == hFail || b == hRetry && s.heldCancel) && handler
 	case hBeforeRewind:
-		return b == hRetry
+		return b == hRetry && !s.heldCancel
 	case hBeforeInterrupt:
 		return b == hInterrupt
 	case hAcross:

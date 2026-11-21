@@ -80,8 +80,10 @@ func TestStepKey_ARetryAfterALostResponseKeepsTheKey(t *testing.T) {
 	mux.HandleGraph("skretry/g", g)
 	mux.HandleTask("skretry/charge", func(ctx context.Context, f *workflow.Flow) error {
 		ledger.apply(f.StepKey())
-		if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, time.Minute) {
-			return nil // the effect applied, the response was lost
+		if f.Attempt() == 0 {
+			if yield, err := f.Retry(time.Millisecond, 1, time.Millisecond, time.Minute); yield || err != nil {
+				return err // the effect applied, the response was lost
+			}
 		}
 		return nil
 	})

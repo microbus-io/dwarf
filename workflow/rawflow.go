@@ -75,6 +75,12 @@ func (f *RawFlow) SetAttempt(attempt int) {
 	f.attempt = attempt
 }
 
+// SetDeferrals sets the count of the step's deferrals since it last started over. Called by the orchestrator before
+// dispatching a task so that Defer can check whether its bound is reached.
+func (f *RawFlow) SetDeferrals(deferrals int) {
+	f.deferrals = deferrals
+}
+
 // SetCreatedAt records when the flow was created. Called by the orchestrator before dispatching a
 // task so the task can read it via Flow.CreatedAt().
 func (f *RawFlow) SetCreatedAt(createdAt time.Time) {
@@ -132,6 +138,20 @@ func (f *RawFlow) SetSubgraphResolution(result State, err error) {
 	}
 }
 
+// SetCancellation records that the step runs after its flow was cancelled, so Retry and Defer return err instead of
+// arming. As for SetSubgraphResolution, the error's stack is dropped.
+func (f *RawFlow) SetCancellation(err error) {
+	f.cancelledErr = nil
+	if err != nil {
+		delivered := errors.TracedError{Err: err}
+		if traced, ok := err.(*errors.TracedError); ok {
+			delivered = *traced
+		}
+		delivered.Stack = nil
+		f.cancelledErr = &delivered
+	}
+}
+
 // --- Control signal inspection (what the task asked of the orchestrator) ---
 
 // GotoRequested returns the task name set by Goto, or empty if not set.
@@ -156,6 +176,25 @@ func (f *RawFlow) RetryDelay(attempt int) time.Duration {
 		return 0
 	}
 	return backoffDelay(f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, attempt)
+}
+
+// DeferRequested returns the backoff parameters (initialDelay, multiplier, maxDelay) and true if Defer was
+// called.
+func (f *RawFlow) DeferRequested() (initialDelay time.Duration, multiplier float64, maxDelay time.Duration, ok bool) {
+	if !f.deferred {
+		return 0, 0, 0, false
+	}
+	return f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, true
+}
+
+// DeferDelay returns the backoff before the next run of a step that called Defer after the given number of
+// deferrals: min(initialDelay * multiplier^deferrals, maxDelay), or zero if Defer was not called. It is the same
+// delay Defer's give-up decision assumes.
+func (f *RawFlow) DeferDelay(deferrals int) time.Duration {
+	if !f.deferred {
+		return 0
+	}
+	return backoffDelay(f.backoffInitialDelay, f.backoffDelayMultiplier, f.backoffMaxDelay, deferrals)
 }
 
 // backoffDelay is min(initialDelay * multiplier^attempt, maxDelay); a non-positive multiplier or maxDelay
@@ -186,7 +225,7 @@ func backoffDelay(initialDelay time.Duration, multiplier float64, maxDelay time.
 	return time.Duration(delay)
 }
 
-// backoffFits checks delays 0..attempt against budget, with inputs validated by Retry. The unrounded product
+// backoffFits checks delays 0..attempt against budget, with inputs validated by Retry or Defer. The unrounded product
 // advances once per delay so the sum matches backoffDelay's per-attempt rounding without replaying every prefix.
 // Constant and capped tails use division to avoid overflowing either the sum or attempt+1.
 func backoffFits(initialDelay time.Duration, multiplier float64, maxDelay time.Duration, attempt int, budget time.Duration) bool {

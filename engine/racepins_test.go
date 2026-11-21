@@ -599,6 +599,57 @@ func TestTerminateVsSubgraphSpawn_Deterministic(t *testing.T) {
 	})
 }
 
+// TestDeferRewindVsTerminate_Deterministic pins the flow.Defer rewind's status='running' guard: a Terminate that
+// terminalizes the running step before the rewind must stop the rewind from reviving the terminated step to pending.
+func TestDeferRewindVsTerminate_Deterministic(t *testing.T) {
+	t.Parallel()
+	assert := testarossa.For(t)
+	ctx := context.Background()
+
+	var aRuns int
+	mux := hosts.NewMux()
+	g := workflow.NewGraph("Solo")
+	g.SetURL("A", "drc/a")
+	g.AddTransition("A", workflow.End)
+	assert.NoError(g.Validate())
+	mux.HandleGraph("drc/g", g)
+	mux.HandleTask("drc/a", func(ctx context.Context, f *workflow.Flow) error {
+		aRuns++
+		f.Defer(0, 1.0, 0, time.Hour)
+		return nil
+	})
+
+	e := NewEngineUnderTest(t.Name())
+	defer e.Shutdown(ctx)
+	e.SetHost(mux)
+	assert.Must(assert.NoError(e.Startup(t.Context())))
+
+	e.diags.Seams().Break(diagnostics.CheckpointBeforeDeferRewind)
+	fk, err := e.Create(ctx, "drc/g", nil, nil)
+	assert.NoError(err)
+	assert.True(e.diags.Seams().WaitTimeout(ctx, diagnostics.CheckpointBeforeDeferRewind, 10*time.Second), "engine never reached checkpoint diagnostics.CheckpointBeforeDeferRewind")
+
+	assert.NoError(e.Terminate(ctx, fk, "test"))
+
+	// The flow is terminal already, so wait for A's dispatch itself to end before reading its row.
+	dispatched := e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone)
+	e.diags.Seams().Resume(diagnostics.CheckpointBeforeDeferRewind)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), dispatched+1, 10*time.Second, diagnostics.CheckpointClaimedDispatchDone)
+	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
+
+	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)
+	assert.NoError(err)
+	sh, err := e.db.Shard(shardNum)
+	assert.Must(assert.NoError(err))
+	var stepStatus string
+	var deferrals int
+	assert.NoError(sh.DB().QueryRowContext(ctx, "SELECT status, deferrals FROM dwarf_steps WHERE flow_id=? AND task_name='A'", flowID).Scan(&stepStatus, &deferrals))
+	assert.Equal(workflow.StatusTerminated, stepStatus) // not revived to pending
+	assert.Equal(0, deferrals)                          // the rewind did not land
+	assert.Equal(1, aRuns)                              // no re-dispatch
+	enginetest.AssertInvariants(t, e)
+}
+
 // TestRetryRewindVsTerminate_Deterministic pins the flow.Retry rewind's status='running' guard: a Terminate
 // that terminalizes the running step before the rewind must stop the rewind from reviving the terminated
 // (immutable) step to pending and from reaping the terminated tree's children. The checkpoint makes the
@@ -635,8 +686,11 @@ func TestRetryRewindVsTerminate_Deterministic(t *testing.T) {
 	// Terminate wins: A's running step is flipped terminated under the terminate transaction.
 	assert.NoError(e.Terminate(ctx, fk, "test"))
 
-	// Release A: the rewind's status='running' guard matches zero rows, so the terminated step is not revived.
+	// Release A: the rewind's status='running' guard matches zero rows, so the terminated step is not revived. The
+	// flow is terminal already, so wait for A's dispatch itself to end before reading its row.
+	dispatched := e.diags.Seams().Visits(diagnostics.CheckpointClaimedDispatchDone)
 	e.diags.Seams().Resume(diagnostics.CheckpointBeforeRetryRewind)
+	enginetest.AwaitVisitCount(t, e.diags.Seams(), dispatched+1, 10*time.Second, diagnostics.CheckpointClaimedDispatchDone)
 	enginetest.AwaitFlowStatus(t, e, fk, workflow.StatusTerminated, 10*time.Second)
 
 	shardNum, _, flowID, _, err := keys.ParseFlowKey(fk)

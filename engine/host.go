@@ -54,9 +54,16 @@ type Host interface {
 	// responsibility - tasks must be idempotent. Honor the ctx deadline (it bounds the step's time budget);
 	// a task that ignores it can only be recovered by lease expiry, not cancelled.
 	//
-	// A host that cannot reach the task's worker may wait for it by arming flow.Retry on the carrier and
-	// returning nil, up to a horizon of its own, and then return an error with status 503. Such a dispatch
-	// still counts toward flow.Attempt, though the task never ran.
+	// A host that cannot reach the task's worker may wait for it with flow.Defer, up to a horizon of its own:
+	//
+	//	if yield, err := flow.Defer(time.Second, 2, 30*time.Second, horizon); yield || err != nil {
+	//		return err // nil while it waits; the flow's cancellation, which the host must return as it is
+	//	}
+	//	return errors.New("no worker for %s", taskURL, http.StatusServiceUnavailable)
+	//
+	// The step comes back as it stands - its resume data, its subgraph's result, its attempt - and the wait counts
+	// toward flow.Deferrals. A host that drops Defer's error and returns its own fails a cancelled flow's step
+	// instead of cancelling it.
 	//
 	// After ExecuteTask returns, the engine reads only the flow's changes and its control signals. A host that
 	// reaches its task across a process boundary carries the flow as JSON - workflow.RequestCarrier going out,

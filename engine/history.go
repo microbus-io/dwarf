@@ -146,7 +146,7 @@ type treeStep struct {
 // leave their flow, so every predecessor_id/successor_id resolves to a key among the loaded rows.
 func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, t flowTables, shardNum int, flowID int) (map[int][]treeStep, error) {
 	rows, err := db.QueryContext(ctx,
-		"SELECT flow_id, step_id, step_token, flow_created_hour, step_depth, task_name, attempt, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM "+t.steps+
+		"SELECT flow_id, step_id, step_token, flow_created_hour, step_depth, task_name, attempt, deferrals, status, error, created_at, started_at, updated_at, predecessor_id, successor_id, parked, engine_id FROM "+t.steps+
 			" WHERE flow_id IN (SELECT flow_id FROM "+t.flows+" WHERE root_flow_id=(SELECT root_flow_id FROM "+t.flows+" WHERE flow_id=?)) ORDER BY flow_id, step_depth, step_id",
 		flowID,
 	)
@@ -160,7 +160,7 @@ func (e *Engine) loadTreeSteps(ctx context.Context, db *sequel.DB, t flowTables,
 		var step workflow.FlowStep
 		var stepFlowID, stepID, stepHour, predID, succID, parked int
 		var stepToken, errMsg string
-		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &stepHour, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &predID, &succID, &parked, &step.EngineID)
+		err := rows.Scan(&stepFlowID, &stepID, &stepToken, &stepHour, &step.StepDepth, &step.TaskName, &step.Attempt, &step.Deferrals, &step.Status, &errMsg, &step.CreatedAt, &step.StartedAt, &step.UpdatedAt, &predID, &succID, &parked, &step.EngineID)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
@@ -244,12 +244,12 @@ func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardN
 	stepToken string, stepHour int) (*workflow.FlowStep, error) {
 	var taskName, statusStr, errMsg, flowToken string
 	var stateJSON, changesJSON, stateRefsJSON, interruptJSON []byte
-	var stepDepth, attempt, predID, succID, ver int
+	var stepDepth, attempt, deferrals, predID, succID, ver int
 	var createdAt, updatedAt time.Time
 	err := db.QueryRowContext(ctx,
-		"SELECT s.step_depth, s.task_name, s.attempt, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM "+t.steps+" s JOIN "+t.flows+" f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
+		"SELECT s.step_depth, s.task_name, s.attempt, s.deferrals, s.state, s.changes, s.state_refs, s.interrupt_payload, s.status, s.error, s.created_at, s.updated_at, s.predecessor_id, s.successor_id, f.payload_ver, f.flow_token FROM "+t.steps+" s JOIN "+t.flows+" f ON f.flow_id=s.flow_id WHERE s.step_id=? AND s.flow_id=? AND s.step_token=? AND s.flow_created_hour=?",
 		stepID, stepFlowID, stepToken, stepHour,
-	).Scan(&stepDepth, &taskName, &attempt, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
+	).Scan(&stepDepth, &taskName, &attempt, &deferrals, &stateJSON, &changesJSON, &stateRefsJSON, &interruptJSON, &statusStr, &errMsg, &createdAt, &updatedAt, &predID, &succID, &ver, &flowToken)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -265,6 +265,7 @@ func (e *Engine) stepIn(ctx context.Context, db *sequel.DB, t flowTables, shardN
 		StepDepth: stepDepth,
 		TaskName:  taskName,
 		Attempt:   attempt,
+		Deferrals: deferrals,
 		Status:    statusStr,
 		Error:     strings.TrimSpace(errMsg),
 		CreatedAt: createdAt,

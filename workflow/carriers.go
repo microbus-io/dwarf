@@ -54,16 +54,16 @@ type Carrier interface {
 }
 
 // RequestCarrier returns the request direction of f's JSON format, from host to task server: the state, the
-// graph's reducers, the changes of the step's earlier runs, the flow and step keys, the timestamps, the attempt,
-// whether the step runs in a fan-out branch, and how an earlier Interrupt or Subgraph was resolved. It carries
-// no control signals. Decoding sets those fields on f and clears its control signals, so a request cannot arm
-// one.
+// graph's reducers, the changes of the step's earlier runs, the flow and step keys, the timestamps, the attempt and
+// the deferrals, whether the step runs in a fan-out branch, how an earlier Interrupt or Subgraph was resolved, and the
+// flow's cancellation when the step runs after its flow was cancelled. It carries no control signals. Decoding sets
+// those fields on f and clears its control signals, so a request cannot arm one.
 func RequestCarrier(f *Flow) Carrier {
 	return &requestCarrier{f: f}
 }
 
 // ResultCarrier returns the result direction of f's JSON format, from task server to host: the step's changes
-// and its control signals (Goto, Retry and its backoff, Sleep, Interrupt and its payload, Subgraph and its
+// and its control signals (Goto, Retry or Defer and its backoff, Sleep, Interrupt and its payload, Subgraph and its
 // input). Decoding sets those fields on f and leaves everything else it holds as it was.
 func ResultCarrier(f *Flow) Carrier {
 	return &resultCarrier{f: f}
@@ -83,6 +83,7 @@ type flowJSON struct {
 	Changes                   Changes             `json:"changes,omitzero"`
 	Goto                      string              `json:"goto,omitzero"`
 	Retry                     bool                `json:"retry,omitzero"`
+	Defer                     bool                `json:"defer,omitzero"`
 	SleepMillis               int64               `json:"sleepMillis,omitzero"`
 	Interrupt                 bool                `json:"interrupt,omitzero"`
 	InterruptPayload          State               `json:"interruptPayload,omitzero"`
@@ -93,7 +94,9 @@ type flowJSON struct {
 	SubgraphDone              bool                `json:"subgraphDone,omitzero"`
 	SubgraphResult            State               `json:"subgraphResult,omitzero"`
 	SubgraphError             *errors.TracedError `json:"subgraphError,omitzero"`
+	CancelledError            *errors.TracedError `json:"cancelledError,omitzero"`
 	Attempt                   int                 `json:"attempt,omitzero"`
+	Deferrals                 int                 `json:"deferrals,omitzero"`
 	BackoffInitialDelayMillis int64               `json:"backoffInitialDelayMillis,omitzero"`
 	BackoffDelayMultiplier    float64             `json:"backoffDelayMultiplier,omitzero"`
 	BackoffMaxDelayMillis     int64               `json:"backoffMaxDelayMillis,omitzero"`
@@ -185,7 +188,9 @@ func (f *Flow) putRequest(w *flowJSON) {
 	w.SubgraphDone = f.subgraphDone
 	w.SubgraphResult = f.subgraphResult
 	w.SubgraphError = f.subgraphError
+	w.CancelledError = f.cancelledErr
 	w.Attempt = f.attempt
+	w.Deferrals = f.deferrals
 	w.CreatedAt = f.createdAt
 	w.UpdatedAt = f.updatedAt
 	w.StepCreatedAt = f.stepCreatedAt
@@ -197,6 +202,7 @@ func (f *Flow) putResult(w *flowJSON) {
 	w.Changes = f.changes
 	w.Goto = f.gotoNext
 	w.Retry = f.retry
+	w.Defer = f.deferred
 	w.SleepMillis = f.sleepDuration.Milliseconds()
 	w.Interrupt = f.interrupt
 	w.InterruptPayload = f.interruptPayload
@@ -220,7 +226,9 @@ func (f *Flow) takeRequest(w *flowJSON) {
 	f.subgraphDone = w.SubgraphDone
 	f.subgraphResult = w.SubgraphResult
 	f.subgraphError = w.SubgraphError
+	f.cancelledErr = w.CancelledError
 	f.attempt = w.Attempt
+	f.deferrals = w.Deferrals
 	f.createdAt = w.CreatedAt
 	f.updatedAt = w.UpdatedAt
 	f.stepCreatedAt = w.StepCreatedAt
@@ -233,6 +241,7 @@ func (f *Flow) takeResult(w *flowJSON) {
 	f.ready()
 	f.gotoNext = w.Goto
 	f.retry = w.Retry
+	f.deferred = w.Defer
 	f.sleepDuration = durationOfMillis(w.SleepMillis)
 	f.interrupt = w.Interrupt
 	f.interruptPayload = w.InterruptPayload

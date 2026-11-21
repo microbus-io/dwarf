@@ -17,9 +17,10 @@ limitations under the License.
 /*
 A task reached across a process boundary runs on a carrier that crossed the wire as JSON, and the engine reads
 back only the task's changes and control signals. So the same workflow - reducers, routing on a written field, a
-retry, a sleep, a goto, a subgraph, a fan-out and fan-in, an interrupt and its resume - reaches the same outcome
-whether its tasks run in process, behind the full carrier both ways, behind the request and result carriers, or
-behind a task server whose reply forges the state, the reducers, the attempt and the keys.
+retry, a sleep, a goto, a subgraph, a fan-out and fan-in, an interrupt, its resume and two deferrals - reaches the
+same outcome whether its tasks run in process, behind the full carrier both ways, behind the request and result
+carriers, or behind a task server whose reply forges the state, the reducers, the attempt, the deferrals and the
+keys.
 */
 package fixtures
 
@@ -89,6 +90,7 @@ func (h *wireHost) ExecuteTask(ctx context.Context, taskURL string, f *workflow.
 		wire["state"] = json.RawMessage(`{"route":"c","count":1000,"forged":true}`)
 		wire["reducers"] = json.RawMessage(`{"count":"replace","log":"replace"}`)
 		wire["attempt"] = json.RawMessage(`99`)
+		wire["deferrals"] = json.RawMessage(`99`)
 		wire["flowKey"] = json.RawMessage(`"forged"`)
 		wire["stepKey"] = json.RawMessage(`"forged"`)
 		wire["inBranch"] = json.RawMessage(`true`)
@@ -178,6 +180,13 @@ func registerCarrierWire(mux *hosts.Mux) {
 		if yield || err != nil {
 			return err
 		}
+		// Twice later, keeping the answer; the count is the engine's, whatever a reply says.
+		if f.Deferrals() < 2 {
+			f.Set("log", []any{"defer"})
+			f.Defer(time.Millisecond, 1, time.Millisecond, 0)
+			return nil
+		}
+		f.SetInt("deferrals", f.Deferrals())
 		f.SetString("answer", out.Answer)
 		return nil
 	})
@@ -224,7 +233,8 @@ func TestCarrierWireFlow(t *testing.T) {
 		return
 	}
 	// The reference outcome is the one every wire mode must reproduce; check it is the workflow's, not a degenerate one.
-	assert.Equal([]any{"start", "retry", "retry", "b", 1.0, 2.0, 3.0, "join"}, want["log"])
+	assert.Equal([]any{"start", "retry", "retry", "b", 1.0, 2.0, 3.0, "join", "defer", "defer"}, want["log"])
+	assert.Equal(2.0, want["deferrals"])
 	assert.Equal(7.0, want["count"])
 	assert.Equal(42.0, want["fromChild"])
 	assert.Equal("yes", want["answer"])

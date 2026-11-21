@@ -160,6 +160,7 @@ stop signal, a parent's revive - so each post-commit action needs a backstop, na
 | Terminate (`terminateSubtree`) | any open tree | the tree's step rows, then its flow rows, then steps again | flows `status NOT IN (terminal)` all zero: already closed, no-op; new children: roll back and re-run | stop signals (the latch board polls) | `FaultTerminateCommitLost`, `TestLostCommit_Terminate` |
 | Fork (`forkFrom`) | a closed source | the source root | the source gone or marked: 404 / 409 | the leaf's doorbell (the piston); a retried Fork is a second fork | `FaultForkCommitLost`, `TestLostCommit_Fork` |
 | Retry rewind (`retry`) | step `running`, this `lease_seq` | the step row | `status='running' AND lease_seq=?`: fenced | none | none yet |
+| Defer rewind (`deferStep`, one statement) | step `running`, this `lease_seq` | the step row | `status='running' AND lease_seq=?`: fenced | none | none yet |
 | Interrupt (`handleInterrupt`) | leaf `running`, this `lease_seq` | the chain's step rows | the leaf must move to `interrupted` under its generation: roll back | stop signal | none yet |
 | Cancel's watermark (`cancel`) | an open tree | the tree's flow rows | `cancel_watermark=0`: already cancelled, re-apply the mark | the step marks, in chunks | none yet |
 | Recovery reset (`recoverStep`) | step `running` (contention) or `completed` (a transition that did not commit) | the step row | `status=<from> AND parked=0 AND lease_seq=?`: no-op | re-poll | none yet |

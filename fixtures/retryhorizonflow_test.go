@@ -57,8 +57,8 @@ func TestRetryHorizonflow(t *testing.T) {
 			return nil
 		}
 		horizon := time.Duration(f.GetInt("giveUpMs")) * time.Millisecond
-		if f.Retry(100*time.Millisecond, 2.0, 400*time.Millisecond, horizon) {
-			return nil // task returns nil while a further attempt is still within the horizon
+		if yield, err := f.Retry(100*time.Millisecond, 2.0, 400*time.Millisecond, horizon); yield || err != nil {
+			return err // task returns nil while a further attempt is still within the horizon
 		}
 		return errors.New("flaky exhausted its retry horizon")
 	})

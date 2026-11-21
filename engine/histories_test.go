@@ -301,8 +301,12 @@ func (r *hRunner) handler(task string) func(ctx context.Context, f *workflow.Flo
 		case hSleep:
 			f.Sleep(hSleepFor)
 		case hRetry:
-			if !f.Retry(0, 1, 0, 0) {
-				r.report("%s: execution %s could not retry", task, tok)
+			yield, err := f.Retry(0, 1, 0, 0)
+			if workflow.IsCancelled(err) {
+				return err // its flow was cancelled before this run's claim
+			}
+			if !yield || err != nil {
+				r.report("%s: execution %s could not retry: %v", task, tok, err)
 			}
 		case hInterrupt:
 			yield, err := f.Interrupt(map[string]any{"ask": tok}, nil)

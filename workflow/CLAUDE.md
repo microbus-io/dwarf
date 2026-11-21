@@ -52,7 +52,7 @@ a task cannot reset it to `false`, `0` or nil; a host's generated wrappers write
 writer diff against a snapshot: a diff drops a branch's contribution that happens to equal the accumulated value
 (`total` 5 under `add`, contribution 5).
 
-**A step's runs compose:** on `flow.Retry()`, a resumed `Interrupt` or a `Subgraph` re-entry, the re-dispatched
+**A step's runs compose:** on `flow.Retry()`, `flow.Defer()`, a resumed `Interrupt` or a `Subgraph` re-entry, the re-dispatched
 carrier's view is `state` with the earlier runs' `changes` folded in, and its `changes` are seeded with them, so
 the run's writes compose onto theirs and the carrier returns the step's WHOLE delta. The engine persists that
 delta as it is. **Never fold the earlier runs' changes onto the carrier's returned changes again**: that counts
@@ -502,14 +502,17 @@ in another language reads the same files.
 
 Tasks signal the engine via control methods on the `Flow` carrier (distinct from the operations above):
 
-- **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) bool`** - re-execute this task with
-  exponential backoff: `true` (task should return `nil`) while the retry is within its bound, else `false` (task
-  should return its error). The check is made client-side in `Retry`; the engine only consumes the backoff shape.
-  `Retry` refuses a negative delay or cap and a negative, NaN or infinite multiplier; a remote host's carrier is not
+- **`flow.Retry(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) (yield bool, err error)`** - re-execute
+  this task with exponential backoff: `yield` true (task returns `nil`) while the retry is within its bound, else
+  `yield` false and a nil `err` (task returns its own error). It has `Interrupt`'s and `Subgraph`'s shape on purpose, so
+  every signal that hands control back reads `if yield, err := ...; yield || err != nil { return err }`. The check is
+  made client-side in `Retry`; the engine only consumes the backoff shape. `Retry` refuses a negative delay or cap
+  and a negative, NaN or infinite multiplier with a 400 naming the argument, never a bare `false`: a `false` sends the
+  task to return its downstream's error, hiding the bug in its arguments. A remote host's carrier is not
   bound by that, so the engine fails a step whose retry delay comes out negative
   (`TestRetry_NegativeDelayFailsTheStep`), and `backoffDelay` saturates at the largest `Duration`.
   - **`giveUpAfter` bounds the TOTAL BACKOFF - the delays `Retry` itself asks for - and nothing else. This is a
-    design decision; do not move it onto the clock.** `Retry` returns `false` once the delays of attempts
+    design decision; do not move it onto the clock.** `Retry` stops yielding once the delays of attempts
     `0..Attempt()`, the next included, would sum past `giveUpAfter`, computed from the call's own arguments.
     - *Not the clock* (time since `StepCreatedAt`). The engine cannot promise when an attempt runs: a step can
       wait behind higher-priority bands, a loaded fleet or an absent worker, and that time, the attempts' run time
@@ -556,6 +559,25 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
   highest `flow_id`), matching `completeSurgraphFlow`/wedge/`Continue`, so even a stray dangling child never renders. `flow.Retry` carries no condition - the task writes the retryable condition explicitly in the surrounding `if`
   (retry-on-any-error is usually wrong). To retry only on a timeout, gate on
   `errors.StatusCode(err) == http.StatusRequestTimeout`.
+- **`flow.Defer(initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter) (yield bool, err error)`** - run this
+  step again later, as it stands. `Retry`'s arguments, backoff and client-side bound, counted by `Deferrals()` instead of `Attempt()`
+  (`Flow.backoff` is the one shared body). Where `Retry` starts the step over, `Defer` keeps what it resolved -
+  resume data, a subgraph's result and child - and `Attempt()`; both keep the run's writes. **It is the host's wait
+  for an absent worker**, so do not point host guidance back at `Retry`, and do not merge the two counters: a
+  Retry rewind resets `deferrals`, and so does every write that resolves a park (Resume's leaf, the subgraph
+  revive, the two subgraph-error deliveries), so a task's own retries and an outage before the step got its answer
+  spend none of a host's horizon, where a count that mixes them gives a task that has retried itself many times no
+  wait at all. The task's own Defers do share the count with a host's waits: telling them apart needs the carrier to
+  say whose Defer it was, a host signal of its own. Not "sleep": `Sleep` delays the next step. On the wire it reuses the backoff fields under its own `defer` flag, and `deferrals` rides the request.
+  Pinned by `TestFlow_Defer`, the `defer` golden files and `fixtures/deferflow_test.go`.
+- **A cancelled flow cannot back off: `Retry` and `Defer` return its cancellation and arm nothing.** The engine sets
+  it on the carrier (`RawFlow.SetCancellation`, the request's `cancelledError`, an error object as `subgraphError`
+  is) for the one marked step it still runs, the subgraph caller exempt at the claim. A `Defer` keeps the child's
+  result and so the exemption, so without this a caller that defers would run past the Cancel at every claim. The
+  error is handed out as a copy, as `Subgraph`'s is. A remote reply that arms one anyway is the engine's to refuse
+  (`engine/CLAUDE.md`, "A Defer re-pends the step as it stands"). Pinned by `TestFlow_RetryAndDeferReturnTheCancellation`, the
+  `cancelled` golden files and `deferflow_test.go`'s `a_cancelled_caller_stops_deferring` (both a task that returns
+  the cancellation and one that ignores it; each fails with the carrier left unset).
 - **No jitter on retry backoff:** the worker pool already throttles per-replica concurrency, so simultaneous retries
   queue in the pool rather than overwhelm downstream. Jitter would add latency for no throughput benefit.
 - **`flow.Sleep(duration)`** - delay the *next* step's execution by setting its `not_before`. There is no timer:
@@ -571,7 +593,7 @@ Tasks signal the engine via control methods on the `Flow` carrier (distinct from
 
 **Single-park guard.** A step parks at most once - interrupt XOR subgraph, never both and never the other kind on
 re-entry. `processStep` enforces this after the task returns: a competing-signals check fails the step if more than
-one control signal is set in one dispatch, and a second check fails the step when the returned flow arms a park while
+one control signal (`Goto`, `Retry`, `Defer`, `Interrupt`, `Subgraph`) is set in one dispatch, and a second check fails the step when the returned flow arms a park while
 the step row's materialized `interrupt_done`/`subgraph_done` shows the *other* kind already resolved. The `workflow`
 package's parkers already reject a conflicting second park at the call site; this guard is the trust boundary for an
 untrusted returned flow.

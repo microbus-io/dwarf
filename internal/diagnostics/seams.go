@@ -185,6 +185,7 @@ const (
 	CheckpointBeforeCancelRoute       = "beforeCancelRoute"       // after the completion write of a step Cancel marked while it ran, before it is routed to its handler or failed as cancelled
 	CheckpointBeforeTransitionTx      = "beforeTransitionTx"      // bare and by (shard, step id): after the step is marked completed, before whichever transaction transitions it
 	CheckpointBeforeRetryRewind       = "beforeRetryRewind"       // bare and by (shard, step id): before the flow.Retry rewind transaction
+	CheckpointBeforeDeferRewind       = "beforeDeferRewind"       // before the flow.Defer rewind
 	CheckpointBeforeInterruptTx       = "beforeInterruptTx"       // bare and by (shard, step id): the interrupt path, after it read the surgraph chain and before its transaction
 	CheckpointBeforeCompleteFlowWrite = "beforeCompleteFlowWrite" // flow completion, just before its transaction's status-gate write
 	CheckpointBeforeRecoveryReset     = "beforeRecoveryReset"     // the post-execution recovery path, just before its fenced step-reset transaction

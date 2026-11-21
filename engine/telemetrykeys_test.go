@@ -153,8 +153,10 @@ func TestTelemetry_CarriesNoKeyToken(t *testing.T) {
 	})
 	mux.HandleTask("tk/branch", func(ctx context.Context, f *workflow.Flow) error {
 		record(f)
-		if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, time.Minute) {
-			return nil
+		if f.Attempt() == 0 {
+			if yield, err := f.Retry(time.Millisecond, 1, time.Millisecond, time.Minute); yield || err != nil {
+				return err
+			}
 		}
 		return nil
 	})

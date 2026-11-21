@@ -117,8 +117,10 @@ func TestArrayrefsflow(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				if f.Attempt() == 0 && f.Retry(time.Millisecond, 1, time.Millisecond, 0) {
-					return nil
+				if f.Attempt() == 0 {
+					if yield, err := f.Retry(time.Millisecond, 1, time.Millisecond, 0); yield || err != nil {
+						return err
+					}
 				}
 				return addMessage(f, history, appendMode)
 			})

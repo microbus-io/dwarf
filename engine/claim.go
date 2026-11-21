@@ -34,7 +34,8 @@ type claimRow struct {
 	stepDepth                                  int
 	taskName, stepToken                        string
 	stateJSON, priorChangesJSON, stateRefsJSON []byte
-	attempt, lineageID, flowID, timeBudgetMs   int
+	attempt, deferrals                         int
+	lineageID, flowID, timeBudgetMs            int
 	interruptDone                              bool
 	resumeDataJSON                             []byte
 	subgraphDone                               bool
@@ -61,7 +62,7 @@ type claimRow struct {
 }
 
 const (
-	claimStepCols = 25
+	claimStepCols = 26
 	claimFlowCols = 14
 )
 
@@ -70,7 +71,7 @@ const (
 func (r *claimRow) destinations() (step, flow []any) {
 	r.dest = [claimStepCols + claimFlowCols]any{
 		&r.stepDepth, &r.taskName, &r.stepToken, &r.stateJSON, &r.priorChangesJSON, &r.stateRefsJSON, &r.attempt,
-		&r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
+		&r.deferrals, &r.lineageID, &r.flowID, &r.timeBudgetMs, &r.interruptDone, &r.resumeDataJSON, &r.subgraphDone,
 		&r.subgraphResultJSON, &r.subgraphErrorJSON, &r.stepCreatedAt, &r.leaseSeq, &r.fanOutOrdinal,
 		&r.stepCancelling, &r.replaying, &r.replayGoto, &r.replaySleepLeftMs, &r.replayOnError, &r.payloadDeferrals, &r.createdHour,
 		&r.flowToken, &r.flowStatus, &r.workflowURL, &r.baggageJSON, &r.traceParent, &r.flowCreatedAt,
@@ -187,17 +188,17 @@ func claimEligible(alias string) string {
 }
 
 // claimSet is the claim's SET clause: take the lease, bump its generation to nextSeq, and stamp started_at unless
-// the dispatch continues an earlier one (a retry, a resumed park, a replay). alias qualifies the step table's columns
+// the dispatch continues an earlier one (a retry, a deferral, a resumed park, a replay). alias qualifies the step table's columns
 // ("s." or ""), since an assignment's right-hand side may need it. Binds: the running status, the lease margin in
 // ms, the engine ID.
 func claimSet(alias, nextSeq string) string {
 	return "status=?, lease_expires=DATE_ADD_MILLIS(NOW_UTC(), " + alias + "time_budget_ms + ?), lease_seq=" + nextSeq + ", engine_id=?, updated_at=NOW_UTC()," +
-		" started_at=CASE WHEN " + alias + "attempt>0 OR " + alias + "subgraph_done=1 OR " + alias + "interrupt_done=1 OR " + alias + "advancing=1 THEN " + alias + "started_at ELSE NOW_UTC() END"
+		" started_at=CASE WHEN " + alias + "attempt>0 OR " + alias + "deferrals>0 OR " + alias + "subgraph_done=1 OR " + alias + "interrupt_done=1 OR " + alias + "advancing=1 THEN " + alias + "started_at ELSE NOW_UTC() END"
 }
 
 // claimReadCols is the step columns the claim reads back, in the order processStep scans them.
 var claimReadCols = []string{"step_depth", "task_name", "step_token", "state", "changes", "state_refs", "attempt",
-	"lineage_id", "flow_id", "time_budget_ms", "interrupt_done", "resume_data", "subgraph_done", "subgraph_result",
+	"deferrals", "lineage_id", "flow_id", "time_budget_ms", "interrupt_done", "resume_data", "subgraph_done", "subgraph_result",
 	"subgraph_error", "created_at", "lease_seq", "fan_out_ordinal", "cancelling", "advancing", "advance_goto",
 	"advance_sleep_until", "advance_on_error", "payload_deferrals", "flow_created_hour"}
 

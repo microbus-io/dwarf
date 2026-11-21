@@ -371,7 +371,7 @@ func (e *Engine) completeSurgraphFlow(ctx context.Context, shardNum int, surgrap
 		// longer running/parked matches no row — and the rows-affected gate keeps Enqueue off a no-op.
 		// parkOwnerGuard confines it to the park this child owns.
 		res, err := tx.ExecContext(ctx,
-			"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
+			"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, deferrals=0, subgraph_done=1, subgraph_result=?, subgraph_result_bytes=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
 			workflow.StatusPending, parkedNone, resultJSON, len(resultJSON), surgraphStepID, parkedSubgraph, childFlowID,
 		)
 		if err != nil {
@@ -498,7 +498,7 @@ func (e *Engine) deliverFlowFailureToParent(ctx context.Context, tx sequel.Execu
 		return false, errors.Trace(err)
 	}
 	res, err := tx.ExecContext(ctx,
-		"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
+		"UPDATE dwarf_steps SET status=?, parked=?, parked_child_flow_id=0, deferrals=0, subgraph_done=1, subgraph_error=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusRunning+"' AND parked=?"+parkOwnerGuard,
 		workflow.StatusPending, parkedNone, encoded, parentStepID, parkedSubgraph, childFlowID,
 	)
 	if err != nil {

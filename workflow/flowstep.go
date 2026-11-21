@@ -34,6 +34,9 @@ type FlowStep struct {
 	TaskName string `json:"taskName,omitzero"`
 	// Attempt is the step's zero-based retry counter, as the task reads it with Flow.Attempt.
 	Attempt int `json:"attempt,omitzero"`
+	// Deferrals counts the step's deferrals since it last started over or got its answer, as the task reads it with
+	// Flow.Deferrals.
+	Deferrals int `json:"deferrals,omitzero"`
 	// EngineID identifies the engine replica that handled this step: the replica that executed
 	// its most recent attempt once dispatched, or created it before it ran. It is a random
 	// per-process value that changes when a replica restarts, so it is a correlation and

@@ -239,7 +239,7 @@ const liveOnlyColumn = "archive_attempt_at"
 // table.
 const archivedStepColumns = "step_id, flow_id, step_depth, step_token, task_name, task_url, state, state_bytes, changes," +
 	" changes_bytes, interrupt_payload, interrupt_payload_bytes, state_refs, state_reduced, payload_deferrals," +
-	" status, error, time_budget_ms, attempt, lineage_id, cohort_size, cohort_arrivals, cohort_failures," +
+	" status, error, time_budget_ms, attempt, deferrals, lineage_id, cohort_size, cohort_arrivals, cohort_failures," +
 	" cohort_cancellations, fan_out_ordinal, predecessor_id, successor_id, priority, fairness_key," +
 	" fairness_weight, interrupt_done, resume_data, resume_data_bytes, subgraph_done, subgraph_result," +
 	" subgraph_result_bytes, subgraph_error, parked, parked_child_flow_id, cancelling, advancing," +

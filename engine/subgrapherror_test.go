@@ -62,8 +62,8 @@ func TestSubgraphError_ReachesTheCallerWhole(t *testing.T) {
 			if err != nil && f.Attempt() == 0 {
 				got = err
 				// The retry's re-run child succeeds, and the caller must see no error from the cleared column.
-				if f.Retry(time.Millisecond, 1, 0, 0) {
-					return nil
+				if yield, err := f.Retry(time.Millisecond, 1, 0, 0); yield || err != nil {
+					return err
 				}
 			}
 			return err

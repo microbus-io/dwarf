@@ -72,6 +72,7 @@ type Flow struct {
 	// Control
 	gotoNext         string
 	retry            bool
+	deferred         bool
 	sleepDuration    time.Duration
 	interrupt        bool
 	interruptPayload State
@@ -91,8 +92,13 @@ type Flow struct {
 	subgraphResult State
 	subgraphError  *errors.TracedError
 
-	// Backoff retry
+	// cancelledErr is the flow's cancellation, set by the orchestrator when it runs a step of a cancelled flow;
+	// Retry and Defer return it instead of arming.
+	cancelledErr *errors.TracedError
+
+	// Backoff of a Retry or a Defer. attempt counts the step's Retries, deferrals its Defers since the last Retry.
 	attempt                int
+	deferrals              int
 	backoffInitialDelay    time.Duration
 	backoffDelayMultiplier float64
 	backoffMaxDelay        time.Duration
@@ -218,12 +224,17 @@ func (f *Flow) StepCreatedAt() time.Time {
 // Attempt returns the zero-based retry attempt counter for the current step: 0 on the first
 // execution, incremented by the orchestrator on each Retry. A task can gate on it to bound retries
 // by count (e.g. "if flow.Attempt() < 3") instead of, or alongside, Retry's time-based horizon.
-//
-// It also counts the retries a host armed without reaching the task (an absent worker, a refused or
-// dropped connection), so a count bounds the task's own runs only loosely. Bound retries of a
-// transient failure by time (Retry's giveUpAfter) rather than by count.
+// A Defer leaves it as it is.
 func (f *Flow) Attempt() int {
 	return f.attempt
+}
+
+// Deferrals returns how many times the current step was deferred since it last started over or got its answer: 0 on
+// its first execution, after a Retry, after a Resume of its Interrupt and when its Subgraph returns, incremented by
+// the orchestrator on each Defer. A host that cannot reach the task defers too, so the count includes deferrals the
+// task never saw.
+func (f *Flow) Deferrals() int {
+	return f.deferrals
 }
 
 // FlowKey returns the external key of the flow this task is executing in, in the form
@@ -237,7 +248,7 @@ func (f *Flow) FlowKey() string {
 // "{shard}-{hour}-{flowID}-{stepID}-{token}". Useful for correlating logs/traces or calling back into the engine
 // (e.g. Step) for the task's own step. Empty when called outside a dispatched task.
 //
-// The key is the same on every execution of the step - a Retry, or a re-run after a crash or an expired claim -
+// The key is the same on every execution of the step - a Retry, a Defer, or a re-run after a crash or an expired claim -
 // so it is the idempotency key for a side effect the step makes: pass it to a downstream that deduplicates by it,
 // or record it in the same transaction as the effect. A new step (a loop through Goto), a Fork, a Continue and a
 // new flow each have a new key, and their effects happen again. See
@@ -493,10 +504,12 @@ starts a new child.
 	if yield {
 	    return nil // parked, child running
 	}
-	if err != nil {
-	    if errors.StatusCode(err) == http.StatusServiceUnavailable && flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour) {
-	        return nil
+	if errors.StatusCode(err) == http.StatusServiceUnavailable {
+	    if yield, retryErr := flow.Retry(time.Second, 2.0, 30*time.Second, time.Hour); yield || retryErr != nil {
+	        return retryErr // nil: spawn the child again later
 	    }
+	}
+	if err != nil {
 	    return err
 	}
 	// read fields from out
@@ -542,55 +555,109 @@ func (f *Flow) Subgraph(workflowURL string, in any, out any) (yield bool, err er
 }
 
 /*
-Retry requests the orchestrator to re-execute this task with exponential backoff. giveUpAfter bounds the
-total backoff: Retry returns true (the caller should return nil) while the backoff delays of every attempt so
-far, the next one included, add up to at most giveUpAfter, and false (the caller should return its error) once
-they would exceed it. Pass giveUpAfter <= 0 for unlimited retry.
+Retry asks the orchestrator to run this task again with exponential backoff, starting the step over: a resolved
+Interrupt asks again and a returned Subgraph runs a new child. To come back later and keep what the step resolved,
+use Defer.
 
-The bound counts only the delays Retry itself asks for, computed from this call's arguments and Attempt, never
-the clock: the engine cannot promise when an attempt runs, and time a step spends queued behind higher-priority
-work, or running, must not use up its retries. A Sleep is the task's own wait, whichever is called first, and
-is not counted either; a task that wants its sleeps bounded keeps its own budget, for example in a state field,
-and gates Retry on it. With a zero initialDelay the total stays zero and never reaches the bound, so bound
-immediate retries by Attempt.
-
-The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero
-initialDelay for immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the
-delay constant (e.g. honoring a provider's Retry-After carried in initialDelay), pass delayMultiplier
-1.0. Sleep, if also set, is added on top as a floor. initialDelay and maxIntervalDelay must not be negative,
-and delayMultiplier must be a finite number that is not negative; otherwise Retry returns false.
-
-Retry carries no condition of its own - it is the single retry primitive, called inside whatever
-error branch the task decides is retryable. Keeping the condition explicit at the call site avoids
-the "retry on every error" trap (most errors - validation, bad input, business rejections - should
-not be retried). Gate it on whatever your task considers transient:
+Retry carries no condition of its own - it is the single retry primitive, called inside whatever error branch the
+task decides is retryable. Keeping the condition explicit at the call site avoids the "retry on every error" trap
+(most errors - validation, bad input, business rejections - should not be retried):
 
 	result, err := callExternalAPI(ctx)
-	if err != nil {
-	    if isTransient(err) && flow.Retry(1*time.Second, 2.0, 30*time.Second, 1*time.Hour) {
-	        return nil // transient failure: retry scheduled, don't report error
+	if isTransient(err) {
+	    if yield, retryErr := flow.Retry(1*time.Second, 2.0, 30*time.Second, 1*time.Hour); yield || retryErr != nil {
+	        return retryErr // nil: the retry is scheduled
 	    }
-	    return err // non-retryable, or horizon exceeded
+	}
+	if err != nil {
+	    return err // not transient, or past the bound
 	}
 	flow.Set("result", result)
 
-To bound by count instead of (or in addition to) time, gate on Attempt: pass giveUpAfter 0 and check
-flow.Attempt() at the call site.
+Retry returns yield=true while the retry is within its bound; the task returns nil and runs again after the delay.
+It returns yield=false and a nil err once the bound is reached; the task returns its own error. It arms nothing and
+returns an error in two cases, and the task returns that error:
+  - The step runs after its flow was cancelled: the cancellation, which IsCancelled recognizes, so the step's onError
+    handler receives it or the step ends cancelled.
+  - An argument is invalid, with status 400: initialDelay and maxIntervalDelay must not be negative, and
+    delayMultiplier must be a finite number that is not negative.
+
+giveUpAfter bounds the total backoff: yield is true while the backoff delays of every attempt so far, the next one
+included, add up to at most giveUpAfter. Pass giveUpAfter <= 0 for unlimited retry. The bound counts only the
+delays Retry itself asks for, computed from this call's arguments and Attempt, never the clock: the engine cannot
+promise when an attempt runs, and time a step spends queued behind higher-priority work, or running, must not use
+up its retries. A Sleep is the task's own wait, whichever is called first, and is not counted either; a task that
+wants its sleeps bounded keeps its own budget, for example in a state field, and gates Retry on it. With a zero
+initialDelay the total stays zero and never reaches the bound, so bound immediate retries by Attempt: pass
+giveUpAfter 0 and check flow.Attempt() at the call site.
+
+The delay before attempt N is min(initialDelay * delayMultiplier^N, maxIntervalDelay); pass a zero initialDelay for
+immediate retries, and a zero maxIntervalDelay for no per-interval cap. To hold the delay constant (e.g. honoring a
+provider's Retry-After carried in initialDelay), pass delayMultiplier 1.0. Sleep, if also set, is added on top as a
+floor.
 */
-func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) bool {
-	if initialDelay < 0 || maxIntervalDelay < 0 || !(delayMultiplier >= 0) || math.IsInf(delayMultiplier, 1) {
-		f.retry = false
-		return false
+func (f *Flow) Retry(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) (yield bool, err error) {
+	yield, err = f.backoff("Retry", initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter, f.attempt)
+	f.retry = yield
+	return yield, err
+}
+
+/*
+Defer asks the orchestrator to run this step again later, as it stands. Where Retry starts the step over, Defer
+keeps what it resolved: the next run's Interrupt returns the same resume data, its Subgraph the same result of the
+same child, and Attempt stays as it was. Either way the run's writes are kept and the next run adds to them.
+
+Defer is for a step that cannot go on yet although nothing about it failed: a dependency rate-limits it after a
+human has answered its Interrupt, say, or a host cannot reach the worker that runs the task.
+
+	var approval Approval
+	if yield, err := flow.Interrupt(request, &approval); yield || err != nil {
+	    return err
 	}
-	if giveUpAfter > 0 && !backoffFits(initialDelay, delayMultiplier, maxIntervalDelay, f.attempt, giveUpAfter) {
-		f.retry = false
-		return false
+	err := charge(ctx, approval)
+	if isRateLimited(err) {
+	    if yield, deferErr := flow.Defer(1*time.Second, 2.0, 30*time.Second, 1*time.Hour); yield || deferErr != nil {
+	        return deferErr // nil: later, with the same approval; a Retry would ask for it again
+	    }
 	}
-	f.retry = true
+	return err
+
+Its results, arguments, backoff and bound are Retry's, the bound counted by Deferrals instead of Attempt: yield is
+true while the backoff delays of every deferral so far, the next one included, add up to at most giveUpAfter. A
+Retry resets Deferrals, and so does the step resolving an Interrupt or a Subgraph, so the bound covers the deferrals
+since the step last started over or got its answer. A host waiting for an absent worker defers the step too, and
+its waits and the task's own deferrals share the one count.
+*/
+func (f *Flow) Defer(initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration) (yield bool, err error) {
+	yield, err = f.backoff("Defer", initialDelay, delayMultiplier, maxIntervalDelay, giveUpAfter, f.deferrals)
+	f.deferred = yield
+	return yield, err
+}
+
+// backoff records the backoff of a Retry or a Defer, named by signal, whose n earlier runs have backed off, and
+// reports whether it is within giveUpAfter. A cancelled flow or an invalid argument records nothing and returns the
+// error.
+func (f *Flow) backoff(signal string, initialDelay time.Duration, delayMultiplier float64, maxIntervalDelay time.Duration, giveUpAfter time.Duration, n int) (yield bool, err error) {
+	if f.cancelledErr != nil {
+		// A copy, so a task that traces or annotates the error leaves the carrier's as delivered.
+		delivered := *f.cancelledErr
+		return false, &delivered
+	}
+	switch {
+	case initialDelay < 0:
+		return false, errors.New("%s: initialDelay %v is negative", signal, initialDelay, http.StatusBadRequest)
+	case maxIntervalDelay < 0:
+		return false, errors.New("%s: maxIntervalDelay %v is negative", signal, maxIntervalDelay, http.StatusBadRequest)
+	case !(delayMultiplier >= 0) || math.IsInf(delayMultiplier, 1):
+		return false, errors.New("%s: delayMultiplier %v is not a finite number that is not negative", signal, delayMultiplier, http.StatusBadRequest)
+	}
+	if giveUpAfter > 0 && !backoffFits(initialDelay, delayMultiplier, maxIntervalDelay, n, giveUpAfter) {
+		return false, nil
+	}
 	f.backoffInitialDelay = initialDelay
 	f.backoffDelayMultiplier = delayMultiplier
 	f.backoffMaxDelay = maxIntervalDelay
-	return true
+	return true, nil
 }
 
 // Sleep tells the orchestrator to wait for the given duration before the next execution. A non-positive

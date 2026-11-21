@@ -555,8 +555,10 @@ func TestFaultSite_RetryRewindErr(t *testing.T) {
 	mux.HandleGraph("ftbretry/g", g)
 	var calls atomic.Int32
 	mux.HandleTask("ftbretry/work", func(ctx context.Context, f *workflow.Flow) error {
-		if calls.Add(1) == 1 && f.Retry(0, 1, 0, 0) {
-			return nil
+		if calls.Add(1) == 1 {
+			if yield, err := f.Retry(0, 1, 0, 0); yield || err != nil {
+				return err
+			}
 		}
 		return nil
 	})

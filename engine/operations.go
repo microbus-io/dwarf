@@ -1332,7 +1332,7 @@ func (e *Engine) resume(ctx context.Context, flowKey string, data any) error {
 		// root interrupted, and both Resumes would pass it. The status alone does not name the interrupt: after
 		// another Resume, a flow.Retry re-runs the same row and can interrupt it again, and an unfenced flip would
 		// hand this Resume's payload to that later prompt. So the flip is fenced on the generation it selected.
-		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, resume_data_bytes=?, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"' AND lease_seq=?",
+		leafRes, err := tx.ExecContext(ctx, "UPDATE dwarf_steps SET status=?, resume_data=?, resume_data_bytes=?, deferrals=0, not_before=NOW_UTC(), lease_expires=NOW_UTC(), updated_at=NOW_UTC() WHERE step_id=? AND status='"+workflow.StatusInterrupted+"' AND lease_seq=?",
 			workflow.StatusPending, resumeDataJSON, len(resumeDataJSON), leafStepID, leafLeaseSeq)
 		if err != nil {
 			return errors.Trace(err)
