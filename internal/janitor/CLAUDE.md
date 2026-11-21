@@ -161,6 +161,16 @@ ran 10,335 / 10,214 / 9,680 steps/s, with whole pages logged per step 1.83 / 1.2
 was set by the WAL flush cycle in every arm, so neither trade moved it far, and 1 min is best on both CPU and
 throughput.
 
+**Do not add jobs, enlarge the batch, hold a turn across batches or pace dispatch to make the archive keep up with
+large payloads.** There the archive's pace is the WAL its bytes cost: a batch's time is its copy and delete, not its
+turn (0-16 ms) or its fixed statements, and each archived step logged ~37 KB more on ~47 KB of dispatch (64 KB JSON,
+WAL per step against the share archived). Measured on one 32 vCPU PG16 shard, 64 KB JSON: four jobs of each kind
+instead of two cost saturated dispatch 12% and at 85% of the saturated rate archived the same 86%, each batch twice as
+long; at `max_wal_size` 64 GB the two jobs kept up at ~2,300 steps/s and fell behind at 90% of saturated (3,273),
+the disk at its WAL ceiling. A shard past the rate its archive sustains is sized from that rate, and the operator
+reads `dwarf_archive_lag_seconds` (user: no pacing loop). Spacing checkpoints well past the grace is what cut the cost
+per archived step: at 20 GB they came every 35-45 s and most of a step's WAL was page images.
+
 - **A position, and nothing behind it.** The job scans from its position, the last root a round was done with, and
   moves the position past every root the round considered, whatever became of it: moved, held, failed, or not its own.
   A root behind the position - one it failed on, one held, one that committed late with an older close - is left to a
