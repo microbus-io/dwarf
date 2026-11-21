@@ -336,6 +336,9 @@ or [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/) tha
 | `archjobs-step.sh` | `archrate-step.sh`'s saturated and 85% arms again with a build running more archiving jobs, against those arms | - |
 | `ckpt-step.sh` | `archrate-step.sh`'s 85% arm on an instance at `max_wal_size` 64 GB: whether checkpoints spaced past the archive's grace cut the page images an archived step logs | - |
 | `ckpt2-step.sh` | `ckpt-step.sh`'s arms again on its rig with the disk grown to 2 TB and `max_wal_size` raised with it | - |
+| `warm-step.sh` | nothing: a new instance's WAL files created by one saturated 64 KB arm, before the first arm that is read | - |
+| `arch95-step.sh` | whether archiving keeps up with a 64 KB shard at 95% of its saturated rate (90% if not) | - |
+| `tick-step.sh` | the recovery passes at 95% of a saturated 0 B shard: whether the minute's passes dip dispatch, and what a 5-minute tick's lease scan costs a pass | - |
 | `va-step.sh` | the archive under load: one day to 100M step rows, short days rolling over and dropping, archived reads beside load, 100% and 95% of the saturated rate, lz4 at 1 MB | Sustained Load; Database Volume |
 | `vrows-step.sh`, `vbytes-step.sh` | a saturated database as `dwarf_steps` grows past 200M rows, and past 500 GB, with nothing deleted | - |
 | `h-step.sh` | the sustainable rate, walking down from the saturated rate (below) | - |

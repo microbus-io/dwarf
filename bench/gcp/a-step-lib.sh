@@ -46,8 +46,9 @@ one_run() {
   x=$(vmssh "$ADMIN" "grep -E '^[0-9]+ +[0-9]+ ' out/$tag.log | awk '{s+=\$2; n++} END {if (n) printf \"%.0f\", s/n}'; grep -iE 'invalid|error|panic' out/$tag.log | grep -v -E '^conc +flows' | head -2")
   log "run $tag done: ${x:-?} steps/s (window mean of 10 s samples)"
   # Per-statement totals for the run, max included (the bench's own sampler records means only): the lease-recovery
-  # sweep's SELECT/UPDATE, the refill fetch, the flow-row writes. Read before the database is dropped.
-  adm "$(dsn "${IPS[0]}" "$db")" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-$tag.txt" 2>&1
+  # sweep's SELECT/UPDATE, the refill fetch, the flow-row writes. Columns: calls, mean ms, max ms, buffers a call (hit
+  # plus read), the statement. Read before the database is dropped.
+  adm "$(dsn "${IPS[0]}" "$db")" "SELECT calls, round(mean_exec_time::numeric,3), round(max_exec_time::numeric,1), round((shared_blks_hit+shared_blks_read)::numeric/greatest(calls,1)), left(replace(query, chr(10), ' '),160) FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) ORDER BY total_exec_time DESC LIMIT 40" > "$OUT/pgss-$tag.txt" 2>&1
   drop "${IPS[0]}" "$db"
   sleep 20
 }
