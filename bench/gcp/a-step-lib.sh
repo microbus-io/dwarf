@@ -9,6 +9,12 @@ archread() {
   log "  $1 archive: $(vmssh "$ADMIN" "jq -r -f archread.jq out/$1.json")"
   log "  $1 live dwarf_steps rows by minute: $(vmssh "$ADMIN" "awk 'BEGIN { m0 = -1 } \$12 == \"dwarf_steps\" { if (t0 == \"\") t0 = \$1; m = int((\$1 - t0) / 60); if (m != m0) { printf \"%d \", \$16; m0 = m } }' out/mon-$1.log.tables")"
 }
+# ckread <tag>: WAL and page images a step over the window (results[].db), and the seconds between checkpoint starts
+# over the whole arm (the .xmin monitor's checkpoint count, sampled every 5 s).
+ckread() {
+  log "  $1 WAL: $(vmssh "$ADMIN" "jq -r '.results[0] | (.stepsPerSec * .windowSec) as \$n | \"\(.db.walBytes / 1024 / \$n | floor) KB a step, \(.db.walFpi / \$n * 10 | round / 10) page images a step, flush \(.db.flushMs * 100 | round / 100) ms\"' out/$1.json")"
+  log "  $1 seconds between checkpoints: $(vmssh "$ADMIN" "awk '\$3 ~ /^[0-9]+\$/ { if (p != \"\" && \$3 > p) { if (t != \"\") printf \"%d \", \$1 - t; t = \$1 } p = \$3 }' out/mon-$1.log.xmin")"
+}
 one_run() {
   local tag=$1; shift; local db="dwarf_${tag//-/_}" start x
   authok; late

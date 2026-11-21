@@ -282,7 +282,8 @@ and Cloud SQL's private services range.
 - **`real-rig.sh`:** REAL, a day on one database: a draw check, the mix's calibration, then three 90-minute periods
   on two c4a-8 replicas with a rolling restart, verified against the database at the end.
 - **Steps:** `one_run` from `a-step-lib.sh` runs one arm on a fresh database, and `archread` logs whether the archive
-  kept up over it (`archread.jq`: the lag, flows archived against closed, the jobs' batches, the live rows by minute). `vrows-step.sh` and `vbytes-step.sh`
+  kept up over it (`archread.jq`: the lag, flows archived against closed, the jobs' batches, the live rows by minute),
+  and `ckread` the WAL and page images a step and the seconds between checkpoints. `vrows-step.sh` and `vbytes-step.sh`
   are V's two axes, on `x-rig.sh` with a 1 TB and a 2 TB disk. `*-step.sh` are the campaigns, catalogued
   below, each with its launch line, arms and pass criteria in its header.
 - **Drivers** run a whole campaign on the admin host, each with its own RTT gate, a fresh database per arm and a
@@ -329,6 +330,8 @@ or [A Day of Varied Load](https://docs.dwarf.run/performance/benchmark-day/) tha
 | `keepup-step.sh` | whether archiving keeps up with a saturated shard, and what it costs dispatch | - |
 | `archrate-step.sh` | the rate at which archiving stops keeping up with a shard at 64 KB, bracketed below saturation | - |
 | `archjobs-step.sh` | `archrate-step.sh`'s saturated and 85% arms again with a build running more archiving jobs, against those arms | - |
+| `ckpt-step.sh` | `archrate-step.sh`'s 85% arm on an instance at `max_wal_size` 64 GB: whether checkpoints spaced past the archive's grace cut the page images an archived step logs | - |
+| `ckpt2-step.sh` | `ckpt-step.sh`'s arms again on its rig with the disk grown to 2 TB and `max_wal_size` raised with it | - |
 | `va-step.sh` | the archive under load: one day to 100M step rows, short days rolling over and dropping, archived reads beside load, 100% and 95% of the saturated rate, lz4 at 1 MB | Sustained Load; Database Volume |
 | `vrows-step.sh`, `vbytes-step.sh` | a saturated database as `dwarf_steps` grows past 200M rows, and past 500 GB, with nothing deleted | - |
 | `h-step.sh` | the sustainable rate, walking down from the saturated rate (below) | - |
