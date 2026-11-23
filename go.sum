@@ -56,8 +56,8 @@ github.com/microbus-io/boolexp v1.3.0 h1:eJjj4uN+lVH3BLWXLJbaFPvYFE4SI5Y/YJRv9UY
 github.com/microbus-io/boolexp v1.3.0/go.mod h1:3hNRg2w67v0axnTy+BpgRufa7/vXucsblBMncq64lv4=
 github.com/microbus-io/copyrighter v1.4.0 h1:EucSuHMyUO1fb+0eVOAz9ORpygTfaQxz/LK4jumciJ4=
 github.com/microbus-io/copyrighter v1.4.0/go.mod h1:zk1Tt0nD2cI3NA1i6SHOCRgj7n02TZLyq6uHAMqLmXs=
-github.com/microbus-io/errors v1.0.1 h1:pujosfRSEqSJi0gcx6d+A7Mf2RZr2vQVMSQz0pG+wkM=
-github.com/microbus-io/errors v1.0.1/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
+github.com/microbus-io/errors v1.1.0 h1:YiPr0osXDU76LFtFAj/yv8q9XNLseXgDC34vdFxJ5S4=
+github.com/microbus-io/errors v1.1.0/go.mod h1:NZTmmm+wxKQ8JFCeOMWWj+oqGylYsMKmS1YXysHZASM=
 github.com/microbus-io/seamster v0.4.1 h1:ISimdKG2YM+ARfndzf8AOqaYHLyt+IJPm8755clvSTY=
 github.com/microbus-io/seamster v0.4.1/go.mod h1:IlCTdnLEOqfaFXd+ctNVC7tmn2GFQquQVcUYljbzZjw=
 github.com/microbus-io/sequel v1.20.2 h1:ENoPz6g+G7Ya/ldubgVIBeRstBmeJbOKshB1VvYalIo=

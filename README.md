@@ -5,6 +5,7 @@
 [![Go](https://img.shields.io/badge/Go-1.27.3+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Reference](https://pkg.go.dev/badge/github.com/microbus-io/dwarf)](https://pkg.go.dev/github.com/microbus-io/dwarf)
 [![Test](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml/badge.svg?branch=main&event=push)](https://github.com/microbus-io/dwarf/actions/workflows/test.yaml)
+[![Vulnerabilities](https://github.com/microbus-io/dwarf/actions/workflows/vulncheck.yaml/badge.svg?branch=main&event=push)](https://github.com/microbus-io/dwarf/actions/workflows/vulncheck.yaml)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/FAJHnGkNqJ)
 
 **Dwarf is an open source durable execution engine, written in pure Go and backed by Postgres: an alternative

@@ -7,7 +7,7 @@ tool github.com/microbus-io/copyrighter
 require (
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/microbus-io/boolexp v1.3.0
-	github.com/microbus-io/errors v1.0.1
+	github.com/microbus-io/errors v1.1.0
 	github.com/microbus-io/seamster v0.4.1
 	github.com/microbus-io/sequel v1.20.2
 	github.com/microbus-io/testarossa v0.7.4
